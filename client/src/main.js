@@ -34,6 +34,7 @@ async function loadWorldData() {
   try { data = await loadJSON('/shared/world/paris.json'); }
   catch { console.warn('paris.json absent, utilisation de paris.sample.json'); data = await loadJSON('/shared/world/paris.sample.json'); }
   try { data.buildings = (await loadJSON('/shared/world/buildings.json')).buildings; } catch { data.buildings = null; }
+  try { data.pois = await loadJSON('/shared/world/pois.json'); } catch { data.pois = null; }
   return data;
 }
 

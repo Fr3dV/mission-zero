@@ -26,11 +26,11 @@ function insert(s) {
 
 export const collision = {
   /** Boîte orientée. x,z = centre ; hw,hd = demi-largeur (X local) / demi-profondeur (Z local) ; rot = rotation Y (rad). */
-  addBox({ x, z, hw, hd, rot = 0, bottom = -Infinity, top = Infinity, tag = '' }) {
-    return insert({ kind: 'box', x, z, hw, hd, rot, cos: Math.cos(rot), sin: Math.sin(rot), bottom, top, tag });
+  addBox({ x, z, hw, hd, rot = 0, bottom = -Infinity, top = Infinity, tag = '', data = null }) {
+    return insert({ kind: 'box', x, z, hw, hd, rot, cos: Math.cos(rot), sin: Math.sin(rot), bottom, top, tag, data });
   },
-  addCircle({ x, z, r, bottom = -Infinity, top = Infinity, tag = '' }) {
-    return insert({ kind: 'circle', x, z, r, bottom, top, tag });
+  addCircle({ x, z, r, bottom = -Infinity, top = Infinity, tag = '', data = null }) {
+    return insert({ kind: 'circle', x, z, r, bottom, top, tag, data });
   },
   remove(s) {
     if (!s?.cells) return;
@@ -46,10 +46,11 @@ export const collision = {
 
   /**
    * Repousse un cercle (x,z,r) à hauteur y hors des obstacles.
-   * @returns {{x:number,z:number,hit:boolean,nx:number,nz:number,tag:string}} position corrigée + normale du dernier contact.
+   * @returns {{x:number,z:number,hit:boolean,nx:number,nz:number,tag:string,shape:object|null}} position corrigée + normale du dernier contact.
+   * `shape` = l'obstacle touché (champs x, z, tag, data) : le passer à collision.remove(shape) pour le supprimer.
    */
   resolveCircle(x, z, r, y = 0.5) {
-    let hit = false, nx = 0, nz = 0, tag = '';
+    let hit = false, nx = 0, nz = 0, tag = '', shape = null;
     for (let iter = 0; iter < 3; iter++) {
       let moved = false;
       const x0 = Math.floor((x - r) / CELL), x1 = Math.floor((x + r) / CELL);
@@ -86,12 +87,12 @@ export const collision = {
           }
           x += px; z += pz;
           const l = Math.hypot(px, pz) || 1;
-          nx = px / l; nz = pz / l; hit = true; moved = true; tag = s.tag;
+          nx = px / l; nz = pz / l; hit = true; moved = true; tag = s.tag; shape = s;
         }
       }
       if (!moved) break;
     }
-    return { x, z, hit, nx, nz, tag };
+    return { x, z, hit, nx, nz, tag, shape };
   },
   /** true si le cercle touche un obstacle. */
   test(x, z, r, y = 0.5) { return this.resolveCircle(x, z, r, y).hit; },

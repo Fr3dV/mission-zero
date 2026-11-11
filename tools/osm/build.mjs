@@ -10,6 +10,7 @@ import {
   r1, polyArea, centroid, pointInPoly, polylineLength, simplify, simplifyRing, dedupeRing, clipRect, clipHalfPlane,
   clipPolyline, selfIntersects, minAreaRect, assembleRings,
 } from './geom.mjs';
+import { enrichRoads, buildingsMeta, BUILDING_KINDS, ROOF_SHAPES } from './enrich.mjs';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
 const CACHE = join(ROOT, '.data', 'osm');
@@ -57,13 +58,28 @@ function buildRoads() {
     const def = DEFAULTS[cls] || DEFAULTS.residential;
     let lanes = parseNum(t.lanes); if (!(lanes > 0)) lanes = oneway ? def[3] : def[2];
     lanes = Math.min(10, Math.round(lanes));
-    let width = parseNum(t.width);
-    if (!(width >= 2.5 && width <= 60)) width = !isNaN(parseNum(t.lanes)) && lanes > 0 ? lanes * 3.2 : oneway ? def[1] : def[0];
+    // Largeur de chaussée : tag width:carriageway / width, sinon voies × 3,2 m + bandes cyclables (1,5 m) et
+    // files de stationnement (2 m) déclarées, sinon défaut par type.
+    let width = parseNum(t['width:carriageway']); if (!(width >= 2.5 && width <= 60)) width = parseNum(t.width);
+    let widthSrc = 'tag';
+    if (!(width >= 2.5 && width <= 60)) {
+      if (!isNaN(parseNum(t.lanes)) && lanes > 0) {
+        const cyc = (k) => (t[k] === 'lane' || t[k] === 'opposite_lane' ? 1 : 0);
+        const park = (k) => (/^(lane|street_side|parallel|yes)$/.test(t[k] || '') ? 1 : 0);
+        const nCyc = Math.min(2, 2 * cyc('cycleway') + 2 * cyc('cycleway:both') + cyc('cycleway:left') + cyc('cycleway:right'));
+        const nPark = Math.min(2, 2 * park('parking:both') + park('parking:left') + park('parking:right') + 2 * park('parking:lane:both') + park('parking:lane:left') + park('parking:lane:right'));
+        width = lanes * 3.2 + nCyc * 1.5 + nPark * 2; widthSrc = 'lanes';
+      } else { width = oneway ? def[1] : def[0]; widthSrc = 'default'; }
+    }
     width = Math.max(3, Math.min(40, width));
+    const sv = t.surface || '';
+    const surface = /^(sett|cobblestone|unhewn_cobblestone)/.test(sv) ? 'sett' : /^paving_stones/.test(sv) ? 'paving_stones' : /^(asphalt|concrete|paved)/.test(sv) ? 'asphalt' : '';
+    const swTags = [t['sidewalk:both:width'], t['sidewalk:width'], t['sidewalk:left:width'], t['sidewalk:right:width']].map(parseNum).filter((v) => v > 0.3 && v < 40);
+    const attrs = { surface, maxspeed: parseNum(t.maxspeed) > 0 ? parseNum(t.maxspeed) : 0, sidewalkTag: swTags.length ? swTags.reduce((a, b) => a + b, 0) / swTags.length : 0, bridgeName: t['bridge:name'] || '', widthSrc };
     const name = t.name || '';
     const bridge = !!t.bridge && t.bridge !== 'no';
     for (const run of clipPolyline(pts, ROAD_RECT)) {
-      pieces.push({ name, kind: roadKind(name, hw), hw, oneway, bridge, lanes, width, pts: run });
+      pieces.push({ name, kind: roadKind(name, hw), hw, oneway, bridge, lanes, width, pts: run, parts: [{ len: polylineLength(run.map((q) => [q.x, q.z])), ...attrs }] });
     }
   }
   console.log(`routes : ${raw.length} ways OSM -> ${pieces.length} tronçons retenus`);
@@ -102,6 +118,7 @@ function buildRoads() {
         A.lanesW = (A.lanesW ?? A.lanes * la) + (B.lanesW ?? B.lanes * lb);
         A.widthW = (A.widthW ?? A.width * la) + (B.widthW ?? B.width * lb);
         A.len = (A.len ?? la) + (B.len ?? lb);
+        A.parts = A.parts.concat(B.parts);
         A.pts = A.pts.concat(B.pts.slice(1));
         alive.delete(B); reg(A); changed = true; break;
       }
@@ -110,6 +127,12 @@ function buildRoads() {
   }
   console.log(`routes : ${merged.length} après fusion par nom`);
   return merged;
+}
+
+function aggAttrs(r) { // attribut majoritaire (pondéré par la longueur) parmi les tronçons fusionnés
+  const maj = (k) => { const m = new Map(); let tot = 0; for (const p of r.parts) { tot += p.len; if (p[k]) m.set(p[k], (m.get(p[k]) || 0) + p.len); } const b = [...m.entries()].sort((x, y) => y[1] - x[1])[0]; return b && b[1] >= tot * 0.4 ? b[0] : null; };
+  const sw = r.parts.filter((p) => p.sidewalkTag);
+  return { surface: maj('surface'), maxspeed: maj('maxspeed'), bridgeName: maj('bridgeName'), widthSrc: maj('widthSrc') || 'default', sidewalkTag: sw.length ? sw.reduce((a, p) => a + p.sidewalkTag, 0) / sw.length : 0 };
 }
 
 function buildGraph(roadsIn) {
@@ -220,7 +243,7 @@ function buildGraph(roadsIn) {
   const roadId = new Map();
   for (const r of keptRoads) {
     const id = roads.length + 1; roadId.set(r, id);
-    roads.push({ id, name: r.name, kind: r.kind, width: r1(r.width), lanes: r.lanes, oneway: r.oneway, bridge: r.bridge, points: r.nodeIds.map((n) => nodes[n]) });
+    roads.push({ id, name: r.name, kind: r.kind, width: r1(r.width), lanes: r.lanes, oneway: r.oneway, bridge: r.bridge, points: r.nodeIds.map((n) => nodes[n]), _a: aggAttrs(r) });
   }
   const outEdges = [];
   for (const [a, b, ri] of edges) { const id = roadId.get(drivable[ri]); if (id) outEdges.push([m(a), m(b), id]); }
@@ -230,7 +253,7 @@ function buildGraph(roadsIn) {
     let pts = simplify(r.pts.map((p) => [p.x, p.z]), SIMPLIFY).map(([x, z]) => [r1(x), r1(z)]);
     pts = pts.filter((p, i) => i === 0 || p[0] !== pts[i - 1][0] || p[1] !== pts[i - 1][1]);
     if (pts.length < 2 || polylineLength(pts) < 15) continue;
-    roads.push({ id: roads.length + 1, name: r.name, kind: 'pedestrian', width: r1(r.width), lanes: 0, oneway: false, bridge: r.bridge, points: pts });
+    roads.push({ id: roads.length + 1, name: r.name, kind: 'pedestrian', width: r1(r.width), lanes: 0, oneway: false, bridge: r.bridge, points: pts, _a: aggAttrs(r) });
     nWalk++;
   }
   const stats = {
@@ -321,7 +344,7 @@ function buildGreen() {
 // ───────────────────────────── Bâtiments ─────────────────────────────
 function hash2(x, z) { let h = (Math.round(x * 10) * 73856093) ^ (Math.round(z * 10) * 19349663); h = Math.imul(h ^ (h >>> 13), 0x5bd1e995); return ((h ^ (h >>> 15)) >>> 0) / 4294967296; }
 
-function buildBuildings(roads) {
+function loadFootprints() {
   const files = readdirSync(CACHE).filter((f) => /^buildings_\d+_\d+\.json$/.test(f));
   if (!files.length) return null;
   const seen = new Set(), items = []; // {outer, inners, tags}
@@ -342,11 +365,17 @@ function buildBuildings(roads) {
   }
   console.log(`bâtiments : ${items.length} emprises OSM (dont ${nRel} issues de multipolygones), ${files.length} tuiles`);
 
+  return items;
+}
+
+function buildBuildings(roads, items) {
+  if (!items) return null;
   const out = []; // [cx, cz, w, d, rot, h, area]
   const raw = []; // rectangles avant dégagement des chaussées
   const inLandmark = (x, z) => LANDMARKS.some((l) => Math.hypot(x - l.x, z - l.z) < l.radius);
   const stats = { tooSmall: 0, landmark: 0, outOfBounds: 0, split: 0, tagHeight: 0, tagLevels: 0, defaultHeight: 0, skippedType: 0, trimmedForRoads: 0, removedForRoads: 0 };
   const netArea = (o, hs) => Math.abs(polyArea(o)) - hs.reduce((s, h) => s + Math.abs(polyArea(h)), 0);
+  let curItem = null;
   const emit = (rect, h) => {
     if (rect.w < 2 || rect.d < 2) return;
     const { cx, cz } = rect;
@@ -357,7 +386,7 @@ function buildBuildings(roads) {
       const dx = l.x - cx, dz = l.z - cz, u = dx * rect.ux + dz * rect.uz, v = -dx * rect.uz + dz * rect.ux;
       if (Math.abs(u) < rect.w / 2 + l.radius * 0.5 && Math.abs(v) < rect.d / 2 + l.radius * 0.5) { stats.landmark++; return; }
     }
-    raw.push({ cx, cz, w: rect.w, d: rect.d, ux: rect.ux, uz: rect.uz, h });
+    raw.push({ cx, cz, w: rect.w, d: rect.d, ux: rect.ux, uz: rect.uz, h, item: curItem });
   };
   // Les emprises peu compactes (L, U, cours intérieures, palais) sont découpées récursivement pour que
   // les rectangles englobants ne débordent pas sur les cours et les rues.
@@ -398,6 +427,7 @@ function buildBuildings(roads) {
       h = area < 50 ? 4 + k * 4 : 18 + k * 6; stats.defaultHeight++;
     }
     h = Math.max(3, Math.min(120, h));
+    curItem = it;
     place(it.outer, it.inners, h, 0);
   }
   // Dégagement des chaussées : un rectangle englobant déborde parfois sur la rue (ou la rue passe sous un porche).
@@ -446,7 +476,7 @@ function buildBuildings(roads) {
       const cu = (q.u0 + q.u1) / 2, cv = (q.v0 + q.v1) / 2, w = q.u1 - q.u0, d = q.v1 - q.v0;
       const cx = b.cx + cu * b.ux - cv * b.uz, cz = b.cz + cu * b.uz + cv * b.ux;
       if (inLandmark(cx, cz) || cx < BOUNDS.minX || cx > BOUNDS.maxX || cz < BOUNDS.minZ || cz > BOUNDS.maxZ) continue;
-      out.push([r1(cx), r1(cz), r1(w), r1(d), r1(rot), r1(b.h), w * d]);
+      out.push([r1(cx), r1(cz), r1(w), r1(d), r1(rot), r1(b.h), w * d, b.item]);
     }
   }
   console.log(`bâtiments : ${out.length} rectangles`, JSON.stringify(stats));
@@ -458,6 +488,18 @@ const t0 = Date.now();
 const { roads, graph, stats: gstats } = buildGraph(buildRoads());
 const river = buildRiver();
 const { parks, plazas } = buildGreen();
+// Contrat v3 : champs optionnels par route (façade à façade, trottoir, terre-plein, arbres, revêtement…)
+const footprints = loadFootprints();
+const v3load = (n) => {
+  if (!existsSync(join(CACHE, n + '.json'))) return [];
+  const els = load(n);
+  if (n === 'trees') return els.map((e) => ({ xz: xz(e) }));
+  if (n === 'treerows') return els.filter((e) => e.geometry).map((e) => ({ pts: e.geometry.map(xz) }));
+  if (n === 'bridges') return els.map((e) => ({ name: (e.tags || {}).name || '', rings: ringsOf(e).outers }));
+  return els;
+};
+const rstats = enrichRoads(roads, footprints, v3load);
+console.log('routes v3 :', JSON.stringify(rstats));
 const meta = {
   source: 'osm',
   attribution: '© les contributeurs d’OpenStreetMap (ODbL)',
@@ -470,6 +512,8 @@ const meta = {
   graph: 'Graphe ORIENTÉ : chaque arête [a, b, roadId] se parcourt de a vers b. Une voie à double sens fournit les DEUX arêtes [a,b,id] et [b,a,id] ; une voie à sens unique une seule. Les nœuds sont TOUS les sommets des polylignes des routes carrossables (intersections, extrémités et points de forme) : chaque arête est donc un segment droit, et nodes[a] / nodes[b] sont deux points consécutifs de roads[roadId].points. Une intersection est un nœud relié à 3 voisins distincts ou plus. Le graphe est limité à la plus grande composante fortement connexe (aucun cul-de-sac à sens unique : on peut toujours aller de n’importe quel nœud à n’importe quel autre). Les tronçons à sens unique qui seraient restés hors de cette composante (impasses créées par le bord de l’emprise, les tunnels supprimés ou une rue piétonne) sont détachés en routes distinctes et passés à double sens (oneway=false).',
   river: 'river.polygons = emprise complète de la Seine (anneaux extérieurs, les îles ne sont PAS retirées). river.islands = [{name, polygon}] : îles à dessiner par-dessus l’eau (ou à utiliser comme trous).',
   polygons: 'Polygones simples, non fermés (le premier point n’est pas répété), sens horaire vu de dessus (aire signée positive dans le plan x,z).',
+  roadFieldsV3: 'Champs optionnels par route (absents si inconnus). width = largeur de CHAUSSÉE corrigée (widthSrc dans meta.statsV3 : tag OSM, table manuelle des grands axes, voies × 3,2 m + bandes cyclables/stationnement, profil type déduit de la façade (≈ 55 % de facadeWidth pour les rues de 8 à 45 m sans tag), ou défaut). facadeWidth = largeur mesurée de façade à façade (m) : médiane, sur des profils perpendiculaires tous les 8 m, de la distance au premier mur d’emprise OSM de chaque côté ; présent seulement si les deux côtés sont bâtis sur au moins la moitié des profils. sidewalk = largeur d’UN trottoir (m) : tag sidewalk:width, sinon (facadeWidth − width) / 2 (ou, si l’axe est excentré, distance à la façade la plus proche − width / 2), sinon distance à la seule façade trouvée − width / 2. median = largeur du terre-plein (m) entre les deux chaussées à sens unique de même nom ; pour ces routes, sidewalk est le trottoir côté façade la plus proche et facadeWidth couvre toute l’avenue. treeLined = au moins 5 arbres OSM pour 100 m entre le bord de chaussée et les façades (toujours présent, booléen). surface = asphalt|sett|paving_stones (tag OSM majoritaire). maxspeed en km/h (tag OSM). bridgeName = nom du pont pour les routes bridge=true.',
+  statsV3: rstats,
   stats: gstats,
 };
 const paris = { meta, roads, graph, river, parks, plazas };
@@ -477,7 +521,7 @@ const size = writeAtomic(join(OUT, 'paris.json'), paris);
 console.log(`paris.json : ${(size / 1e6).toFixed(2)} Mo`);
 
 if (!process.argv.includes('--no-buildings')) {
-  const b = buildBuildings(roads);
+  const b = buildBuildings(roads, footprints);
   if (b) {
     let rects = b.rects;
     const MAX_BYTES = 5e6;
@@ -491,6 +535,13 @@ if (!process.argv.includes('--no-buildings')) {
     }
     const bs = writeAtomic(join(OUT, 'buildings.json'), flat(rects));
     console.log(`buildings.json : ${rects.length} bâtiments, ${(bs / 1e6).toFixed(2)} Mo`);
+    // Fichier parallèle optionnel : nature, niveaux, forme de toit et couleur des seuls bâtiments renseignés.
+    const bm = buildingsMeta(rects);
+    const ms = writeAtomic(join(OUT, 'buildings-meta.json'), {
+      meta: { source: 'osm', attribution: meta.attribution, generated: meta.generated, count: rects.length, format: 'byIndex["<i>"] = [kindIndex, levels, roofShapeIndex, colour?] pour le bâtiment n° i de buildings.json (i = rang du sextuplet, à partir de 0). kindIndex → kinds (0 = non précisé), roofShapeIndex → roofShapes (0 = inconnu), levels = building:levels (0 = inconnu), colour = "#rrggbb" optionnel. Seuls les bâtiments ayant une nature, une forme de toit ou une couleur renseignée sont listés.', counts: bm.counts },
+      kinds: BUILDING_KINDS, roofShapes: ROOF_SHAPES, byIndex: bm.byIndex,
+    });
+    console.log(`buildings-meta.json : ${Object.keys(bm.byIndex).length} entrées ${JSON.stringify(bm.counts)}, ${(ms / 1e6).toFixed(2)} Mo`);
   } else console.log('buildings.json : pas de tuiles en cache, fichier non généré');
 }
 console.log(`fait en ${((Date.now() - t0) / 1000).toFixed(1)} s`);

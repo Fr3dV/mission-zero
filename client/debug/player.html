@@ -63,6 +63,16 @@ let buildFirst = 0;
 if (params.get('atlas')) {
   const a = getAtlas().canvases[params.get('atlas')] || getAtlas().canvases.albedo;
   const d = document.createElement('div'); d.id = 'atlas'; a.style.width = '100%'; d.appendChild(a); document.body.appendChild(d);
+} else if (params.get('knock')) {
+  // planche « chocs » : ?knock=1&t=secondes (instant figé après le choc) &getup=1 (relevé déclenché 1 s après le repos)
+  const KMH = [5, 20, 50, 90], DIRS = [[0, -1], [0, 1], [1, 0], [-0.7, -0.7]]; // de dos, de face, de côté, de biais (repère du personnage)
+  KMH.forEach((kmh, row) => DIRS.forEach((d, col) => {
+    const c = add(NAMES[(row * 4 + col) % NAMES.length], (col - 1.5) * 2.6, -row * 3.2, 0, 'idle', 0, { lod: false });
+    c.knockArgs = { dirX: -d[0], dirZ: -d[1], speed: kmh / 3.6 }; // le groupe est tourné de 180° : repère monde = −repère local
+  }));
+  window.__knock = () => { for (const c of chars) c.result = c.knock(c.knockArgs); };
+  camera.fov = 30; camera.position.set(7.5, 6.5, 9.5); camera.lookAt(0, 0.3, -4.6);
+  if (params.has('row')) { const r = +params.get('row'); camera.fov = 22; camera.position.set(0.5, 2.6, 9 - r * 3.2); camera.lookAt(0, 0.55, -r * 3.2); }
 } else if (n) {
   for (let i = 0; i < n; i++) add('pieton' + i + seed, (i % 16) * 1.3 - 9.75, -Math.floor(i / 16) * 2.4, 0, i % 3 === 0 ? 'run' : i % 3 === 1 ? 'walk' : 'idle', i % 3 === 0 ? 6 : 1.4);
   camera.position.set(0, 5.5, 16); camera.lookAt(0, 0.8, -3);
@@ -90,7 +100,16 @@ camera.updateProjectionMatrix();
 const builds = chars.map((c) => c.buildMs).sort((a, b) => a - b);
 window.__chars = chars; window.__builds = builds;
 const freeze = params.has('t') ? +params.get('t') : null;
-if (freeze != null) for (let i = 0; i < 240; i++) for (const c of chars) c.update(freeze / 240);
+if (params.get('knock')) {
+  for (let i = 0; i < 30; i++) for (const c of chars) c.update(1 / 60);
+  window.__knock();
+  const steps = Math.round((freeze ?? 0) * 120);
+  for (let i = 0; i < steps; i++) for (const c of chars) {
+    c.update(1 / 120);
+    if (params.get('getup') && c.ragdoll.settled && c.anim === 'lying') { c.lieFor = (c.lieFor || 0) + 1 / 120; if (c.lieFor > 1) c.setState({ anim: 'getup' }); }
+  }
+  window.__ragdolls = () => chars.map((c) => [c.result, c.anim, c.ragdoll.settled, c.ragdoll.face, +c.down.toFixed(2)].join(':'));
+} else if (freeze != null) for (let i = 0; i < 240; i++) for (const c of chars) c.update(freeze / 240);
 const clock = new THREE.Clock();
 let fpsT = 0, fpsN = 0;
 renderer.setAnimationLoop(() => {

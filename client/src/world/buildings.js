@@ -195,7 +195,12 @@ function fillerBuildings(ctx, masks) {
   return out;
 }
 
-export function buildBuildings(ctx, net, masks, Q, uniforms) {
+// Quartiers au bâti plus ancien et plus bas (pas d'haussmannien dominant) : cercles [x, z, rayon] en mètres monde.
+const M_LON = 111320 * Math.cos((48.8656 * Math.PI) / 180), M_LAT = 111320;
+const OLD_ZONES = [[2.358, 48.857, 650], [2.3565, 48.8517, 330], [2.3445, 48.8497, 430], [2.3475, 48.8535, 260]] // Marais, île Saint-Louis, Quartier latin, Saint-Michel / Huchette
+  .map(([lon, lat, r]) => [(lon - 2.3212) * M_LON, -(lat - 48.8656) * M_LAT, r]);
+
+export function buildBuildings(ctx, net, masks, Q, uniforms, river) {
   const { THREE, scene, heightAt, collision, LANDMARKS, worldData } = ctx;
   let src = worldData.buildings;
   const procedural = !src || !src.length;
@@ -229,6 +234,8 @@ export function buildBuildings(ctx, net, masks, Q, uniforms) {
         }
         if (!ok) continue;
         if (masks.isWater(x, z)) continue;
+        // édicules cartographiés aux culées des ponts (pylônes du pont Alexandre III...) : déjà construits avec le pont
+        if (river && Math.max(w, d) < 10 && river.nearDeck(x, z, 7)) continue;
       }
       const hw = w / 2, hd = d / 2;
       // niveau de référence = sol au centre ; le soubassement descend jusqu'au point le plus bas de l'emprise
@@ -238,6 +245,10 @@ export function buildBuildings(ctx, net, masks, Q, uniforms) {
       // style déterministe : 0 haussmannien, 1 post-haussmannien, 2 immeuble de rapport enduit, 3 Art déco, 4 moderne
       const hs = hash2(Math.round(x * 7) + 11, Math.round(z * 7) - 5);
       let style = hs < 0.56 ? 0 : hs < 0.68 ? 1 : hs < 0.87 ? 2 : hs < 0.95 ? 3 : 4;
+      // style par quartier : bâti ancien enduit au Marais, sur l'île Saint-Louis, au Quartier latin et sur la butte Montmartre
+      let old = false; for (const q of OLD_ZONES) if ((x - q[0]) ** 2 + (z - q[1]) ** 2 < q[2] * q[2]) { old = true; break; }
+      const sc = ctx.LANDMARK_BY_ID?.sacrecoeur; if (!old && sc && (x - sc.x) ** 2 + (z - sc.z) ** 2 < 520 * 520) old = true;
+      if (old) style = hs < 0.68 ? 2 : hs < 0.86 ? 0 : hs < 0.94 ? 1 : 3;
       if (h > 34 || Math.min(w, d) > 42) style = 4; else if (h < 11 && style < 2) style = 2;
       const b = { x, z, hw, hd, c, s, rot, w, d, h, base, drop: base - lo + 1.0, seed, style, blind: 0, filler };
       list.push(b);

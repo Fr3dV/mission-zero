@@ -35,7 +35,7 @@ export function createEffects(ctx) {
         vec2 c = gl_PointCoord - 0.5; float r = length(c) * 2.0;
         float a = smoothstep(1.0, 0.15, r) * vData.z * (1.0 - vData.x) * smoothstep(0.0, 0.08, vData.x);
         if (a < 0.004) discard;
-        gl_FragColor = vec4(vec3(vData.w) * uLight, a);
+        gl_FragColor = vData.w > 1.5 ? vec4(vec3(1.0, 0.6, 0.2) * 3.0, min(1.0, a * 3.0)) : vec4(vec3(vData.w) * uLight, a);
         #include <fog_fragment>
       }`,
   });
@@ -49,6 +49,55 @@ export function createEffects(ctx) {
     pVel[i * 3] = vx; pVel[i * 3 + 1] = vy; pVel[i * 3 + 2] = vz;
     pLife[i] = life; pAge[i] = 0; pGrow[i] = size * 1.6;
     pData[i * 4] = 0; pData[i * 4 + 1] = size; pData[i * 4 + 2] = alpha; pData[i * 4 + 3] = tint;
+  }
+
+  // ------------------------------------------------------------------ débris au sol (éclats de verre, plastique, tôle)
+  const MAXD = low ? 120 : 320;
+  const dGeo = new THREE.TetrahedronGeometry(1, 0);
+  const debris = new THREE.InstancedMesh(dGeo, new THREE.MeshStandardMaterial({ roughness: 0.35, metalness: 0.3 }), MAXD);
+  debris.instanceMatrix.setUsage(THREE.DynamicDrawUsage); debris.frustumCulled = false; debris.count = MAXD; debris.visible = false; debris.castShadow = false;
+  const dS = []; let dHead = 0, dAlive = 0;
+  const _dm = new THREE.Matrix4(), _dq = new THREE.Quaternion(), _dp = new THREE.Vector3(), _ds = new THREE.Vector3(), _de = new THREE.Euler(), _dc = new THREE.Color();
+  for (let i = 0; i < MAXD; i++) { dS.push({ life: 0, x: 0, y: 0, z: 0, vx: 0, vy: 0, vz: 0, rx: 0, ry: 0, rz: 0, w: 0, s: 0, sx: 1, sy: 1, sz: 1, rest: false }); debris.setMatrixAt(i, _dm.makeScale(0, 0, 0)); debris.setColorAt(i, _dc.set(0xffffff)); }
+  scene.add(debris);
+  /** Projette n débris depuis (x,y,z). color : teinte ; big : gros morceau (pare-chocs, rétroviseur). */
+  function spawnDebris(x, y, z, vx, vz, n, color, big) {
+    for (let k = 0; k < n; k++) {
+      const i = dHead; dHead = (dHead + 1) % MAXD; const d = dS[i];
+      const a = Math.random() * Math.PI * 2, sp = 1 + Math.random() * 4;
+      d.x = x + (Math.random() - 0.5) * 0.5; d.y = y + Math.random() * 0.3; d.z = z + (Math.random() - 0.5) * 0.5;
+      d.vx = vx * (0.3 + Math.random() * 0.5) + Math.cos(a) * sp; d.vz = vz * (0.3 + Math.random() * 0.5) + Math.sin(a) * sp; d.vy = 1.5 + Math.random() * 3.5;
+      d.rx = Math.random() * 6; d.ry = Math.random() * 6; d.rz = Math.random() * 6; d.w = (Math.random() - 0.5) * 20;
+      d.s = big ? 1 : 0.012 + Math.random() * 0.03; d.sx = big ? big[0] : 1 + Math.random() * 2; d.sy = big ? big[1] : 0.3 + Math.random() * 0.6; d.sz = big ? big[2] : 1 + Math.random();
+      d.life = (low ? 12 : 24) + Math.random() * 8; d.rest = false;
+      debris.setColorAt(i, _dc.set(color));
+    }
+    debris.instanceColor.needsUpdate = true; debris.visible = true;
+  }
+  function updateDebris(dt) {
+    if (!debris.visible) return;
+    dAlive = 0; let moved = false;
+    for (let i = 0; i < MAXD; i++) {
+      const d = dS[i];
+      if (d.life <= 0) continue;
+      d.life -= dt; dAlive++;
+      if (d.life <= 0) { debris.setMatrixAt(i, _dm.makeScale(0, 0, 0)); moved = true; continue; }
+      if (d.rest && d.life > 1) continue;
+      if (!d.rest) {
+        d.vy -= 9.81 * dt; d.x += d.vx * dt; d.y += d.vy * dt; d.z += d.vz * dt; d.rx += d.w * dt; d.rz += d.w * 0.7 * dt;
+        const g = ctx.heightAt(d.x, d.z) + d.s * d.sy * 0.5 + 0.01;
+        if (d.y < g) { d.y = g; if (Math.abs(d.vy) < 1.2) { d.rest = true; d.rx = 0; d.rz = 0; } d.vy = -d.vy * 0.3; d.vx *= 0.55; d.vz *= 0.55; d.w *= 0.5; }
+      }
+      const k = Math.min(1, d.life);
+      _de.set(d.rx, d.ry, d.rz); _dq.setFromEuler(_de); _dp.set(d.x, d.y, d.z); _ds.set(d.s * d.sx * k, d.s * d.sy * k, d.s * d.sz * k);
+      debris.setMatrixAt(i, _dm.compose(_dp, _dq, _ds)); moved = true;
+    }
+    if (moved) debris.instanceMatrix.needsUpdate = true;
+    if (!dAlive) debris.visible = false;
+  }
+  /** Gerbe d'étincelles (frottement métal/pierre). */
+  function sparks(x, y, z, vx, vz, n) {
+    for (let k = 0; k < n; k++) smoke(x, y + Math.random() * 0.3, z, vx * 0.4 + (Math.random() - 0.5) * 5, 1 + Math.random() * 3, vz * 0.4 + (Math.random() - 0.5) * 5, 0.05 + Math.random() * 0.05, 0.2 + Math.random() * 0.3, 1, 2);
   }
 
   // ------------------------------------------------------------------ traces de pneus
@@ -146,6 +195,7 @@ export function createEffects(ctx) {
       pPos[i * 3] += pVel[i * 3] * dt; pPos[i * 3 + 1] += pVel[i * 3 + 1] * dt; pPos[i * 3 + 2] += pVel[i * 3 + 2] * dt;
       pData[i * 4] = Math.min(1, pAge[i] / pLife[i]); pData[i * 4 + 1] += pGrow[i] * dt;
     }
+    updateDebris(dt);
     points.visible = pAlive > 0;
     if (pAlive > 0 || points.userData.wasAlive) { pGeo.attributes.position.needsUpdate = true; pGeo.attributes.pdata.needsUpdate = true; }
     points.userData.wasAlive = pAlive > 0;
@@ -156,5 +206,5 @@ export function createEffects(ctx) {
     beams.count = night ? nBeam : 0; beams.instanceMatrix.needsUpdate = true;
   }
 
-  return { smoke, skid, beginFrame, addShadow, addBeam, setSpot, update, get particles() { return pAlive; } };
+  return { objects: { points, skids, shadows, beams, debris, spot }, spawnDebris, sparks, get debrisCount() { return dAlive; }, smoke, skid, beginFrame, addShadow, addBeam, setSpot, update, get particles() { return pAlive; } };
 }

@@ -73,5 +73,31 @@ export function buildSacreCoeur(m) {
     B.cyl(W, 4.6, 4.9, 4, 0, 70.2, CZ, 16); ovoid(B, W, 4.8, 8.5, 0, 74.2, CZ, 18, 2); lantern(0, 80.2, CZ, 0.7, 2.6);
   });
   m.collide.circle(0, -9.5, 13.6); m.collide.box(0, -27, 5.8, 5.8);
+  // ---- square Louise-Michel : gradins, escaliers et rampes épousant la pente, funiculaire à l'ouest ----
+  const gy = (x, z) => m.ground(x, z);
+  const strip = (mat, x0, z0, x1, z1, w, h = 0.12, lift = 0.04) => {      // bande au sol entre deux points, découpée pour suivre le relief
+    const n = Math.max(1, Math.round(Math.hypot(x1 - x0, z1 - z0) / 12));
+    for (let i = 0; i < n; i++) {
+      const ax = x0 + (x1 - x0) * i / n, az = z0 + (z1 - z0) * i / n, bx = x0 + (x1 - x0) * (i + 1) / n, bz = z0 + (z1 - z0) * (i + 1) / n;
+      const len = Math.hypot(bx - ax, bz - az), y = Math.min(gy(ax, az), gy(bx, bz));
+      B.box(mat, w, h + 0.5 + Math.abs(gy(ax, az) - gy(bx, bz)), len + 0.2, (ax + bx) / 2, y - 0.5 + lift, (az + bz) / 2, Math.atan2(bx - ax, bz - az), { jit: 0.03 });
+    }
+  };
+  strip(P.pave, 0, 50, 0, 215, 14);                                            // escalier central
+  for (const z of [78, 112, 146, 180]) {                                       // terrasses : murets, balustres, paliers
+    for (const sx of [-1, 1]) { strip(P.stoneD, sx * 9, z, sx * 62, z + 4, 1.1, 0.75); strip(P.pave, sx * 9, z + 5, sx * 60, z + 9, 5); }
+    strip(P.stoneL, -7, z - 2.2, 7, z - 2.2, 2.2, 0.22);
+    if (B.hi) for (const sx of [-1, 1]) { B.cyl(P.stoneL, 0.5, 0.6, 1.5, sx * 8.2, gy(sx * 8.2, z) , z, 8); B.sphere(P.stoneL, 0.55, sx * 8.2, gy(sx * 8.2, z) + 1.9, z, 8); }
+  }
+  for (const sx of [-1, 1]) { strip(P.pave, sx * 62, 66, sx * 66, 205, 4.5); strip(P.pave, sx * 20, 58, sx * 62, 66, 4.5); }   // rampes latérales
+  B.cyl(P.stoneL, 9, 9.4, 0.7, 0, gy(0, 128) - 0.1, 128, 24); B.cyl(P.water, 8.3, 8.3, 0.1, 0, gy(0, 128) + 0.55, 128, 24, { jit: 0 });  // bassin du palier
+  m.collide.circle(0, 128, 9.5, -10, 3);
+  // funiculaire : deux voies, deux cabines, gares haute et basse
+  const FX = -82;
+  for (const dx of [-2.2, 2.2]) for (const r of [-0.72, 0.72]) strip(P.ironD, FX + dx + r, 52, FX + dx + r, 196, 0.14, 0.2, 0.25);
+  strip(P.paveD, FX, 52, FX, 196, 9.5, 0.08, 0.02);
+  const cabin = (dx, z) => { const y = gy(FX + dx, z) + 0.5; B.box(P.stoneW, 2.6, 2.7, 6.2, FX + dx, y, z); B.box(P.glass, 2.66, 1.1, 5.6, FX + dx, y + 1.2, z, 0, { jit: 0 }); B.box({ ...P.glass, c: [0.05, 0.25, 0.5], r: 0.5 }, 2.66, 0.5, 6.24, FX + dx, y + 0.3, z, 0, { jit: 0 }); m.collide.box(FX + dx, z, 1.5, 3.3); };
+  cabin(-2.2, 84); cabin(2.2, 158);
+  for (const [z, d] of [[45, 12], [203, 12]]) { const y = gy(FX, z); B.box(P.steel, 11, 0.4, d, FX, y + 5, z); for (const sx of [-1, 1]) for (const sz of [-1, 1]) { B.cyl(P.steel, 0.2, 0.2, 5, FX + sx * 5, y, z + sz * (d / 2 - 0.6), 6); m.collide.circle(FX + sx * 5, z + sz * (d / 2 - 0.6), 0.4); } B.box(P.glass, 10.6, 2.4, 0.15, FX, y + 2.4, z + (z < 100 ? -d / 2 + 0.3 : d / 2 - 0.3), 0, { jit: 0 }); }
   return { height: 86 };
 }

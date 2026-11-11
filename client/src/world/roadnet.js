@@ -11,14 +11,54 @@ export function sidewalkWidth(r) {
   return r.width >= 9 ? 3.2 : 2.3;
 }
 
+// Profils réels des grands axes (largeur de chaussée à double sens, trottoir, rangées d'arbres, revêtement), par nom.
+// Complète ou corrige les largeurs OSM souvent sous-estimées ; les champs fournis par les données (sidewalk, surface,
+// treeLined) sont utilisés quand ils existent, la table ne sert que pour ce qui manque ou pour les particularités.
+const PROFILES = [
+  [/Champs-Élysées/, { width: 27, lanes: 8, sidewalk: 20, trees: 2, surface: 'sett' }],
+  [/Avenue Foch/, { sidewalk: 10, trees: 2 }],
+  [/Grande[- ]Armée/, { width: 22, lanes: 6, sidewalk: 9, trees: 1 }],
+  [/Avenue de l.Opéra/, { width: 16, lanes: 4, sidewalk: 6.5, trees: 0 }],          // 30 m de façade à façade, SANS arbres
+  [/Rue de Rivoli/, { sidewalk: 4.5, trees: 0 }],
+  [/Rue Royale|Rue de la Paix|Rue de Castiglione|Rue Saint-Honoré|Rue du Faubourg Saint-Honoré/, { trees: 0 }],
+  [/^Boulevard (Haussmann|des Capucines|des Italiens|Montmartre|Poissonnière|de Bonne Nouvelle|de la Madeleine|Saint-Germain|Saint-Michel|de Sébastopol|Malesherbes|Raspail|du Montparnasse|Saint-Denis|Saint-Martin|de Magenta|de Strasbourg|de Clichy|de Rochechouart|des Invalides|de Courcelles|du Palais)/, { sidewalk: 7, trees: 1 }],
+  [/^Avenue (Kléber|Victor Hugo|Marceau|d.Iéna|de Friedland|Hoche|de Wagram|Mac-Mahon|Carnot|George V|Montaigne|Bosquet|Rapp|de la Bourdonnais|de Suffren|de Breteuil|de Villars|de Tourville|de la Motte-Picquet|Franklin|du Président|Winston Churchill|Matignon)/, { sidewalk: 6.5, trees: 1 }],
+  [/^Place (Charles de Gaulle|de la Concorde|Vendôme|du Carrousel|de l.Étoile|du Tertre|des Victoires|Dauphine)/, { surface: 'sett', trees: 0 }],
+  [/^(Pont|Passerelle|Viaduc) /, { trees: 0 }],
+  [/^Place /, { trees: 0 }],
+  [/Rue (Lepic|des Abbesses|Norvins|des Saules|Saint-Rustique|du Mont-Cenis|de l.Abreuvoir|Cortot|des Rosiers|Saint-Louis en l.Île|de la Huchette|Mouffetard)/, { surface: 'sett' }],
+  [/^Quai /, { surface: null }],
+];
+function applyProfile(r) {
+  let p = null;
+  for (const [re, prof] of PROFILES) if (re.test(r.name || '')) { p = prof; break; }
+  r._w = r.width; r._lanes = r.lanes | 0;
+  r._trees = r.kind === 'pedestrian' ? 0 : (r.kind === 'avenue' || r.kind === 'boulevard' || r.kind === 'quay') ? 1 : 0;
+  r._surf = r.kind === 'pedestrian' ? 'sett' : 'asphalt';
+  let sw = sidewalkWidth(r);
+  if (p) {
+    if (p.width && !r.oneway && r.width < p.width) { r._w = p.width; r._lanes = p.lanes || r._lanes; }
+    if (p.sidewalk) sw = p.sidewalk;
+    if (p.trees !== undefined) r._trees = p.trees;
+    if (p.surface) r._surf = p.surface;
+  }
+  // données enrichies (contrat v3) : prioritaires sur les valeurs par défaut
+  if (typeof r.sidewalk === 'number' && r.sidewalk >= 0 && r.kind !== 'pedestrian') sw = Math.min(25, r.sidewalk);
+  if (r.surface === 'sett' || r.surface === 'paving_stones' || r.surface === 'cobblestone') r._surf = 'sett'; else if (r.surface === 'asphalt' && !(p && p.surface)) r._surf = 'asphalt';
+  if (typeof r.treeLined === 'boolean' && !(p && p.trees !== undefined)) r._trees = r.treeLined ? Math.max(1, r._trees) : 0;
+  if (r.bridge) r._trees = 0;
+  r._sw = r.kind === 'pedestrian' ? 0 : sw;
+  r._hw = Math.max(1.2, r._w / 2);
+}
+
 export function createRoadNet(ctx) {
   const roads = (ctx.worldData.roads || []).filter((r) => r.points && r.points.length >= 2);
   // --- données dérivées par route
   let nSeg = 0;
   roads.forEach((r, i) => {
     // champs dérivés non énumérables : les objets route restent « propres » (JSON, Object.keys) pour les autres modules
-    for (const k of ['_i', '_hw', '_sw', '_ped', '_cum', '_len', '_seg0', '_contA', '_contB', '_mx', '_mz', '_runs', '_hill', '_pave']) Object.defineProperty(r, k, { value: undefined, writable: true, enumerable: false, configurable: true });
-    r._i = i; r._hw = Math.max(1.2, r.width / 2); r._sw = sidewalkWidth(r);
+    for (const k of ['_i', '_hw', '_sw', '_ped', '_cum', '_len', '_seg0', '_contA', '_contB', '_mx', '_mz', '_runs', '_hill', '_pave', '_w', '_lanes', '_trees', '_surf', '_y']) Object.defineProperty(r, k, { value: undefined, writable: true, enumerable: false, configurable: true });
+    r._i = i; applyProfile(r);
     r._ped = r.kind === 'pedestrian';
     const n = r.points.length, cum = new Float32Array(n);
     for (let k = 1; k < n; k++) cum[k] = cum[k - 1] + Math.hypot(r.points[k][0] - r.points[k - 1][0], r.points[k][1] - r.points[k - 1][1]);
@@ -58,12 +98,17 @@ export function createRoadNet(ctx) {
   for (const r of roads) {
     const n = r.points.length;
     for (let k = 0; k < n; k++) {
-      const key = nkey(r.points[k]); let e = nodeMap.get(key); if (!e) nodeMap.set(key, (e = { arms: 0, ends: [], p: r.points[k], maxHw: 0, ped: true }));
+      const key = nkey(r.points[k]); let e = nodeMap.get(key); if (!e) nodeMap.set(key, (e = { arms: 0, ends: [], p: r.points[k], maxHw: 0, ped: true, cls: 0 }));
+      e.cls = Math.max(e.cls, r._surf === 'sett' ? (r._ped ? 0 : 1) : 2);
       const isEnd = k === 0 || k === n - 1;
       e.arms += isEnd ? 1 : 2; if (isEnd) e.ends.push([r._i, k === 0 ? 0 : 1]);
       if (r._hw > e.maxHw) e.maxHw = r._hw; if (!r._ped) e.ped = false;
     }
   }
+  // places entièrement revêtues (disque pavé, pas de trottoirs ni d'arbres dedans) : rond-point de l'Étoile
+  const zones = [];
+  { const a = ctx.LANDMARK_BY_ID?.arc; if (a && roads.some((r) => /Charles de Gaulle|Étoile/.test(r.name || ''))) zones.push({ x: a.x, z: a.z, r: 110, island: 47, name: 'Place Charles de Gaulle' }); }
+  const inZone = (x, z, pad = 0) => { for (const q of zones) if ((x - q.x) ** 2 + (z - q.z) ** 2 < (q.r + pad) ** 2) return q; return null; };
   const junctions = []; // nœuds à ≥ 3 branches (pastille d'asphalte)
   for (const e of nodeMap.values()) {
     if (e.arms === 2 && e.ends.length === 2 && e.ends[0][0] !== e.ends[1][0]) {
@@ -185,8 +230,8 @@ export function createRoadNet(ctx) {
       let lo = 0, hi = pick.length - 1;
       while (lo < hi) { const m = (lo + hi) >> 1; if (pickCum[m] < v) lo = m + 1; else hi = m; }
       const r = pick[lo], s = 5 + rnd() * (r._len - 10);
-      // voie de droite si double sens, sinon axe de la voie
-      const off = r.oneway ? 0 : -r._hw * 0.5;
+      // voie de droite si double sens, sinon axe de la voie (largeur des données : compatible avec le graphe du trafic)
+      const off = r.oneway ? 0 : -r.width * 0.25;
       pointAt(r, s, off, tmp);
       if (tries < 11 && insideOther(tmp.x, tmp.z, 2, r._i, r._contA, r._contB) >= 0) continue; // pas au milieu d'un carrefour
       return { x: tmp.x, z: tmp.z, yaw: yawOf(tmp.dx, tmp.dz), road: r };
@@ -219,7 +264,7 @@ export function createRoadNet(ctx) {
   }
 
   return {
-    roads, junctions, pointAt, insideOther, roadAtPad, edgeDistance, freeRuns, nearestRoadPoint, randomRoadPoint,
+    roads, junctions, zones, inZone, pointAt, insideOther, roadAtPad, edgeDistance, freeRuns, nearestRoadPoint, randomRoadPoint,
     roadAt: (x, z) => roadAtPad(x, z, 0),
   };
 }

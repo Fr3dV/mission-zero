@@ -169,12 +169,13 @@ export function createGameplay(ctx) {
       }
     }
     for (const l of LANDMARKS) {
+      if (l.hidden) continue;
       if (d.seen?.includes(l.id)) continue;
       if (Math.hypot(l.x - p.x, l.z - p.z) < l.radius + 70) {
         d.seen = [...(d.seen || []), l.id];
         save.write();
-        toast(`Monument découvert : ${l.name} (${d.seen.length}/${LANDMARKS.length})`, 'success');
-        bus.emit('gameplay:discover', { id: l.id, name: l.name, count: d.seen.length, total: LANDMARKS.length });
+        toast(`Monument découvert : ${l.name} (${d.seen.length}/${LANDMARKS.filter((m) => !m.hidden).length})`, 'success');
+        bus.emit('gameplay:discover', { id: l.id, name: l.name, count: d.seen.length, total: LANDMARKS.filter((m) => !m.hidden).length });
       }
     }
   }

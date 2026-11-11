@@ -9,6 +9,7 @@ export const TEX = 4; // une tuile de texture de pierre = 4 m (assises de 50 cm)
 // ---------- palette : c = couleur, r = rugosité, m = métal, t = force de la texture de pierre, g = lueur nocturne ----------
 // g <= 1.5 : façade éclairée par projecteurs (proportionnelle à la couleur) ; g = 2 : fenêtre allumée.
 const mk = (c, r, m, t, g) => { const col = new THREE.Color(c); return { c: [col.r, col.g, col.b], r, m, t, g }; };
+export const mat = mk;
 export const P = {
   stone: mk(0xcdc1a4, 0.92, 0, 1, 1),
   stoneL: mk(0xdbd2ba, 0.9, 0, 1, 1),
@@ -195,7 +196,22 @@ export function createKit(ctx) {
   };
   const glassLouvre = glassOf(drawLozenge, 0x4e565c, [0.6, 0.72, 0.78], 0.36);
   const glassPalais = glassOf(drawGlassRoof, 0x5f7469, [0.7, 0.8, 0.82], 0.62);
-  return { THREE, P, uNight, main, lattice, iron, glassLouvre, glassPalais, quality: ctx.quality || 'high' };
+  // eau animée (jets, nappes, cascades) : non éclairée, stries défilant le long de v
+  const uTime = { value: 0 };
+  const water = new THREE.ShaderMaterial({
+    uniforms: { uTime, uNight }, transparent: true, depthWrite: false, side: THREE.DoubleSide,
+    vertexShader: 'varying vec2 vUv; void main() { vUv = uv; gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }',
+    fragmentShader: `varying vec2 vUv; uniform float uTime, uNight;
+      float h(float n) { return fract(sin(n) * 43758.5453); }
+      void main() { float c = floor(vUv.x * 28.0), r = h(c + 1.7); float s = fract(vUv.y * 0.3 - uTime * (1.1 + r) + r * 7.0);
+        float streak = smoothstep(0.0, 0.3, s) * smoothstep(1.0, 0.45, s), fine = 0.65 + 0.35 * sin(vUv.x * 170.0 + r * 6.0);
+        vec3 col = mix(vec3(0.62, 0.76, 0.84), vec3(0.97), streak) * (1.0 - 0.6 * uNight) + uNight * vec3(0.5, 0.4, 0.25);
+        gl_FragColor = vec4(col, (0.3 + 0.6 * streak) * fine);
+        #include <tonemapping_fragment>
+        #include <colorspace_fragment>
+      }`,
+  });
+  return { THREE, P, uNight, uTime, main, lattice, iron, water, glassLouvre, glassPalais, quality: ctx.quality || 'high' };
 }
 
 // ---------- géométries de base ----------
@@ -403,7 +419,7 @@ export class Builder {
     const out = [];
     for (const c of this.cols.values()) {
       const cb = new Builder({ seg: this.seg }); columnParts(cb, c.r, c.h, c.style, c.mat);
-      if (c.list.length < 8) { const chunk = cb.raw(); for (const m of c.list) this.appendChunk(chunk, m); continue; }
+      if (c.list.length < 12) { const chunk = cb.raw(); for (const m of c.list) this.appendChunk(chunk, m); continue; }
       const im = new THREE.InstancedMesh(cb.geometry(false), material, c.list.length);
       c.list.forEach((m, i) => im.setMatrixAt(i, m));
       im.instanceMatrix.needsUpdate = true; im.computeBoundingSphere(); im.computeBoundingBox();
@@ -422,7 +438,7 @@ export class Builder {
 // Colonne détaillée : base attique, fût cannelé galbé, chapiteau (cor = corinthien, ion = ionique, dor = dorique).
 function columnParts(b, r, h, style, mat) {
   const m = { ...mat, g: mat.g * 0.8 };
-  const flutes = style === 'dor' ? 16 : 20, ns = Math.round(flutes * (b.seg < 0.8 ? 2 : 4));
+  const flutes = style === 'dor' ? 16 : 20, ns = Math.round(flutes * (b.seg < 0.8 || r < 0.7 ? 2 : 4));
   const baseH = style === 'dor' ? 0 : r * 1.0, capH = style === 'cor' ? r * 2.3 : style === 'ion' ? r * 1.0 : r * 0.9;
   if (baseH) {
     b.box(m, r * 2.7, r * 0.34, r * 2.7, 0, 0, 0, 0, { jit: 0 });
@@ -488,7 +504,8 @@ export function palaceWing(b, o) {
     for (const side of [1, -1]) {
       if (side < 0 && o.back === false) continue;
       b.group(0, 0, side * dep / 2, side > 0 ? 0 : Math.PI, () => {
-        b.winRow(-nb * bay / 2, nb * bay / 2, y + sill, 0, nb, w, wh, { arch: f.arch, lit: f.lit ?? 0.3, farMin: o.farMin });
+        if (b.hi) b.winRow(-nb * bay / 2, nb * bay / 2, y + sill, 0, nb, w, wh, { arch: f.arch, lit: f.lit ?? 0.3 });
+        else if (y === 0 && nb > 2) b.box(P.glass, nb * bay * 0.96, H * 0.72, 0.1, 0, H * 0.12, 0.02, 0, { jit: 0 });   // version lointaine : une seule bande sombre suggère les baies
         if (b.hi && o.pil) for (let i = 0; i <= nb; i++) b.box(P.stoneL, 0.7, f.h - 0.5, 0.35, -nb * bay / 2 + i * bay, y + 0.2, 0.1, 0, { jit: 0.02 });
       });
     }
@@ -576,4 +593,99 @@ export function domeLune(r, h, a0, da, t0, t1, n) {
   for (let j = 0; j < n; j++) for (let i = 0; i < m; i++) { const a = j * (m + 1) + i, c = a + m + 1; idx.push(a, a + 1, c, a + 1, c + 1, c); }
   const g = new THREE.BufferGeometry(); g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3)); g.setAttribute('uv', new THREE.Float32BufferAttribute(uv, 2)); g.setIndex(idx); g.computeVertexNormals();
   return g;
+}
+
+// Géométrie d'eau animée : tubes (jets, arcs) et nappes coniques ; u = tour, v = distance parcourue (m).
+export class Water {
+  constructor() { this.p = []; this.u = []; this.i = []; }
+  tube(pts, r0, r1 = r0, seg = 5) {
+    const base = this.p.length / 3; let v = 0;
+    for (let k = 0; k < pts.length; k++) {
+      const a = pts[Math.max(0, k - 1)], b = pts[Math.min(pts.length - 1, k + 1)], p = pts[k];
+      let tx = b[0] - a[0], ty = b[1] - a[1], tz = b[2] - a[2]; const tl = Math.hypot(tx, ty, tz) || 1; tx /= tl; ty /= tl; tz /= tl;
+      let sx = -tz, sz = tx, sl = Math.hypot(sx, sz); if (sl < 0.01) { sx = 1; sz = 0; sl = 1; } sx /= sl; sz /= sl;
+      const ux = ty * sz, uy = tz * sx - tx * sz, uz = -ty * sx, r = r0 + (r1 - r0) * k / (pts.length - 1);
+      if (k) v += Math.hypot(p[0] - pts[k - 1][0], p[1] - pts[k - 1][1], p[2] - pts[k - 1][2]);
+      for (let j = 0; j <= seg; j++) { const an = j / seg * Math.PI * 2, c = Math.cos(an) * r, s = Math.sin(an) * r; this.p.push(p[0] + sx * c + ux * s, p[1] + uy * s, p[2] + sz * c + uz * s); this.u.push(j / seg * 0.2 + (base % 97) * 0.13, v); }
+    }
+    for (let k = 0; k < pts.length - 1; k++) for (let j = 0; j < seg; j++) { const a = base + k * (seg + 1) + j, c = a + seg + 1; this.i.push(a, a + 1, c, a + 1, c + 1, c); }
+    return this;
+  }
+  // jet parabolique de p0 à p1 culminant à `rise` au-dessus du point le plus haut
+  arc(p0, p1, rise, r = 0.12, n = 9) {
+    const pts = []; for (let k = 0; k <= n; k++) { const t = k / n; pts.push([p0[0] + (p1[0] - p0[0]) * t, p0[1] + (p1[1] - p0[1]) * t + 4 * rise * t * (1 - t), p0[2] + (p1[2] - p0[2]) * t]); }
+    return this.tube(pts, r, r * 2.2);
+  }
+  jet(x, y, z, h, r = 0.1) { return this.tube([[x, y, z], [x, y + h * 0.5, z], [x, y + h, z]], r, r * 2.5); }
+  // nappe tombant d'un cercle (rTop à y + h) vers un cercle (rBot à y)
+  fall(x, y, z, rTop, rBot, h, seg = 24) {
+    const base = this.p.length / 3;
+    for (let k = 0; k < 2; k++) for (let j = 0; j <= seg; j++) { const an = j / seg * Math.PI * 2, r = k ? rBot : rTop; this.p.push(x + Math.sin(an) * r, y + (k ? 0 : h), z + Math.cos(an) * r); this.u.push(j / seg, k ? h * 2 : 0); }
+    for (let j = 0; j < seg; j++) { const a = base + j, c = a + seg + 1; this.i.push(a, a + 1, c, a + 1, c + 1, c); }
+    return this;
+  }
+  // rideau vertical (cascade) de largeur w entre (x0,z0) et (x1,z1)
+  sheet(x0, z0, x1, z1, yTop, yBot, cells = 6) {
+    const base = this.p.length / 3; this.p.push(x0, yTop, z0, x1, yTop, z1, x0, yBot, z0, x1, yBot, z1); this.u.push(0, 0, cells / 28, 0, 0, (yTop - yBot) * 2, cells / 28, (yTop - yBot) * 2);
+    this.i.push(base, base + 1, base + 2, base + 1, base + 3, base + 2); return this;
+  }
+  mesh(kit, name) {
+    const g = new THREE.BufferGeometry(); g.setAttribute('position', new THREE.Float32BufferAttribute(this.p, 3)); g.setAttribute('uv', new THREE.Float32BufferAttribute(this.u, 2)); g.setIndex(this.i);
+    const me = new THREE.Mesh(g, kit.water); me.name = name; me.renderOrder = 3; return me;
+  }
+}
+
+// Aile de palais placée dans le monument (x, z, ry) avec collisions ; o.gates = [{ x, w, h }] : porches traversants
+// (x le long de l'aile) sous lesquels on passe à pied ou en voiture.
+export function wing(m, x, z, ry, o) {
+  const B = m.B, gates = (o.gates || []).slice().sort((a, b) => a.x - b.x), wall = o.wall || P.stone;
+  let H = 0; for (const f of o.floors) H += f.h;
+  const segs = []; let x0 = -o.len / 2;
+  for (const g of gates) { segs.push([x0, g.x - g.w / 2]); x0 = g.x + g.w / 2; }
+  segs.push([x0, o.len / 2]);
+  const c = Math.cos(ry), s = Math.sin(ry);
+  B.group(x, 0, z, ry, () => {
+    for (const [a, b] of segs) if (b - a > 1.5) B.group((a + b) / 2, 0, 0, 0, () => palaceWing(B, { ...o, len: b - a, gates: null }));
+    for (const g of gates) {
+      const gh = g.h || 9, top = Math.max(H + 4, gh + 6);
+      B.extrude(wall, arcadeShape(-g.w / 2, g.w / 2, gh + 0.01, [{ x: 0, w: g.w - 1.8, h: gh - 0.4 }]), o.dep, g.x, 0, -o.dep / 2);
+      B.box(wall, g.w, top - gh, o.dep + 1.2, g.x, gh, 0); B.box(P.stoneL, g.w + 1.2, 0.9, o.dep + 2.4, g.x, top, 0);
+      B.frustum(o.roofMat || P.zinc, g.w + 0.6, o.dep + 1.8, g.w * 0.45, o.dep * 0.4, 6.5, g.x, top + 0.9, 0);
+      if (B.hi) for (const sd of [1, -1]) B.group(g.x, 0, sd * (o.dep / 2 + 0.6), sd > 0 ? 0 : Math.PI, () => { B.win(0, gh + 2, 0.02, Math.min(3, g.w * 0.4), Math.max(2, top - gh - 4.5), { arch: true, lit: 0.7 }); B.extrude(P.stoneL, archRing(g.w / 2 - 0.9, 0.7), 0.3, 0, gh - 0.4 - (g.w / 2 - 0.9), 0); });
+    }
+  });
+  for (const [a, b] of segs) if (b - a > 1.5) { const cx = (a + b) / 2; m.collide.box(x + cx * c, z - cx * s, (b - a) / 2 + 0.3, o.dep / 2 + 0.3, ry); }
+  for (const g of gates) m.collide.box(x + g.x * c, z - g.x * s, g.w / 2, o.dep / 2, ry, (g.h || 9) - 0.5);
+  return H;
+}
+export function archRing(r, t) { const s = new THREE.Shape(); s.absarc(0, 0, r + t, 0, Math.PI, false); s.lineTo(-r, 0); s.absarc(0, 0, r, Math.PI, 0, true); s.closePath(); return s; }
+// Bâtiment sur cour : quatre ailes autour d'un rectangle w × d (dimensions extérieures), centré en (cx, cz).
+// o.gatesN/S/E/W : porches de chaque côté (N = -Z, S = +Z, E = +X, W = -X).
+export function court(m, cx, cz, w, d, o) {
+  const dp = o.dep;
+  wing(m, cx, cz + d / 2 - dp / 2, 0, { ...o, len: w, gates: o.gatesS });
+  wing(m, cx, cz - d / 2 + dp / 2, 0, { ...o, len: w, gates: o.gatesN });
+  wing(m, cx + w / 2 - dp / 2, cz, Math.PI / 2, { ...o, len: d - 2 * dp + 0.4, gates: o.gatesE });
+  wing(m, cx - w / 2 + dp / 2, cz, Math.PI / 2, { ...o, len: d - 2 * dp + 0.4, gates: o.gatesW });
+}
+// Pavillon à toit « à l'impériale » (Louvre, Hôtel de Ville…), façades avant/arrière ornées ; centré, face +Z.
+export function pavilion(B, x, z, ry, o = {}) {
+  const w = o.w || 27, d = o.d || 25, H = o.h || 28, rm = o.roofMat || P.slate, wall = o.wall || P.stone;
+  B.group(x, 0, z, ry, () => {
+    B.box(wall, w, H + 3, d, 0, -3, 0); B.box(P.stoneL, w + 1.4, 1, d + 1.4, 0, H, 0); B.box(P.stoneD, w + 0.5, 1.2, d + 0.5, 0, 0, 0);
+    const rh = o.roofH || 9;
+    B.frustum(rm, w, d, w * 0.55, d * 0.5, rh, 0, H + 1, 0); B.frustum(rm, w * 0.55, d * 0.5, w * 0.3, d * 0.2, rh * 0.28, 0, H + 1 + rh, 0);
+    B.box(P.lead, w * 0.32, 0.8, d * 0.22, 0, H + 1 + rh * 1.28, 0);
+    for (const s of [1, -1]) B.group(0, 0, s * d / 2, s > 0 ? 0 : Math.PI, () => {
+      if (!o.gate) B.win(0, 1.2, 0, w * 0.16, 6, { arch: true, lit: 0.8, farMin: 0 });
+      B.win(0, H * 0.41, 0, w * 0.13, H * 0.25, { arch: true, lit: 0.8, farMin: 0 });
+      for (const sx of [-1, 1]) { B.win(sx * w * 0.32, 1.4, 0, 2.6, 5, { arch: true }); B.win(sx * w * 0.32, H * 0.41, 0, 2.2, 5); B.win(sx * w * 0.32, H * 0.72, 0, 1.9, 3); }
+      B.win(0, H * 0.78, 0, 2.4, 3.4);
+      if (B.hi) {
+        for (const sx of [-1, 1]) for (const q of [0.135, 0.195]) { B.cyl(P.stoneL, 0.5, 0.55, H * 0.3, sx * w * q, 1.2, 0.9, 10); B.cyl(P.stoneL, 0.45, 0.5, H * 0.27, sx * w * q, H * 0.39, 0.9, 10); }
+        B.box(P.stoneL, w * 0.46, 0.9, 2.2, 0, H * 0.35, 0.6); B.box(P.stoneL, w * 0.46, 0.9, 2.2, 0, H * 0.665, 0.6);
+        B.gable(P.deco, rm, w * 0.48, 3.2, 1.6, 0, H + 0.1, 0.6); B.lump(P.deco, 0, H * 0.71, 0.9, w * 0.37, 5, 0.8, 8, Math.round(x + z));
+      }
+    });
+  });
 }

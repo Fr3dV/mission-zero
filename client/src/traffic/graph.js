@@ -226,6 +226,43 @@ export function buildGraph(worldData) {
     yawOf(ux, uz) { return Math.atan2(-ux, -uz); },
 
     /**
+     * Demi-arête la plus proche de (x, z) à moins de maxD. Si driveOnly, seules les demi-arêtes roulables comptent
+     * et (dx, dz) (direction souhaitée, normalisée) départage les deux sens. Écrit out.h, out.s, out.d (distance à
+     * l'axe) et out.lat (écart latéral signé, > 0 = à droite du sens de out.h).
+     */
+    nearest(x, z, maxD, out, driveOnly, dx, dz) {
+      let best = 1e9; out.h = -1;
+      const cx0 = Math.max(0, Math.floor((x - maxD - minX) / CELL)), cx1 = Math.min(cols - 1, Math.floor((x + maxD - minX) / CELL));
+      const cz0 = Math.max(0, Math.floor((z - maxD - minZ) / CELL)), cz1 = Math.min(rows - 1, Math.floor((z + maxD - minZ) / CELL));
+      for (let cz = cz0; cz <= cz1; cz++) for (let cx = cx0; cx <= cx1; cx++) {
+        const c = cz * cols + cx;
+        for (let i = cellStart[c]; i < cellStart[c + 1]; i++) {
+          let h = 2 * cellItems[i];
+          let s = (x - nx[hFrom[h]]) * hUx[h] + (z - nz[hFrom[h]]) * hUz[h];
+          s = Math.max(0, Math.min(hLen[h], s));
+          const qx = x - nx[hFrom[h]] - hUx[h] * s, qz = z - nz[hFrom[h]] - hUz[h] * s;
+          const d = Math.hypot(qx, qz);
+          if (d > maxD) continue;
+          let score = d;
+          if (driveOnly) {
+            const dot = dx * hUx[h] + dz * hUz[h];
+            // sens le mieux aligné parmi les sens roulables
+            if (hDrive[h] && hDrive[h ^ 1]) { if (dot < 0) h ^= 1; score += (1 - Math.abs(dot)) * 6; }
+            else if (hDrive[h]) score += (1 - dot) * 6;
+            else if (hDrive[h ^ 1]) { h ^= 1; score += (1 + dot) * 6; }
+            else continue;
+          }
+          if (score < best) {
+            best = score; out.h = h; out.d = d;
+            out.s = h & 1 ? hLen[h] - s : s;
+            out.lat = -qx * hUz[h] + qz * hUx[h];
+          }
+        }
+      }
+      return out.h >= 0;
+    },
+
+    /**
      * Tire une arête au hasard dans l'anneau [rMin, rMax] autour de (x, z). Écrit out.e, out.s, out.x, out.z.
      * @returns {boolean} false si rien trouvé cette fois (à retenter plus tard).
      */

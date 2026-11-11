@@ -74,16 +74,16 @@ function lampGeometry(THREE) {
 export function createPropMaterial(THREE, uniforms) {
   const mat = new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.5, metalness: 0.25 });
   mat.onBeforeCompile = (sh) => {
-    sh.uniforms.uLampOn = uniforms.uLampOn;
+    sh.uniforms.uLampOn = uniforms.uLampOn; sh.uniforms.uSig = uniforms.uSig || (uniforms.uSig = { value: 1 });
     sh.vertexShader = sh.vertexShader.replace('#include <common>', '#include <common>\nattribute float aGlow;\nvarying float vGlow;')
       .replace('#include <begin_vertex>', '#include <begin_vertex>\nvGlow = aGlow;');
-    sh.fragmentShader = sh.fragmentShader.replace('#include <common>', '#include <common>\nvarying float vGlow;\nuniform float uLampOn;')
+    sh.fragmentShader = sh.fragmentShader.replace('#include <common>', '#include <common>\nvarying float vGlow;\nuniform float uLampOn;\nuniform float uSig;')
       .replace('#include <emissivemap_fragment>', `#include <emissivemap_fragment>
-float gl = vGlow > 1.5 ? 1.6 : (vGlow > 0.5 ? uLampOn * 3.2 : 0.0);
+float gl = vGlow > 1.5 ? 1.6 * uSig : (vGlow > 0.5 ? uLampOn * 3.2 : 0.0);
 totalEmissiveRadiance += vColor.rgb * gl;
 if (vGlow > 0.5 && vGlow < 1.5) diffuseColor.rgb = mix(vec3(0.75, 0.74, 0.7), diffuseColor.rgb, uLampOn);`);
   };
-  mat.customProgramCacheKey = () => 'mz-props';
+  mat.customProgramCacheKey = () => 'mz-props2';
   return mat;
 }
 
@@ -100,7 +100,7 @@ export function buildProps(ctx, net, masks, river, bld, Q, uniforms, streetInfo)
   const addLamp = (x, z, yaw) => {
     const k = tileKey(x, z); let a = lampTiles.get(k); if (!a) lampTiles.set(k, (a = []));
     a.push(x, heightAt(x, z) + Y_WALK, z, yaw);
-    collision.addCircle({ x, z, r: 0.2, top: heightAt(x, z) + 5, tag: 'lamp' });
+    collision.addCircle({ x, z, r: 0.2, top: heightAt(x, z) + 5, tag: 'lamp', data: { type: 'lamp', tile: a, i: a.length / 4 - 1, x, z, y: heightAt(x, z) + Y_WALK } });
   };
   for (const r of net.roads) {
     const both = r._sw >= 4;
@@ -115,7 +115,7 @@ export function buildProps(ctx, net, masks, river, bld, Q, uniforms, streetInfo)
         const s = a + ((b - a) * (i + 0.5)) / n;
         for (const sg of both ? [1, -1] : [side]) {
           net.pointAt(r, s, sg * off, o);
-          if (!free(o.x, o.z, 0.3) || (!r._ped && net.edgeDistance(o.x, o.z, false) < 0.4)) continue;
+          if (!free(o.x, o.z, 0.3) || (!r._ped && net.edgeDistance(o.x, o.z, false) < 0.4) || net.inZone(o.x, o.z, 1)) continue;
           addLamp(o.x, o.z, Math.atan2(o.dx, o.dz) + (rnd() < 0.5 ? 0 : Math.PI / 4));
         }
         side = -side;
@@ -150,7 +150,7 @@ gl_Position = projectionMatrix * mvPosition;`);
     for (let i = 0; i < n; i++) r2 = Math.max(r2, (a[i * 4] - cx) ** 2 + (a[i * 4 + 1] - cy) ** 2 + (a[i * 4 + 2] - cz) ** 2);
     const sphere = new THREE.Sphere(new THREE.Vector3(cx, cy + 3, cz), Math.sqrt(r2) + 10);
     m.boundingSphere = sphere; m.castShadow = Q.shadows; m.receiveShadow = false; m.matrixAutoUpdate = false; m.name = 'lampadaires';
-    scene.add(m); lampMeshes.push(m);
+    scene.add(m); lampMeshes.push(m); a.mesh = m;
     for (const [geo, material] of [[poolGeo, poolMat], [haloGeo, haloMat]]) {
       const p = new THREE.InstancedMesh(geo, material, n);
       p.instanceMatrix = m.instanceMatrix; p.boundingSphere = sphere; p.matrixAutoUpdate = false; p.visible = false; p.renderOrder = 3; p.name = 'lumiere-lampadaire';
@@ -163,10 +163,12 @@ gl_Position = projectionMatrix * mvPosition;`);
   const geoAt = (x, z) => { const k = tileKey(x, z); let g = tiles.get(k); if (!g) tiles.set(k, (g = new Geo())); return g; };
   const yw = (x, z) => heightAt(x, z) + Y_WALK;
   let nProps = 0;
+  // donnée attachée à la collision : type + plage de sommets [v0, v1) dans la géométrie fusionnée de la tuile (geo.mesh)
+  const pd = (type, g, v0, x, z) => ({ type, geo: g, v0, v1: g.p.length / 3, x, z, y: g.oy });
   // feux tricolores
   for (const L of streetInfo.lights) {
-    if (!free(L.x, L.z, 0.2) || net.edgeDistance(L.x, L.z, false) < 0.35) continue;
-    const g = geoAt(L.x, L.z).at(L.x, yw(L.x, L.z), L.z, L.yaw);
+    if (!free(L.x, L.z, 0.2) || net.edgeDistance(L.x, L.z, false) < 0.35 || net.inZone(L.x, L.z, 1)) continue;
+    const g = geoAt(L.x, L.z).at(L.x, yw(L.x, L.z), L.z, L.yaw), v0 = g.p.length / 3;
     g.cyl(0, 0, 0, 2.6, 0.06, 0.05, 6, IRON);
     g.box(0, 3.05, 0, 0.3, 0.95, 0.26, [0.02, 0.022, 0.02]);
     const green = rnd() < 0.5;
@@ -174,7 +176,7 @@ gl_Position = projectionMatrix * mvPosition;`);
     g.box(0, 3.05, -0.14, 0.17, 0.17, 0.03, [0.14, 0.08, 0.0], 0);
     g.box(0, 2.75, -0.14, 0.17, 0.17, 0.03, green ? [0.1, 1, 0.35] : [0.01, 0.1, 0.03], green ? 2 : 0);
     g.box(0, 1.5, -0.1, 0.16, 0.3, 0.08, [0.02, 0.022, 0.02]); // répétiteur piéton
-    collision.addCircle({ x: L.x, z: L.z, r: 0.12, top: yw(L.x, L.z) + 3.5, tag: 'feu' });
+    collision.addCircle({ x: L.x, z: L.z, r: 0.12, top: yw(L.x, L.z) + 3.5, tag: 'feu', data: pd('feu', g, v0, L.x, L.z) });
     nProps++;
   }
   // le long des avenues et boulevards : bancs, colonnes Morris, kiosques
@@ -207,27 +209,30 @@ gl_Position = projectionMatrix * mvPosition;`);
       for (let s = s0 + 14 + rnd() * 30; s < s1 - 14; s += 45 + rnd() * 50) {
         const sg = rnd() < 0.5 ? 1 : -1, pick = rnd();
         net.pointAt(r, s, sg * (r._hw + r._sw - 1.3), o);
-        if (!free(o.x, o.z, 1.4) || net.edgeDistance(o.x, o.z) < 1.2) continue;
+        if (!free(o.x, o.z, 1.4) || net.edgeDistance(o.x, o.z) < 1.2 || net.inZone(o.x, o.z, 2)) continue;
         // yaw : face vers la chaussée
-        const g = geoAt(o.x, o.z).at(o.x, yw(o.x, o.z), o.z, Math.atan2(sg * o.dz, -sg * o.dx));
+        const g = geoAt(o.x, o.z).at(o.x, yw(o.x, o.z), o.z, Math.atan2(sg * o.dz, -sg * o.dx)), v0 = g.p.length / 3;
         if (pick >= 0.9 && r._sw >= 5) kiosks.push([o.x, o.z]);
-        if (pick < 0.62) { bench(g); collision.addCircle({ x: o.x, z: o.z, r: 0.7, top: yw(o.x, o.z) + 1, tag: 'banc' }); }
-        else if (pick < 0.9) { morris(g, (rnd() * 5) | 0); collision.addCircle({ x: o.x, z: o.z, r: 0.85, top: yw(o.x, o.z) + 4.5, tag: 'morris' }); }
-        else if (r._sw >= 5) { kiosk(g); collision.addCircle({ x: o.x, z: o.z, r: 1.6, top: yw(o.x, o.z) + 3.5, tag: 'kiosque' }); }
+        if (pick < 0.62) { bench(g); collision.addCircle({ x: o.x, z: o.z, r: 0.7, top: yw(o.x, o.z) + 1, tag: 'banc', data: pd('banc', g, v0, o.x, o.z) }); }
+        else if (pick < 0.9) { morris(g, (rnd() * 5) | 0); collision.addCircle({ x: o.x, z: o.z, r: 0.85, top: yw(o.x, o.z) + 4.5, tag: 'morris', data: pd('morris', g, v0, o.x, o.z) }); }
+        else if (r._sw >= 5) { kiosk(g); collision.addCircle({ x: o.x, z: o.z, r: 1.6, top: yw(o.x, o.z) + 3.5, tag: 'kiosque', data: pd('kiosque', g, v0, o.x, o.z) }); }
         nProps++;
       }
     }
   }
   // bouches de métro près des grands carrefours (espacées)
   const metros = [];
-  for (const j of net.junctions) {
-    if (j.maxHw < 4.7 || j.ped) continue;
+  // positions réelles des stations (pois kind 'metro') si la donnée existe, sinon grands carrefours espacés
+  const poiMetros = (Array.isArray(ctx.worldData.pois?.pois) ? ctx.worldData.pois.pois : []).filter((p) => p && p.kind === 'metro' && Number.isFinite(p.x) && Number.isFinite(p.z));
+  const metroSites = poiMetros.length >= 5 ? poiMetros.map((p) => ({ p: [p.x, p.z], maxHw: 0, ped: false, real: true })) : net.junctions;
+  for (const j of metroSites) {
+    if (!j.real && (j.maxHw < 4.7 || j.ped)) continue;
     const [x, z] = j.p;
-    if (metros.some((m) => Math.hypot(m[0] - x, m[1] - z) < 380)) continue;
+    if (metros.some((m) => Math.hypot(m[0] - x, m[1] - z) < (j.real ? 25 : 380))) continue;
     // cherche un emplacement libre autour du carrefour
-    for (let t = 0; t < 10; t++) {
-      const a = rnd() * Math.PI * 2, R = j.maxHw + 9 + rnd() * 8, px = x + Math.cos(a) * R, pz = z + Math.sin(a) * R;
-      if (net.edgeDistance(px, pz) < 3.6 || !free(px, pz, 3.5) || masks.isWater(px, pz) || masks.isPark(px, pz)) continue;
+    for (let t = 0; t < (j.real ? 28 : 10); t++) {
+      const a = rnd() * Math.PI * 2, R = j.real ? 2 + t * 1.1 : j.maxHw + 9 + rnd() * 8, px = x + Math.cos(a) * R, pz = z + Math.sin(a) * R;
+      if (net.edgeDistance(px, pz) < (j.real ? 2.4 : 3.6) || !free(px, pz, j.real ? 2.6 : 3.5) || masks.isWater(px, pz) || (!j.real && masks.isPark(px, pz))) continue;
       metros.push([x, z, px, pz]);
       const yaw = rnd() * Math.PI, g = geoAt(px, pz).at(px, yw(px, pz) - 0.1, pz, yaw);
       g.quad([-1.4, 0.03, 2.6], [1.4, 0.03, 2.6], [1.4, 0.03, -2.6], [-1.4, 0.03, -2.6], [0.01, 0.01, 0.012]); // trémie
@@ -239,7 +244,7 @@ gl_Position = projectionMatrix * mvPosition;`);
       for (const sx of [-1.45, 1.45]) { g.cyl(sx, -2.7, 0, 3.4, 0.07, 0.05, 6, GREEN); g.cyl(sx, -2.7, 3.4, 3.75, 0.1, 0.16, 6, [1.0, 0.45, 0.2], 2, true); }
       g.box(0, 3.0, -2.7, 2.9, 0.5, 0.07, [0.95, 0.8, 0.25], 2);
       g.box(0, 3.0, -2.7, 2.5, 0.3, 0.09, GREEN);
-      collision.addBox({ x: px, z: pz, hw: 1.6, hd: 2.8, rot: yaw, top: yw(px, pz) + 1.2, tag: 'metro' });
+      collision.addBox({ x: px, z: pz, hw: 1.6, hd: 2.8, rot: yaw, top: yw(px, pz) + 1.2, tag: 'metro', data: { type: 'metro' } });
       nProps++;
       break;
     }
@@ -248,10 +253,10 @@ gl_Position = projectionMatrix * mvPosition;`);
   for (const [, g] of tiles) {
     const geo = g.build(THREE); if (!geo) continue;
     const m = new THREE.Mesh(geo, mat); m.castShadow = Q.shadows; m.receiveShadow = true; m.matrixAutoUpdate = false; m.name = 'mobilier';
-    scene.add(m); propMeshes.push(m);
+    scene.add(m); propMeshes.push(m); g.mesh = m;
   }
   return {
-    lampCount, nProps, mat, Geo, metros, kiosks,
+    lampCount, nProps, mat, Geo, metros, kiosks, lampGeo, propMeshes,
     update(cam, night) {
       const pools = night > 0.05;
       poolMat.opacity = 0.36 * night; haloMat.opacity = 0.4 * night;

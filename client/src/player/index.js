@@ -1,7 +1,7 @@
 // Module « joueur » : entrées, personnage animé, contrôleur à pied, montée/descente de véhicule, caméra 3e personne.
 // Contrat : voir docs/ARCHITECTURE.md (ctx.player + export createCharacter).
 import { STARTER_VEHICLE } from '@shared/catalog.js';
-import { createCharacter, SIT_ROOT_Y } from './character.js';
+import { createCharacter, SIT_ROOT_Y, KNOCK_SPEED } from './character.js';
 import { createInput } from './input.js';
 import { createCameraRig, CAMERA_VIEWS } from './camera.js';
 
@@ -13,6 +13,7 @@ const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
 
 const WALK_SPEED = 2.5, RUN_SPEED = 6.4, RADIUS = 0.32;
 const JUMP_SPEED = 4.9, GRAVITY = 14;
+const STEAL_MAX_SPEED = 4.2; // m/s (~15 km/h)
 const ENTER_DIST = 4, EXIT_MAX_SPEED = 15 / 3.6;
 const VIEW_LABEL = { proche: 'Caméra proche', loin: 'Caméra éloignée', capot: 'Caméra capot' };
 
@@ -34,6 +35,10 @@ export function createPlayer(ctx) {
     pos: { x: start.x, y: heightAt(start.x, start.z), z: start.z },
     yaw: start.yaw, speed: 0, mode: 'foot', vehicle: null, character, enabled: true, input,
     anim: 'idle', grounded: true,
+    /** true pendant qu'il est renversé (chute, au sol, relevé) : entrées ignorées */
+    knocked: false,
+    /** true pendant la séquence de vol d'une voiture (entrées ignorées) */
+    carjacking: false,
     /** true = affiche la pastille d'indication intégrée (inutile si l'interface écoute `player:prompt`, ce qui est le cas) */
     promptUI: params?.get?.('promptui') === '1',
     /** true = le conducteur local est visible, assis dans la voiture */
@@ -46,6 +51,9 @@ export function createPlayer(ctx) {
   cam.snap(p.yaw);
 
   let vx = 0, vz = 0, vy = 0;
+  // renversé par une voiture : K = état de la chute (null sinon)
+  let J = null; // vol de voiture en cours
+  let K = null, immuneUntil = 0, hitBy = null, hitClosing = 0, hitNx = 0, hitNz = 0, hitVx = 0, hitVz = 0, hitSide = 1, hitRx = 1, hitRz = 0;
   let promptText = null, promptTimer = 0, lastExitToast = -10;
 
   // ------------------------------------------------------------------ pastille d'indication (repli si l'UI ne gère pas player:prompt)
@@ -80,6 +88,88 @@ export function createPlayer(ctx) {
   const vehicleName = (v) => v.spec?.name || 'le véhicule';
   function nearestFreeVehicle() {
     return ctx.vehicles?.nearest?.(p.pos.x, p.pos.z, ENTER_DIST, (v) => !v.driver && !v.remote) || null;
+  }
+  const dist2 = (v) => (v.pos.x - p.pos.x) ** 2 + (v.pos.z - p.pos.z) ** 2;
+  /** Véhicule visé par F : une voiture libre, sinon une voiture conduite par l'IA à l'arrêt ou presque (vol). */
+  function vehicleTarget() {
+    const free = nearestFreeVehicle();
+    const ai = ctx.vehicles?.nearest?.(p.pos.x, p.pos.z, ENTER_DIST, (v) => v.driver === 'ai' && Math.abs(v.speed || 0) <= STEAL_MAX_SPEED) || null;
+    if (ai && (!free || Math.sqrt(dist2(ai)) + 0.5 < Math.sqrt(dist2(free)))) { tgt.v = ai; tgt.steal = true; }
+    else { tgt.v = free; tgt.steal = false; }
+    return tgt;
+  }
+  const tgt = { v: null, steal: false };
+
+  // ------------------------------------------------------------------ vol d'une voiture conduite par l'IA
+  function doorSpot(v, side) {
+    const sgn = side === 'left' ? 1 : -1, off = (v.spec?.width || 1.8) / 2 + 0.5;
+    const lx = -Math.cos(v.yaw) * sgn, lz = Math.sin(v.yaw) * sgn, fz = (v.seat?.z ?? 0) - 0.15; // z local du siège (avant = −z)
+    door.x = v.pos.x + lx * off + Math.sin(v.yaw) * fz; door.z = v.pos.z + lz * off + Math.cos(v.yaw) * fz;
+    return door;
+  }
+  const door = { x: 0, z: 0 };
+  function doorFree(v, side) {
+    const d = doorSpot(v, side);
+    return !collision?.test?.(d.x, d.z, RADIUS, heightAt(d.x, d.z) + 0.9) && !ctx.world?.isWater?.(d.x, d.z) && !hitsVehicle(d.x, d.z, v);
+  }
+  function startCarjack(v) {
+    const side = doorFree(v, 'left') || !doorFree(v, 'right') ? 'left' : 'right';
+    J = { v, side, t: 0, grab: 0, done: false };
+    p.carjacking = true; vx = vz = 0;
+    setPrompt(null);
+  }
+  function cancelCarjack(msg) {
+    J = null; p.carjacking = false; cam.focus = null;
+    if (character.anim === 'grab') character.setState({ anim: 'idle' });
+    if (msg) bus.emit('toast', { text: msg, kind: 'error' });
+  }
+  function updateCarjack(dt) {
+    const v = J.v;
+    J.t += dt;
+    const gone = (ctx.vehicles?.list && !ctx.vehicles.list.includes(v)) || dist2(v) > 6.5 * 6.5 || Math.abs(v.speed || 0) > STEAL_MAX_SPEED + 2.5 || (v.driver && v.driver !== 'ai') || J.t > 4;
+    if (gone) return cancelCarjack(J.t > 0.3 ? 'Trop tard, la voiture est partie' : null);
+    // 1) rejoindre la portière, face à la voiture
+    const d = doorSpot(v, J.side);
+    {
+      // on contourne la carrosserie : si le joueur est devant ou derrière la voiture, il se décale d'abord sur le côté
+      const rx = p.pos.x - v.pos.x, rz = p.pos.z - v.pos.z, c = Math.cos(v.yaw), sn = Math.sin(v.yaw), lx = rx * c - rz * sn, lz = rx * sn + rz * c;
+      const hw = (v.spec?.width || 1.8) / 2 + 0.5, sgn = J.side === 'left' ? -1 : 1;
+      if (Math.abs(lx) < hw - 0.12 && Math.abs(lz) > (v.spec?.length || 4.2) / 2 - 0.1) { const tx = sgn * hw; d.x = v.pos.x + tx * c + lz * sn; d.z = v.pos.z - tx * sn + lz * c; J.via = true; } else J.via = false;
+    }
+    const dx = d.x - p.pos.x, dz = d.z - p.pos.z, dd = Math.hypot(dx, dz);
+    const sp = J.grab > 0 ? Math.min(dd / Math.max(dt, 1e-3), 3) : Math.min(5.2, dd / Math.max(dt, 1e-3));
+    if (dd > 0.02) { p.pos.x += (dx / dd) * sp * dt; p.pos.z += (dz / dd) * sp * dt; }
+    p.pos.y = heightAt(p.pos.x, p.pos.z); p.grounded = true; vy = 0;
+    const face = Math.atan2(-(v.pos.x - p.pos.x), -(v.pos.z - p.pos.z)), move = dd > 0.25 ? Math.atan2(-dx, -dz) : face;
+    p.yaw = wrap(p.yaw + wrap((J.grab > 0 ? face : move) - p.yaw) * (1 - Math.exp(-14 * dt)));
+    cam.focus = d;
+    if ((dd > 0.3 || J.via) && J.grab === 0) { p.speed = sp; p.anim = sp > 3.9 ? 'run' : 'walk'; character.setState({ anim: p.anim, speed: sp }); }
+    else {
+      // 2) empoignade, 3) éjection du conducteur, 4) on s'installe
+      if (J.grab === 0) character.setState({ anim: 'grab', speed: 0 });
+      J.grab += dt; p.speed = 0; p.anim = 'idle';
+      if (!J.done && J.grab > 0.42) {
+        J.done = true;
+        let ok = false;
+        try {
+          if (ctx.traffic?.ejectDriver) ok = !!ctx.traffic.ejectDriver(v, { side: J.side });
+          else if (v.driver === 'ai') { v.driver = null; v.remote = false; ok = true; } // repli : trafic sans ejectDriver
+        } catch (e) { console.warn('[player] ejectDriver', e); }
+        if (!ok) return cancelCarjack('Impossible de prendre cette voiture');
+        // jamais deux personnages dans le siège
+        if (v.occupant) { console.warn('[player] vehicle.occupant encore présent après ejectDriver : masqué'); const og = v.occupant.group || v.occupant; if (og && 'visible' in og) og.visible = false; }
+        bus.emit('vehicle:carjack', { vehicle: v, by: 'local' });
+      }
+      if (J.done && J.grab > 0.85) {
+        J = null; p.carjacking = false; cam.focus = null;
+        if (v.driver && v.driver !== 'local') { v.driver = null; }
+        v.remote = false;
+        enterVehicle(v);
+        return;
+      }
+    }
+    character.group.position.set(p.pos.x, p.pos.y, p.pos.z);
+    character.group.rotation.y = p.yaw;
   }
   /** Installe le personnage dans le siège conducteur (vehicle.seat = {x, y = hauteur du bassin, z} si fourni). */
   function seatCharacter(v) {
@@ -160,7 +250,7 @@ export function createPlayer(ctx) {
       return false;
     }
     const spot = findExitSpot(v);
-    if (!spot && !force) {
+    if (!spot && !force && !v.wrecked) {
       if ((ctx.time || 0) - lastExitToast > 2) { lastExitToast = ctx.time || 0; bus.emit('toast', { text: 'Pas assez de place pour descendre ici', kind: 'error' }); }
       return false;
     }
@@ -174,13 +264,18 @@ export function createPlayer(ctx) {
     character.group.position.set(p.pos.x, p.pos.y, p.pos.z);
     cam.transition();
     bus.emit('player:exitVehicle', { vehicle: v });
+    // sortie d'une voiture très endommagée : on titube
+    if (v.wrecked || (v.damage || 0) > 0.6) character.knock({ dirX: s.x - v.pos.x, dirZ: s.z - v.pos.z, speed: 1.2 });
     return true;
   }
 
   function toggleVehicle() {
+    if (K) return;
+    if (J) return;
     if (p.vehicle) return exitVehicle();
-    const v = nearestFreeVehicle();
-    if (v) enterVehicle(v);
+    const t = vehicleTarget();
+    if (!t.v) return;
+    if (t.steal) startCarjack(t.v); else enterVehicle(t.v);
   }
 
   // ------------------------------------------------------------------ API
@@ -196,6 +291,7 @@ export function createPlayer(ctx) {
   function getNetState() {
     const v = p.vehicle;
     // anim limitée aux valeurs du contrat (les sauts sont transmis comme « run »/« idle »)
+    // anim : valeurs du contrat + 'lying' / 'getup' quand le joueur est renversé (les sauts sont transmis comme « run »/« idle »)
     const anim = v ? 'sit' : p.anim === 'jump' || p.anim === 'fall' ? (p.speed > 3.6 ? 'run' : 'idle') : p.anim;
     return {
       x: p.pos.x, y: p.pos.y, z: p.pos.z, yaw: p.yaw, speed: p.speed, mode: p.mode, anim,
@@ -270,12 +366,28 @@ export function createPlayer(ctx) {
       if (p.pos.y > o.pos.y + (o.spec?.height || 1.4)) continue;
       const c = Math.cos(o.yaw), s = Math.sin(o.yaw);
       const lx = dx * c - dzz * s, lz = dx * s + dzz * c;
-      const hw = (o.spec?.width || 1.8) / 2 + RADIUS, hd = (o.spec?.length || 4.2) / 2 + RADIUS;
-      const ex = hw - Math.abs(lx), ez = hd - Math.abs(lz);
+      const sp = o.speed || 0, sweep = Math.abs(sp) * dt * 0.5; // balayage : la boîte est allongée du trajet de la frame
+      const hw = (o.spec?.width || 1.8) / 2 + RADIUS, hd = (o.spec?.length || 4.2) / 2 + RADIUS + sweep, lzs = lz + sp * dt * 0.5;
+      const ex = hw - Math.abs(lx), ez = hd - Math.abs(lzs);
       if (ex <= 0 || ez <= 0) continue;
       let px = 0, pz = 0;
-      if (ex < ez) px = Math.sign(lx || 1) * ex; else pz = Math.sign(lz || 1) * ez;
-      nx += px * c + pz * s; nz += -px * s + pz * c;
+      if (ex < ez) px = Math.sign(lx || 1) * ex; else pz = Math.sign(lzs || 1) * ez;
+      const wx = px * c + pz * s, wz = -px * s + pz * c;
+      nx += wx; nz += wz;
+      // choc : vitesse de fermeture le long de la normale de contact
+      if (Math.abs(sp) > 0.8 && (ctx.time || 0) > immuneUntil) {
+        const l = Math.hypot(wx, wz) || 1, ux = wx / l, uz = wz / l;
+        const vvx = -s * sp, vvz = -c * sp, closing = (vvx - vx) * ux + (vvz - vz) * uz;
+        if (closing > 0.8) { hitBy = o; hitClosing = closing; hitNx = ux; hitNz = uz; hitVx = vvx; hitVz = vvz; hitSide = (Math.abs(lx) > 0.08 ? Math.sign(lx) : (ctx.time * 7 % 1 < 0.5 ? 1 : -1)); hitRx = c; hitRz = -s; }
+      }
+    }
+    if (hitBy) {
+      const o = hitBy; hitBy = null;
+      if (hitClosing < KNOCK_SPEED) { // simple bousculade : on titube, sans perdre la main
+        character.knock({ dirX: hitNx, dirZ: hitNz, speed: hitClosing });
+        vx += hitNx * hitClosing * 0.8; vz += hitNz * hitClosing * 0.8;
+        immuneUntil = (ctx.time || 0) + 0.9;
+      } else { p.pos.x = Number.isFinite(nx) ? nx : p.pos.x; p.pos.z = Number.isFinite(nz) ? nz : p.pos.z; return knockDown(o, hitClosing); }
     }
     if (collision?.resolveCircle) {
       const r = collision.resolveCircle(nx, nz, RADIUS, p.pos.y + 0.9);
@@ -299,9 +411,69 @@ export function createPlayer(ctx) {
     }
     p.speed = Math.hypot(vx, vz);
     p.anim = !p.grounded ? (vy > 0.5 ? 'jump' : 'fall') : p.speed > 3.9 ? 'run' : p.speed > 0.25 ? 'walk' : 'idle';
-    character.setState({ anim: p.anim, speed: p.speed });
+    if (character.anim === 'stumble' && p.grounded) { character.setState({ speed: p.speed }); p.anim = 'stumble'; }
+    else character.setState({ anim: p.anim, speed: p.speed });
     character.group.position.set(p.pos.x, p.pos.y, p.pos.z);
     character.group.rotation.y = p.yaw;
+  }
+
+  // ------------------------------------------------------------------ joueur renversé
+  function knockDown(by, closing) {
+    // projeté dans le sens de la voiture (un peu écarté selon la normale de contact)
+    // (vitesse de la voiture, plus une déviation vers le côté du contact : le corps est rejeté hors de sa trajectoire)
+    const k = Math.min(1.08, 0.7 + closing / 30), lat = hitSide * (1.6 + 0.12 * closing);
+    K = { by, speed: closing, vx: hitVx * k + hitNx * closing * 0.25 + hitRx * lat, vz: hitVz * k + hitNz * closing * 0.25 + hitRz * lat, lie: 0, up: false, t: 0 };
+    vx = vz = vy = 0; p.grounded = true; p.knocked = true; p.anim = 'lying';
+    character.group.position.set(p.pos.x, p.pos.y, p.pos.z);
+    character.knock({ dirX: K.vx, dirZ: K.vz, speed: closing });
+    cam.shake(clamp(0.35 + closing / 22, 0.4, 1));
+    try { by.applyImpulse?.(-hitNx * 75 * closing * 0.5, -hitNz * 75 * closing * 0.5, p.pos.x, p.pos.z); } catch { /* module véhicules sans applyImpulse */ }
+    setPrompt(null);
+    bus.emit('player:knocked', { by, speed: closing });
+  }
+  function updateKnocked(dt) {
+    const rg = character.ragdoll;
+    K.t += dt;
+    // trajectoire : balistique en l'air, frottement une fois au sol
+    const sp = Math.hypot(K.vx, K.vz);
+    if (sp > 0.01) {
+      const dec = rg.air ? 0.6 * sp : 6.5 + 1.2 * sp, ns = Math.max(0, sp - dec * dt);
+      K.vx *= ns / sp; K.vz *= ns / sp;
+      let nx = p.pos.x + K.vx * dt, nz = p.pos.z + K.vz * dt;
+      if (ctx.world?.isWater?.(nx, nz)) { nx = p.pos.x; nz = p.pos.z; K.vx = K.vz = 0; }
+      if (collision?.resolveCircle) {
+        const r = collision.resolveCircle(nx, nz, RADIUS + 0.1, p.pos.y + 0.5);
+        if (r.hit) { const d = K.vx * r.nx + K.vz * r.nz; if (d < 0) { K.vx -= 1.3 * d * r.nx; K.vz -= 1.3 * d * r.nz; K.vx *= 0.6; K.vz *= 0.6; } }
+        nx = r.x; nz = r.z;
+      }
+      if (Number.isFinite(nx) && Number.isFinite(nz)) { p.pos.x = nx; p.pos.z = nz; }
+    }
+    // une voiture qui passe encore dessus repousse le corps sur le côté (sans nouveau choc)
+    const list = ctx.vehicles?.list;
+    if (list) for (const o of list) {
+      if (!o.pos) continue;
+      const dx = p.pos.x - o.pos.x, dz = p.pos.z - o.pos.z;
+      if (dx * dx + dz * dz > 25) continue;
+      const c = Math.cos(o.yaw), s = Math.sin(o.yaw), lx = dx * c - dz * s, lz = dx * s + dz * c;
+      const ex = (o.spec?.width || 1.8) / 2 + 0.25 - Math.abs(lx), ez = (o.spec?.length || 4.2) / 2 + 0.2 - Math.abs(lz);
+      if (ex <= 0 || ez <= 0) continue;
+      const push = Math.min(ex, (3 + Math.abs(o.speed || 0) * 0.5) * dt) * Math.sign(lx || hitSide);
+      p.pos.x += push * c; p.pos.z += -push * s;
+    }
+    p.pos.y = heightAt(p.pos.x, p.pos.z); p.speed = Math.hypot(K.vx, K.vz);
+    character.group.position.set(p.pos.x, p.pos.y, p.pos.z);
+    if (!K.up) {
+      p.anim = 'lying';
+      if (rg.settled && p.speed < 0.3) { K.lie += dt; if (K.lie > 0.9 + Math.min(1.8, K.speed / 9)) { K.up = true; character.setState({ anim: 'getup' }); } }
+      else if (K.t > 9) { K.up = true; character.snap(); character.setState({ anim: 'getup' }); } // garde-fou
+    } else {
+      p.anim = 'getup';
+      if (character.anim !== 'getup' && character.down <= 0) {
+        K = null; p.knocked = false; p.anim = 'idle'; p.speed = 0;
+        immuneUntil = (ctx.time || 0) + 1.5;
+        bus.emit('player:recovered', {});
+      }
+    }
   }
 
   function updateVehicle(dt) {
@@ -320,18 +492,20 @@ export function createPlayer(ctx) {
     if (promptTimer > 0) return;
     promptTimer = 0.12;
     if (!p.enabled || ctx.ui?.isOpen?.()) return setPrompt(null);
+    if (K) return setPrompt(null);
     if (p.vehicle) return setPrompt(Math.abs(p.vehicle.speed || 0) < 0.6 && input.state.throttle < 0.05 && !input.isTouch ? 'F — Descendre' : null);
-    const v = nearestFreeVehicle();
-    setPrompt(v ? `F — Monter dans ${vehicleName(v)}` : null);
+    if (J) return setPrompt(null);
+    const t = vehicleTarget();
+    setPrompt(t.v ? (t.steal ? `F — Voler la ${vehicleName(t.v)}` : `F — Monter dans ${vehicleName(t.v)}`) : null);
   }
 
   function update(dt) {
     input.update(dt);
-    if (p.vehicle) updateVehicle(dt); else updateFoot(dt);
+    if (K) { if (J) cancelCarjack(); updateKnocked(dt); } else if (J) updateCarjack(dt); else if (p.vehicle) updateVehicle(dt); else updateFoot(dt);
     cam.update(dt);
     // le conducteur est masqué en vue capot (ou si showDriver est désactivé)
     if (p.vehicle) character.group.visible = p.showDriver && cam.viewName !== 'capot';
-    else character.group.visible = !cam.tooClose;
+    else character.group.visible = !cam.tooClose || !!K;
     character.update(dt);
     updatePrompt(dt);
     input.endFrame();

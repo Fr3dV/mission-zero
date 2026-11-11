@@ -262,7 +262,7 @@ export function createPanels(ctx, api) {
     const gs = (() => { try { return ctx.gameplay?.stats || {}; } catch { return {}; } })();
     const merged = { ...(me().stats || {}), ...gs };
     if (merged.collectiblesTotal != null) { merged.collectibles = `${merged.collectibles || 0} / ${merged.collectiblesTotal}`; delete merged.collectiblesTotal; }
-    if (merged.landmarksSeen != null) merged.landmarksSeen = `${merged.landmarksSeen} / ${(ctx.LANDMARKS || []).length || 12}`;
+    if (merged.landmarksSeen != null) merged.landmarksSeen = `${merged.landmarksSeen} / ${(ctx.LANDMARKS || []).filter((l) => !l.hidden).length || 12}`;
     delete merged.level;
     const stats = Object.entries(merged).filter(([, v]) => v != null && typeof v !== 'object');
     const seg = (v, cls) => (v > 0 ? h('i', { class: cls, style: `flex:${v}` }) : null);

@@ -141,3 +141,38 @@ Possède : entrées clavier/souris/manette/tactile (`ctx.player.input`), caméra
 ## Économie
 
 Monnaie : **ZéroCoin (Ƶ)**. Capital de départ `STARTING_MONEY`. Gains : missions (`shared/missions.js`), loyers des biens (`income` par heure connectée). Dépenses : immobilier (`shared/properties.js`), véhicules (`shared/catalog.js`). Le serveur valide tout (solde, prix, durée minimale et cooldown des missions).
+
+## Dégâts et impacts (contrat v2)
+
+Unités : `impact` = vitesse de fermeture en **m/s** le long de la normale ; `damage` = 0..1.
+
+- `ctx.collision` : `addBox/addCircle` acceptent `data` (libre) ; `resolveCircle` retourne aussi `shape` (l'obstacle touché : `{x, z, tag, data}`), utilisable avec `collision.remove(shape)`.
+- Étiquettes d'obstacles du module ville : `building`, `parapet`, `tree`, `lamp`, `feu`, `banc`, `morris`, `kiosque`, `metro` ; monuments : `monument`.
+- **Décor cassable** — `ctx.world.onImpact({ shape, tag, x, z, dirX, dirZ, speed (m/s), mass (kg), vehicle }) -> { broke: bool, absorb: 0..1 }`, appelé de façon synchrone par le module véhicules quand une voiture touche un obstacle. `broke: true` = l'obstacle cède (le module ville retire sa collision et anime sa chute) : la voiture ne rebondit pas, elle perd la fraction `absorb` de sa vitesse. `broke: false` = obstacle fixe : rebond et dégâts normaux. Si `ctx.world.onImpact` est absent, tout est fixe.
+- **Véhicules** — `vehicle.damage` (0..1 global), `vehicle.damageZones` (`{front, rear, left, right}` 0..1), `vehicle.applyImpulse(ix, iz, px?, pz?)` (N·s monde, point d'application optionnel → lacet), `vehicle.repair()`, `vehicle.mass` (kg), `vehicle.wrecked` (bool). Événement `vehicle:crash { vehicle, impact, kind: 'static'|'prop'|'vehicle'|'pedestrian', tag, other, x, z, nx, nz, broke }`.
+- **Voitures IA percutées** — le module véhicules émet `vehicle:hit { vehicle, by, impact, ix, iz, x, z }` pour tout véhicule `remote`/IA percuté ; le module trafic décide (il rend la voiture dynamique : `remote = false`, `driver = null`, laisse la physique locale l'emporter, puis la reprend ou la retire plus tard).
+- **Piétons** — le module trafic détecte les chocs voiture→piéton et émet `pedestrian:hit { x, z, speed, vehicle, severity: 'bump'|'knockdown' }` ; il applique `vehicle.applyImpulse` (léger) à la voiture. Les personnages exposent `character.knock({ dirX, dirZ, speed })` (chute physique procédurale puis `'lying'`), et les animations `stumble`, `lying`, `getup`, `flee` via `setState`.
+- **Joueur à pied percuté** — géré par le module joueur (même `knock`), émet `player:knocked { by }` ; entrées bloquées jusqu'au relevé.
+
+## Fidélité des lieux (contrat v3)
+
+- `shared/world/pois.json` (agent données, optionnel, chargé dans `ctx.worldData.pois`, sinon `null`) :
+  ```jsonc
+  {
+    "meta": { ... },
+    "trees": [x, z, x, z, ...],                    // arbres réels (OSM natural=tree), tableau plat
+    "treeRows": [ { "points": [[x,z],...] } ],      // alignements (natural=tree_row)
+    "pois": [ { "kind": "metro|cafe|restaurant|bakery|pharmacy|fountain|statue|church|theatre|museum|station|hotel|school|kiosk|bookstall|wallace", "name": "...", "x": 0, "z": 0 } ],
+    "paths": [ { "kind": "footway|steps", "points": [[x,z],...], "width": 3 } ],   // allées de parcs, escaliers (Montmartre)
+    "water": [ { "name": "...", "polygon": [[x,z],...] } ],                       // bassins et fontaines des parcs
+    "areas": [ { "kind": "pedestrian|cobble|gravel|grass", "name": "...", "polygon": [[x,z],...] } ]
+  }
+  ```
+  `paris.json` peut aussi porter par route : `sidewalk` (largeur de trottoir en m), `median` (terre-plein), `surface` (`asphalt|sett|paving_stones`), `treeLined` (bool), `maxspeed`, et pour les ponts `bridgeName`.
+- `shared/landmarks.js` : l'agent monuments peut y AJOUTER des monuments (ne jamais renommer ni supprimer les 12 ids d'origine). Le module ville filtre à l'exécution les bâtiments dont le centre tombe dans le disque `radius` d'un monument.
+
+## Vol de voiture (contrat v3)
+
+- Les voitures IA ont un conducteur visible : `vehicle.occupant` (personnage créé par le trafic, posture `sit`).
+- Le joueur peut prendre une voiture conduite par l'IA (touche F, à ≤ 4 m, vitesse de la voiture ≤ ~15 km/h — les voitures IA freinent quand le joueur se met devant) : le module joueur appelle `ctx.traffic.ejectDriver(vehicle, { side: 'left'|'right' }) -> bool`, qui relâche la voiture (`driver = null`, `remote = false`), retire `vehicle.occupant` et fait apparaître le conducteur éjecté à côté de la portière (il titube, proteste puis s'enfuit ou reste à regarder). Puis `player.enterVehicle(vehicle)`. Événement `vehicle:carjack { vehicle, by: 'local' }`.
+- Les voitures conduites par d'autres joueurs ne peuvent pas être volées.

@@ -15,6 +15,7 @@ export function createAudio(ctx) {
   try { const v = parseFloat(localStorage.getItem(LS_KEY)); if (Number.isFinite(v)) volume = Math.min(1, Math.max(0, v)); } catch { /* stockage indisponible */ }
   let loggedIn = !!params?.get?.('autostart');
   let inVehicle = false, uiOpen = false;
+  let lastImpactT = 0;
   let stepAcc = 0, stepFoot = 0, birdT = 3, farT = 15, swellT = 0, lastBellHour = null;
   const right = { x: 1, z: 0 }, listener = { x: 0, z: 0 };
 
@@ -47,7 +48,11 @@ export function createAudio(ctx) {
     const rainG = ac.createGain(); rainG.gain.value = 0;
     const rs = loop(noise.white, 1.0); const rhp = biq('highpass', 1400), rlp = biq('lowpass', 8500);
     rs.connect(rhp).connect(rlp).connect(rainG); loop(noise.brown, 1.6).connect(biq('bandpass', 420, 0.7)).connect(rainG); rainG.connect(master);
+    // raclement continu (tôle contre pierre) : bruit filtré, niveau piloté par vehicle.scrape
+    const scrapeG = ac.createGain(); scrapeG.gain.value = 0;
+    loop(noise.white, 0.8).connect(biq('bandpass', 2100, 1.3)).connect(scrapeG); loop(noise.brown, 2.2).connect(biq('bandpass', 620, 2)).connect(scrapeG); scrapeG.connect(sfx);
     G = {
+      scrapeG,
       master, sfx, engineBus, amb, musicBus, noise, rumble, hum, rainG,
       engine: createEngineAudio(ac, engineBus, noise),
       traffic: createTrafficVoices(ac, engineBus, noise, ctx.quality === 'low' ? 3 : 4),
@@ -121,6 +126,28 @@ export function createAudio(ctx) {
       for (let i = 0; i < 4; i++) tone(out, { type: 'square', f: 180 + Math.random() * 900, dur: 0.12 + Math.random() * 0.25, vol: 0.06 * k, t: Math.random() * 0.04, detune: Math.random() * 60 });
       if (k > 0.55) for (let i = 0; i < 7; i++) burst(out, { type: 'bandpass', f: 4000 + Math.random() * 5000, q: 9, t: 0.06 + Math.random() * 0.45, dur: 0.05 + Math.random() * 0.1, vol: 0.12 * k }); // verre
     },
+    // ---- impacts (contrat « dégâts » v2) : bois, métal creux, choc sourd
+    wood(o) { // tronc / banc qui craque : claquement sec + éclats
+      const k = Math.min(1, Math.max(0.2, (o?.impact ?? 6) / 14)), out = outFor(o, 150);
+      burst(out, { buf: 'brown', type: 'lowpass', f: 900, f2: 140, dur: 0.18 + 0.15 * k, vol: 0.6 * k });
+      for (let i = 0; i < 5 + Math.round(6 * k); i++) burst(out, { type: 'bandpass', f: 350 + Math.random() * 1400, q: 5, t: Math.random() * (0.12 + 0.3 * k), dur: 0.02 + Math.random() * 0.05, vol: 0.28 * k });
+      tone(out, { type: 'triangle', f: 160, f2: 70, dur: 0.2, vol: 0.3 * k });
+    },
+    clang(o) { // lampadaire, feu, poteau : métal creux qui résonne
+      const k = Math.min(1, Math.max(0.2, (o?.impact ?? 6) / 14)), out = outFor(o, 170), base = 170 + Math.random() * 90;
+      [[1, 0.5, 1.1], [2.76, 0.32, 0.8], [5.4, 0.2, 0.5], [8.93, 0.12, 0.3], [13.3, 0.06, 0.18]].forEach(([r, v, d]) => tone(out, { f: base * r, dur: d * (0.6 + 0.6 * k), vol: v * 0.22 * k, attack: 0.002 }));
+      burst(out, { type: 'bandpass', f: 2400, q: 1.5, dur: 0.05, vol: 0.3 * k });
+    },
+    thud(o) { // choc mou et sourd (piéton) : volontairement discret
+      const k = Math.min(1, Math.max(0.25, (o?.impact ?? 5) / 12)), out = outFor(o, 90);
+      tone(out, { f: 85, f2: 42, dur: 0.16, vol: 0.4 * k });
+      burst(out, { buf: 'brown', type: 'lowpass', f: 320, f2: 90, dur: 0.14, vol: 0.5 * k });
+    },
+    glass(o) { // verre brisé
+      const k = Math.min(1, Math.max(0.3, (o?.impact ?? 10) / 20)), out = outFor(o, 150);
+      burst(out, { type: 'highpass', f: 3500, dur: 0.12, vol: 0.25 * k });
+      for (let i = 0; i < 10; i++) burst(out, { type: 'bandpass', f: 3500 + Math.random() * 6000, q: 10, t: 0.03 + Math.random() * 0.6, dur: 0.04 + Math.random() * 0.1, vol: 0.13 * k });
+    },
     honk(o) {
       const out = outFor(o, 140), lp = ac.createBiquadFilter(); lp.type = 'lowpass'; lp.frequency.value = 2400; lp.connect(out);
       const dur = o?.dur ?? (0.25 + Math.random() * 0.35), t0 = ac.currentTime, g = ac.createGain();
@@ -158,8 +185,18 @@ export function createAudio(ctx) {
   bus.on('player:exitVehicle', () => { inVehicle = false; play('door'); });
   bus.on('vehicle:crash', (e) => {
     const v = e?.vehicle, mine = v && v === ctx.player?.vehicle;
-    play('crash', { impact: e?.impact, x: mine ? undefined : v?.pos?.x, z: mine ? undefined : v?.pos?.z });
+    const o = { impact: e?.impact, x: mine ? undefined : (e?.x ?? v?.pos?.x), z: mine ? undefined : (e?.z ?? v?.pos?.z) };
+    const tag = e?.tag || '', imp = e?.impact || 0;
+    if (e?.kind === 'pedestrian') { play('thud', o); return; }
+    if (tag === 'tree' || tag === 'banc' || tag === 'kiosque') { play('wood', o); if (imp > 5) play('crash', { ...o, impact: imp * 0.5 }); }
+    else if (tag === 'lamp' || tag === 'feu' || tag === 'metro' || tag === 'morris') { play('clang', o); if (imp > 5) play('crash', { ...o, impact: imp * 0.5 }); }
+    else play('crash', o);
+    if (imp > 13) play('glass', o);
+    lastImpactT = performance.now();
   });
+  // décor qui cède / piéton heurté (émis par les modules ville et trafic) ; évite le doublon avec vehicle:crash
+  bus.on('world:propBroken', (e) => { if (performance.now() - lastImpactT < 120) return; const t = e?.tag || ''; play(t === 'tree' || t === 'banc' || t === 'kiosque' ? 'wood' : 'clang', { x: e?.x, z: e?.z, impact: e?.impact ?? 8 }); });
+  bus.on('pedestrian:hit', (e) => play('thud', { x: e?.x, z: e?.z, impact: Math.min(12, (e?.speed ?? 4)) }));
   bus.on('traffic:honk', (e) => play('honk', e || {}));
   bus.on('money:change', (e) => { const d = e?.delta || 0; if (d > 0) play(d >= 1000 ? 'cash' : 'coin'); else if (d < 0) play('spend'); });
   bus.on('mission:result', (e) => play(e?.ok ? 'success' : 'fail'));
@@ -212,6 +249,7 @@ export function createAudio(ctx) {
       if (veh && (!inVehicle || G.engine.state.active === false)) { inVehicle = true; G.engine.setVehicle(veh); } // rattrapage si l'événement a été manqué
       if (!veh && inVehicle && player) inVehicle = false;
       G.engine.update(dt, !!veh);
+      G.scrapeG.gain.setTargetAtTime(veh && Number.isFinite(veh.scrape) ? Math.min(1, veh.scrape) * 0.3 : 0, t, 0.05);
       G.traffic.update(dt, ctx.vehicles?.list, listener, right, veh);
 
       // ambiance

@@ -1,5 +1,5 @@
 // Place de la Concorde : obélisque de Louxor (granit rose, pyramidion doré) et les deux fontaines (des Mers, des Fleuves).
-import { P } from './kit.js';
+import { P, Water } from './kit.js';
 
 export function buildConcorde(m) {
   const { B } = m, G = { ...P.granite, t: 0.12 };
@@ -26,18 +26,24 @@ export function buildConcorde(m) {
     B.cyl(P.bronze, 0.5, 0.7, 2.2, 0, 5.3, 0, 8);
     B.lathe(P.bronze, [[0.4, 7.2], [1.5, 7.5], [2.2, 7.9], [2.25, 8.1], [0.2, 8.0]], 0, 0, 0, 20); B.torus(P.gold, 2.2, 0.09, 0, 8.08, 0, 20);
     B.cyl(P.gold, 0.2, 0.45, 1.1, 0, 8, 0, 8); B.sphere(P.gold, 0.5, 0, 9.4, 0, 8);
-    B.cyl(P.foam, 0.03, 0.12, 1.8, 0, 9.6, 0, 6);
     if (B.hi) {
       B.cyl(P.foam, 4.1, 4.3, 0.12, 0, 0.66, 0, 24, { jit: 0 });
       for (let i = 0; i < 6; i++) {
         const a = i * Math.PI / 3, s = Math.sin(a), c = Math.cos(a);
         B.statue(i % 2 ? P.bronze : P.gold, s * 2.1, 2.2, c * 2.1, 2.3, a);        // figures assises du piédouche
         B.statue(P.bronze, s * 5.9, 0.6, c * 5.9, 2.2, a); B.sphere(P.gold, 0.45, s * 5.2, 1.6, c * 5.2, 6, 1, 0.7, 1); // néréides et tritons
-        B.cyl(P.foam, 0.03, 0.09, 3.2, s * 4.9, 1.8, c * 4.9, 5);
       }
     }
   });
   fountain(50, 1); fountain(-50, 2);
+  if (B.hi) { // eau animée : jet sommital, nappes des deux vasques, jets des tritons et néréides vers la vasque
+    const W = new Water();
+    for (const z of [50, -50]) {
+      W.jet(0, 9.6, z, 2.4, 0.06); W.fall(0, 5.5, z, 2.25, 2.6, 2.55); W.fall(0, 0.7, z, 3.98, 4.5, 4.7, 32);
+      for (let i = 0; i < 6; i++) { const a = i * Math.PI / 3, s = Math.sin(a), c = Math.cos(a); W.arc([s * 5.5, 2.2, z + c * 5.5], [s * 3.2, 5.5, z + c * 3.2], 0.9, 0.05); W.arc([s * 5.9, 2.4, z + c * 5.9], [s * 7.6, 0.7, z + c * 7.6], 0.5, 0.04, 6); }
+    }
+    m.add(W.mesh(m.kit, 'concorde:eau'));
+  }
   m.collide.circle(0, 50, 9.6); m.collide.circle(0, -50, 9.6);
   return { height: 30 };
 }

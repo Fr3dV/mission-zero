@@ -23,7 +23,7 @@ export const PUBLIC_GARAGES = [
 /** Macarons dorés cachés : un par monument (dans le disque dégagé) + quelques lieux insolites. */
 const BEARINGS = { eiffel: 0, arc: 200, notredame: 250, louvre: 60, sacrecoeur: 180, invalides: 0, concorde: 300, pantheon: 250, opera: 180, grandpalais: 130, madeleine: 180, trocadero: 135 };
 export const COLLECTIBLES = [
-  ...LANDMARKS.map((l) => {
+  ...LANDMARKS.filter((l) => !l.hidden).map((l) => {
     const a = ((BEARINGS[l.id] ?? 0) * Math.PI) / 180, d = l.radius * 0.92;
     return { id: 'macaron_' + l.id, label: l.name, x: l.x + Math.sin(a) * d, z: l.z - Math.cos(a) * d, snap: false };
   }),

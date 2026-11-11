@@ -2,10 +2,11 @@
 // Tout apparaît / disparaît autour du joueur (pools recyclés), avec une densité selon ctx.quality,
 // setDensity(0..1) et l'heure (moins de monde la nuit).
 //
-// API : ctx.traffic = { update(dt), setDensity(d), cars, pedestrians, parked, stats, graph }
+// API : ctx.traffic = { update(dt), setDensity(d), ejectDriver(vehicle, {side}), cars, pedestrians, parked, stats, graph }
 //   cars        : véhicules IA actifs (objets du module véhicules, driver === 'ai')
 //   pedestrians : états des piétons { active, x, y, z, yaw, group, idle, onRoad, ... }
-// Événements : écoute `env:time`, `vehicle:crash` ; émet `traffic:honk {x, z, vehicle}`.
+// Événements : écoute `env:time`, `vehicle:hit`, `vehicle:crash` ; émet `traffic:honk {x, z, vehicle}` et
+//   `pedestrian:hit {x, z, speed, vehicle, severity: 'bump'|'knockdown', pedestrian}`.
 import { buildGraph } from './graph.js';
 import { createCars } from './cars.js';
 import { createPedestrians } from './pedestrians.js';
@@ -20,7 +21,7 @@ export function createTraffic(ctx) {
   const base = BASE[ctx.quality] || BASE.high;
   const G = buildGraph(ctx.worldData || {});
   const stats = { cars: 0, peds: 0, parked: 0, ms: 0, msMax: 0 };
-  if (!G.edgeCount) return { update() {}, setDensity() {}, cars: [], pedestrians: [], parked: [], stats, graph: G };
+  if (!G.edgeCount) return { update() {}, setDensity() {}, ejectDriver() { return false; }, cars: [], pedestrians: [], parked: [], stats, graph: G };
 
   const T = {
     ctx, G, owner: new Map(), peds: null, now: 0, fx: 0, fz: 0,
@@ -58,7 +59,9 @@ export function createTraffic(ctx) {
     applyTargets();
   }
   ctx.bus.on('env:time', (e) => { if (e) setNight(e.hour, e.night); });
-  ctx.bus.on('vehicle:crash', (e) => { if (cars && e) cars.onCrash(e.vehicle); });
+  // Dégâts (contrat v2) : une voiture IA percutée est rendue à la physique locale, puis reprise ou laissée en épave.
+  ctx.bus.on('vehicle:hit', (e) => { if (cars && e) cars.onHit(e); });
+  ctx.bus.on('vehicle:crash', (e) => { if (cars && e) cars.onCrash(e); });
   try { if (ctx.env && ctx.env.isNight) setNight(ctx.store && ctx.store.timeOfDay, ctx.env.isNight()); } catch (e) { /* env pas prêt */ }
   applyTargets();
 
@@ -88,6 +91,8 @@ export function createTraffic(ctx) {
 
   return {
     update,
+    /** Vol de voiture (contrat v3) : relâche une voiture conduite par l'IA et fait descendre son conducteur. */
+    ejectDriver(vehicle, opts) { return cars ? cars.ejectDriver(vehicle, opts) : false; },
     setDensity(d) { density = Math.max(0, Math.min(1, +d || 0)); applyTargets(); },
     cars: cars ? cars.active : [],
     pedestrians: peds ? peds.list : [],

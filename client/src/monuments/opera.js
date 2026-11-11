@@ -66,6 +66,6 @@ export function buildOpera(m) {
   B.box(S, 62, 25, 14, 0, -3, -55); B.box(P.stoneL, 63.2, 0.9, 15.2, 0, 22, -55); B.frustum(P.zinc, 62, 14, 54, 5, 4.5, 0, 22.9, -55);
   B.group(0, 0, -62.02, Math.PI, () => { for (const y of [2, 8.5, 15]) B.winRow(-29, 29, y, 0, 13, 1.9, 4.2, { arch: y < 5 }); });
   for (const sx of [-1, 1]) B.group(sx * 31.02, 0, -55, sx * Math.PI / 2, () => { for (const y of [2, 8.5, 15]) B.winRow(-6, 6, y, 0, 3, 1.9, 4.2); });
-  m.collide.box(0, 37.5, 35.6, 21.5); m.collide.box(0, AZ, 34.4, 20.4); m.collide.box(0, -44, 31.4, 18.6); m.collide.box(0, ZF + 1.2, 28.5, 1.4);
+  m.collide.box(0, 37.5, 35.6, 21.5); m.collide.box(0, AZ, 34.4, 20.4); m.collide.box(0, -39.5, 31.4, 13.7); m.collide.box(0, ZF + 1.2, 28.5, 1.4);
   return { height: 64 };
 }

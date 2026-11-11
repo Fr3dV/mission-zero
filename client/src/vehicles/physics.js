@@ -19,6 +19,9 @@ const SETUP = {
   lambo_aventador: { rear: 0.7, cg: 0.54, gears: 7 },
   lambo_urus: { rear: 0.6, cg: 0.49, gears: 7 },
 };
+// Masses en ordre de marche (kg).
+const MASS = { citadine: 1000, taxi: 1500, tesla_model3: 1800, tesla_models: 2160, tesla_cybertruck: 3000, porsche_911: 1650, porsche_taycan: 2300, porsche_cayenne: 2200, lambo_huracan: 1500, lambo_aventador: 1600, lambo_urus: 2200 };
+const PROP_TAGS = { tree: 1, lamp: 1, feu: 1, banc: 1, morris: 1, kiosque: 1, metro: 1 };
 const RATIOS = {
   5: [0.24, 0.42, 0.61, 0.8, 1],
   6: [0.2, 0.34, 0.5, 0.66, 0.83, 1],
@@ -41,15 +44,17 @@ export function initPhysics(v, info, def) {
   const topF = s.electric ? 0.5 : gearForce(R, R.length - 1, 1);
   const cr = s.width * 0.5;
   const off = s.length * 0.5 - cr;
+  v.mass = MASS[s.id] || 1500;
   v.vel = { x: 0, z: 0 };
   v.yawRate = 0; v.steerAngle = 0; v.rpm = 0; v.gear = 0; v.slip = 0; v.damage = 0;
   v.phys = {
     a, b, L, hcg: 0.3 + s.height * 0.18, k2: a * b, kc2: (s.length * s.length + s.width * s.width) / 12,
-    mass: s.length * s.width * s.height * 130,
+    mass: MASS[s.id] || s.length * s.width * s.height * 130,
     rear: set.rear, R, cd: (topF * s.accel) / (s.maxSpeed * s.maxSpeed),
     circ: [off, 0, -off], cr, reach: s.length * 0.5 + 0.3,
     steer: 0, ax: 0, ay: 0, shiftT: 0, rev: false, sleeping: true, crashT: 0, kinT: -1,
     spin: 0, slipR: 0, slipF: 0, lock: false, gx: 0, gz: 0, brakeOn: false,
+    fxm: null, hit: null, scrape: 0, wob: 0, pending: null, brokeShape: null, brokeT: 0,
   };
 }
 
@@ -79,7 +84,8 @@ function substep(v, h, c, ctx) {
   const fx = -sy, fz = -cy, rx = cy, rz = -sy;
   let vf = v.vel.x * fx + v.vel.z * fz, vl = v.vel.x * rx + v.vel.z * rz;
   const w = -v.yawRate;                                      // > 0 : rotation vers la droite
-  const mu = MU0 * s.grip * (1 + 0.00002 * vf * vf);         // léger appui aéro
+  const fxm = p.fxm;
+  const mu = MU0 * s.grip * (1 + 0.00002 * vf * vf) * (fxm ? fxm.grip : 1);         // léger appui aéro
   const av = Math.abs(vf);
   const hasDriver = v.driver != null;
 
@@ -92,16 +98,17 @@ function substep(v, h, c, ctx) {
   } else if (brake > 0.05 && throttle < 0.05 && vf < 0.4) { p.rev = true; const t = throttle; throttle = brake; brake = t; }
   const dirSign = p.rev ? -1 : 1;
   const gf = gearbox(v, vf, throttle, h);
-  let thrust = throttle * s.accel * gf * (1 - 0.25 * v.damage);
+  let thrust = throttle * s.accel * gf * (fxm ? fxm.power : 1);
+  if (v.wrecked) thrust = 0;
   // charges par essieu (par unité de masse) avec transfert longitudinal
   const tr = clamp((p.ax * p.hcg) / p.L, -G * 0.3, G * 0.3);
   const Nf = G * (p.b / p.L) - tr, Nr = G * (p.a / p.L) + tr;
   const tracLimit = mu * (Nr * p.rear + Nf * (1 - p.rear)) * (p.rear > 0 && p.rear < 1 ? 1.6 : 1.15);
   p.spin = thrust > tracLimit && av < 14 ? clamp((thrust - tracLimit) / tracLimit + 0.3, 0, 1) : 0;
   if (thrust > tracLimit * 1.12) thrust = tracLimit * 1.12;
-  let brakeDec = Math.min(brake * s.brake, mu * G * 1.15);
+  let brakeDec = Math.min(brake * s.brake * (fxm ? fxm.brake : 1), mu * G * 1.15);
   const coast = throttle < 0.05 ? (s.electric ? 1.4 : 0.7 + 1.6 * v.rpm) * (hasDriver ? 1 : 0) : 0;
-  const drag = p.cd * vf * vf + 0.22 + coast;
+  const drag = p.cd * vf * vf + 0.22 + coast + (fxm ? fxm.drag : 0) + (v.wrecked ? 1.2 : 0);
   let axB = thrust * dirSign;
   p.brakeOn = brake > 0.05 && av > 0.3;
 
@@ -152,7 +159,12 @@ function substep(v, h, c, ctx) {
   return collideStatic(v, ctx);
 }
 
-/** Collision contre le décor : trois cercles le long de la caisse, impulsion avec rotation induite. */
+/**
+ * Collision contre le décor : trois cercles le long de la caisse.
+ * Obstacle fixe : choc inélastique (restitution ~0,15) avec frottement et lacet induit.
+ * Obstacle cassable (ctx.world.onImpact → broke) : la voiture traverse en perdant la fraction `absorb` de sa vitesse.
+ * Le choc le plus fort de la frame est mémorisé dans p.hit (pour les dégâts et l'événement vehicle:crash).
+ */
 function collideStatic(v, ctx) {
   const p = v.phys, col = ctx.collision;
   let impact = 0;
@@ -163,25 +175,60 @@ function collideStatic(v, ctx) {
     const cx = v.pos.x + fx * o, cz = v.pos.z + fz * o;
     const r = col.resolveCircle(cx, cz, p.cr, y);
     if (!r.hit) continue;
+    // objet qui vient de céder : on ne se ré-accroche jamais à lui (même si sa collision tarde à disparaître)
+    if (p.brokeT > 0 && r.shape && r.shape === p.brokeShape) continue;
     const dx = r.x - cx, dz = r.z - cz, dl = Math.hypot(dx, dz);
     let nx, nz;
     if (dl > 1e-5) { nx = dx / dl; nz = dz / dl; } else { nx = r.nx; nz = r.nz; }
-    v.pos.x += dx; v.pos.z += dz;
-    const px = fx * o - nx * p.cr, pz = fz * o - nz * p.cr;
+    const px = fx * o - nx * p.cr, pz = fz * o - nz * p.cr;      // point de contact relatif au centre
     const wy = v.yawRate;
     const vpx = v.vel.x + wy * pz, vpz = v.vel.z - wy * px;
     const vn = vpx * nx + vpz * nz;
+    const speed = Math.hypot(v.vel.x, v.vel.z);
+    const tag = r.tag || r.shape?.tag || '';
+    // décor cassable : on demande au module ville si l'obstacle cède
+    let res = null;
+    if (vn < -1 && r.shape && ctx.world?.onImpact) {
+      try { res = ctx.world.onImpact({ shape: r.shape, tag, x: v.pos.x + px, z: v.pos.z + pz, dirX: speed > 0.1 ? v.vel.x / speed : -nx, dirZ: speed > 0.1 ? v.vel.z / speed : -nz, speed: -vn, mass: v.mass, vehicle: v }); } catch (e) { res = null; }
+    }
+    if (res && res.broke) {
+      // l'obstacle cède (arbre, lampadaire fauché…) : ni rebond ni embardée, on perd seulement la fraction `absorb`
+      // de la vitesse ; les dégâts suivent l'énergie réellement absorbée (vitesse équivalente contre un mur, atténuée).
+      const ab = clamp(+res.absorb || 0, 0, 0.95);
+      v.vel.x *= 1 - ab; v.vel.z *= 1 - ab;
+      p.brokeShape = r.shape; p.brokeT = 0.4;
+      // plafonné : faucher un arbre à grande vitesse cabosse l'avant mais ne fait pas une épave en un coup
+      const eff = Math.min(5.5, -vn * 0.5 * Math.sqrt(ab * (2 - ab)));
+      if (eff > impact) { impact = eff; p.hit = { impact: eff, kind: 'prop', tag, x: v.pos.x + px, z: v.pos.z + pz, nx, nz, broke: true, px, pz, other: null }; }
+      continue;
+    }
+    v.pos.x += dx; v.pos.z += dz;
+    const tx = -nz, tz = nx, vt = vpx * tx + vpz * tz;
     if (vn >= 0) continue;
     const rn = pz * nx - px * nz;
-    const j = (-(1 + 0.22) * vn) / (1 + (rn * rn) / p.kc2);
+    const j = (-(1 + 0.15) * vn) / (1 + (rn * rn) / p.kc2);
     v.vel.x += j * nx; v.vel.z += j * nz; v.yawRate += (rn * j) / p.kc2;
-    const tx = -nz, tz = nx, vt = vpx * tx + vpz * tz, rt = pz * tx - px * tz;
-    const jt = clamp(-vt / (1 + (rt * rt) / p.kc2), -0.3 * j, 0.3 * j);
+    const rt = pz * tx - px * tz;
+    const jt = clamp(-vt / (1 + (rt * rt) / p.kc2), -0.4 * j, 0.4 * j);
     v.vel.x += jt * tx; v.vel.z += jt * tz; v.yawRate += (rt * jt) / p.kc2;
-    if (-vn > impact) impact = -vn;
+    // raclement : glissement le long de l'obstacle
+    if (Math.abs(vt) > 2.5) { p.scrape = Math.max(p.scrape, Math.min(1, Math.abs(vt) / 16)); p.scrapeX = v.pos.x + px; p.scrapeZ = v.pos.z + pz; }
+    if (-vn > impact) { impact = -vn; p.hit = { impact: -vn, kind: PROP_TAGS[tag] ? 'prop' : 'static', tag, x: v.pos.x + px, z: v.pos.z + pz, nx, nz, broke: false, px, pz, other: null }; }
   }
   v.yawRate = clamp(v.yawRate, -4.5, 4.5);
   return impact;
+}
+
+/** Impulsion (N·s, repère monde) appliquée au véhicule ; point d'application optionnel (monde) → lacet. */
+export function applyImpulse(v, ix, iz, px, pz) {
+  const p = v.phys;
+  if (!Number.isFinite(ix + iz)) return;
+  v.vel.x += ix / v.mass; v.vel.z += iz / v.mass;
+  if (Number.isFinite(px) && Number.isFinite(pz)) {
+    const rx = px - v.pos.x, rz = pz - v.pos.z;
+    v.yawRate = clamp(v.yawRate + (rz * ix - rx * iz) / (v.mass * p.kc2), -4.5, 4.5);
+  }
+  p.sleeping = false; p.pending = null;
 }
 
 /**
@@ -211,6 +258,11 @@ export function stepVehicle(v, dt, ctx) {
     const ex = Math.abs(beta) - 0.1;
     if (ex > 0) d += clamp(0.75 * ex * Math.sign(beta), -0.4, 0.4) * smooth(4, 10, vf);
   }
+  if (p.fxm && sp0 > 1) {
+    // train avant faussé : la voiture tire d'un côté ; roue voilée : flottement à la fréquence de roue
+    p.wob += (sp0 / 0.34) * dt;
+    d += (p.fxm.steerBias + p.fxm.wobble * 0.012 * Math.sin(p.wob)) * Math.min(1, sp0 / 6) * Math.min(1, dMax / 0.12 + 0.35);
+  }
   p.steer = clamp(d, -0.62, 0.62);
   v.steerAngle = p.steer;
 
@@ -222,6 +274,8 @@ export function stepVehicle(v, dt, ctx) {
   const n = clamp(Math.ceil(Math.max(dt * 120, (sp0 * dt) / 0.35)), 1, 16);
   const h = dt / n;
   let impact = 0;
+  p.hit = null; p.scrape *= Math.exp(-8 * dt);
+  if (p.brokeT > 0) { p.brokeT -= dt; if (p.brokeT <= 0) p.brokeShape = null; }
   for (let i = 0; i < n; i++) { const im = substep(v, h, c, ctx); if (im > impact) impact = im; }
 
   const B = ctx.BOUNDS;
@@ -235,6 +289,7 @@ export function stepVehicle(v, dt, ctx) {
   if (p.spin > 0) slip = Math.max(slip, p.spin);
   if (p.brakeOn && +c.brake > 0.95 && sp0 > 22) slip = Math.max(slip, 0.25);
   v.slip += (slip - v.slip) * Math.min(1, dt * 10);
+  if (v.wrecked) { v.rpm = 0; v.gear = 0; }
   p.slide = slide;
   return impact;
 }
@@ -274,27 +329,33 @@ export function collideVehicles(list, isDynamic, onCrash) {
       let nx = bax - bbx, nz = baz - bbz;
       const nl = Math.hypot(nx, nz);
       if (nl > 1e-5) { nx /= nl; nz /= nl; } else { nx = 1; nz = 0; }
-      const imA = dynA ? 1 / pa.mass : 0, imB = dynB ? 1 / pb.mass : 0, ims = imA + imB;
-      // point de contact (milieu de la zone de recouvrement)
+      // séparation : un véhicule cinématique (distant / IA) ne recule pas…
+      const sA = dynA ? 1 / A.mass : 0, sB = dynB ? 1 / B.mass : 0, ss = sA + sB;
+      A.pos.x += nx * best * (sA / ss); A.pos.z += nz * best * (sA / ss);
+      B.pos.x -= nx * best * (sB / ss); B.pos.z -= nz * best * (sB / ss);
+      // … mais pendant le choc il pèse sa vraie masse (conservation de la quantité de mouvement)
+      const imA = 1 / A.mass, imB = 1 / B.mass, ims = imA + imB;
       const cx = bbx + nx * (pb.cr - best / 2), cz = bbz + nz * (pb.cr - best / 2);
       const rax = cx - A.pos.x, raz = cz - A.pos.z, rbx = cx - B.pos.x, rbz = cz - B.pos.z;
-      const vax = A.vel.x + A.yawRate * raz, vaz = A.vel.z - A.yawRate * rax;
-      const vbx = B.vel.x + (dynB ? B.yawRate : 0) * rbz, vbz = B.vel.z - (dynB ? B.yawRate : 0) * rbx;
+      const wA = dynA ? A.yawRate : 0, wB = dynB ? B.yawRate : 0;
+      const vax = A.vel.x + wA * raz, vaz = A.vel.z - wA * rax;
+      const vbx = B.vel.x + wB * rbz, vbz = B.vel.z - wB * rbx;
       const vn = (vax - vbx) * nx + (vaz - vbz) * nz;
-      // séparation
-      A.pos.x += nx * best * (imA / ims); A.pos.z += nz * best * (imA / ims);
-      B.pos.x -= nx * best * (imB / ims); B.pos.z -= nz * best * (imB / ims);
       if (vn >= 0) continue;
       const rnA = raz * nx - rax * nz, rnB = rbz * nx - rbx * nz;
       const iIA = imA / pa.kc2, iIB = imB / pb.kc2;
-      const jn = (-(1 + 0.25) * vn) / (ims + rnA * rnA * iIA + rnB * rnB * iIB);
+      const jn = (-(1 + 0.18) * vn) / (ims + rnA * rnA * iIA + rnB * rnB * iIB);
       const tx = -nz, tz = nx, vt = (vax - vbx) * tx + (vaz - vbz) * tz;
       const rtA = raz * tx - rax * tz, rtB = rbz * tx - rbx * tz;
-      const jt = clamp(-vt / (ims + rtA * rtA * iIA + rtB * rtB * iIB), -0.35 * jn, 0.35 * jn);
-      if (dynA) { A.vel.x += (jn * nx + jt * tx) * imA; A.vel.z += (jn * nz + jt * tz) * imA; A.yawRate = clamp(A.yawRate + (rnA * jn + rtA * jt) * iIA, -4.5, 4.5); pa.sleeping = false; }
-      if (dynB) { B.vel.x -= (jn * nx + jt * tx) * imB; B.vel.z -= (jn * nz + jt * tz) * imB; B.yawRate = clamp(B.yawRate - (rnB * jn + rtB * jt) * iIB, -4.5, 4.5); pb.sleeping = false; }
-      if (dynA) onCrash(A, -vn * (imA / ims), B);
-      if (dynB) onCrash(B, -vn * (imB / ims), A);
+      const jt = clamp(-vt / (ims + rtA * rtA * iIA + rtB * rtB * iIB), -0.4 * jn, 0.4 * jn);
+      const ix = jn * nx + jt * tx, iz = jn * nz + jt * tz;       // impulsion reçue par A (N·s)
+      if (dynA) { A.vel.x += ix * imA; A.vel.z += iz * imA; A.yawRate = clamp(A.yawRate + (rnA * jn + rtA * jt) * iIA, -4.5, 4.5); pa.sleeping = false; }
+      if (dynB) { B.vel.x -= ix * imB; B.vel.z -= iz * imB; B.yawRate = clamp(B.yawRate - (rnB * jn + rtB * jt) * iIB, -4.5, 4.5); pb.sleeping = false; }
+      // part de la vitesse de fermeture encaissée par chacun (le plus léger encaisse le plus)
+      const c = { x: cx, z: cz, nx, nz, ix, iz, closing: -vn };
+      // sévérité ressentie : vitesse de fermeture pondérée par le rapport des masses (le plus léger encaisse le plus)
+      onCrash(A, -vn * Math.min(1, 0.45 + imA / ims), B, c, 1, dynA);
+      onCrash(B, -vn * Math.min(1, 0.45 + imB / ims), A, c, -1, dynB);
     }
   }
 }

@@ -24,6 +24,24 @@ export function getCarGeometry(typeId) {
     noseZ: -spec.length / 2, tailZ: spec.length / 2,
     headY: Math.min(P.belt(0.03) - 0.03, 0.9),
     seat: { ...P.seat }, wheelPos: { ...P.wheelPos },
+    // limites d'écrasement et régions des éléments mobiles (capot, coffre, boucliers, rétroviseurs) pour les dégâts
+    ...(() => {
+      const cab = def.cabin, S = new Float64Array(30), L = spec.length;
+      const cabA = cab.cowl - 0.012, cabB = def.cabEnd ?? cab.rearBot ?? (def.sideGlass ? def.sideGlass[1] + 0.012 : 0.7);
+      const fo = P.axles[0].z + L / 2, ro = L / 2 - P.axles[1].z, R = def.wheelR;
+      const wbAt = (t) => P.section(t, S)[16];
+      const yMin = (z, x) => (P.yTopAt(P.tOf(z), Math.abs(x)) ?? 9) - 0.05;
+      const regions = { lampZF: P.zOf(0.2), lampZR: P.zOf(0.8), lampY: P.belt(0.1) + 0.12 };
+      if (def.hoodSeam !== false) { const tA = def.hoodFront ?? 0.035, tB = cab.cowl - 0.012; regions.hood = { z0: P.zOf(tA), z1: P.zOf(tB), hx: wbAt((tA + tB) / 2) * (def.hoodSeam ?? 0.86) + 0.01, hy: P.top(tB), yMin }; }
+      if (def.trunkSeam != null) { const tA = def.trunkSeam; regions.trunk = { z0: P.zOf(tA), z1: P.zOf(def.trunkEnd ?? 0.985), hx: wbAt(tA) * (def.trunkK ?? 0.84) + 0.01, hy: P.top(tA), yMin }; }
+      regions.bumperF = { z: P.zOf(0) + 0.03, yMax: P.bottom(0) + 0.62 * (P.top(0) - P.bottom(0)), hx: P.hw * P.plan(0) };
+      regions.bumperR = { z: P.zOf(1) - 0.03, yMax: P.bottom(1) + 0.62 * (P.top(1) - P.bottom(1)), hx: P.hw * P.plan(1) };
+      if (def.mirrors !== false) { const mo = def.mirrors || {}, t = cab.cowl + (mo.dt ?? 0.045); P.section(t, S); regions.mirror = { x: S[16] + 0.03, y: S[17] + (mo.dy ?? 0.055) + 0.02, z: P.zOf(t) }; }
+      return {
+        regions,
+        crush: { front: Math.min(0.6, Math.max(0.25, fo - R - 0.1)), rear: Math.min(0.5, Math.max(0.2, ro - R - 0.1)), side: 0.2, cabX: wbAt((cabA + cabB) / 2) - 0.1, cabZ0: P.zOf(cabA), cabZ1: P.zOf(cabB), cabY: 3 },
+      };
+    })(),
     // cotes mesurées (contrôle des proportions dans la page de debug)
     metrics: (() => {
       let peakT = 0, peakY = 0, clear = 9;
@@ -82,6 +100,7 @@ export function createMesh(typeId, color) {
   let lodOn = false;
   group.userData = {
     typeId: spec.id, info: c.info, chassis, wheels, lightsMaterial: lightsMat,
+    parts: { bodyHi, miscHi, bodyLo, miscLo, glassHi, lights },
     setLights(s = {}) {
       const head = +(s.head ?? 0), br = +(s.brake ?? 0);
       lint[CH.HEAD] = head * 5;

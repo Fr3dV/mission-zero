@@ -31,6 +31,8 @@
     import { createMesh, getCarGeometry } from '/src/vehicles/models.js';
 
     const q = new URLSearchParams(location.search);
+    // banc de crash : ?crash=front|offset|side|rear&speed=50&id=… (page dédiée)
+    if (q.get('crash')) location.replace('/debug/vehicles-crash.html' + location.search);
     const all = q.get('all') === '1', night = q.get('night') === '1';
     const id = VEHICLE_BY_ID[q.get('id')] ? q.get('id') : 'porsche_911';
     const canvas = document.getElementById('c');

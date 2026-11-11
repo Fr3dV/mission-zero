@@ -199,7 +199,7 @@ export function createMaps(ctx, api) {
   }
   function refreshMarkers() {
     const out = [];
-    for (const l of ctx.LANDMARKS || []) out.push({ t: 'landmark', x: l.x, z: l.z, label: l.name });
+    for (const l of ctx.LANDMARKS || []) if (!l.hidden) out.push({ t: 'landmark', x: l.x, z: l.z, label: l.name });
     for (const d of dealerList()) if (isFinite(d?.x) && isFinite(d?.z)) out.push({ t: 'dealer', x: d.x, z: d.z, label: d.name || (d.brand ? `Concession ${d.brand}` : 'Concession'), brand: d.brand, sub: 'Concession automobile' });
     const owners = store.propertyOwners || {}, mine = store.me?.properties || [];
     for (const p of propertyList()) {

@@ -106,20 +106,34 @@ vec4 leafB = texture2D(map, vTP.zy * 0.083 + 0.3) * tw.x + texture2D(map, vTP.xz
   const geoNear = [treeGeometry(THREE, 0, 11), treeGeometry(THREE, 0, 29)], geoFar = [treeGeometry(THREE, 1, 11), treeGeometry(THREE, 1, 29)];
   const TT = 600;
 
-  const tiles = new Map(); // clé -> [x,y,z,yaw,scale,variant,teinte...]
+  const tiles = new Map(); // clé -> [x,y,z,yaw,scale,variant,teinte...]  (+ a.recs : fiche par arbre, attachée à sa collision)
   const nearLandmark = (x, z, pad) => { for (const l of LANDMARKS) if (Math.hypot(x - l.x, z - l.z) < l.radius + pad) return true; return false; };
   let count = 0;
   const add = (x, z, scale, y) => {
     const k = tileKey(x, z, TT); let a = tiles.get(k); if (!a) tiles.set(k, (a = []));
     a.push(x, y, z, rnd() * 6.283, scale, k % 2, 0.82 + rnd() * 0.3, 0.86 + rnd() * 0.22);
-    collision.addCircle({ x, z, r: 0.32 * scale, top: y + 5, tag: 'tree' });
+    const rec = { type: 'tree', x, y, z, scale, variant: k % 2, group: null, j: 0 };
+    (a.recs || (a.recs = [])).push(rec);
+    collision.addCircle({ x, z, r: 0.32 * scale, top: y + 5, tag: 'tree', data: rec });
     count++;
   };
+  // ---------- arbres réels (pois.json, contrat v3) : remplacent les alignements devinés quand la donnée existe
+  const pois = ctx.worldData.pois;
+  const realTrees = Array.isArray(pois?.trees) && pois.trees.length >= 800;
+  if (realTrees) {
+    const okSpot = (x, z) => Number.isFinite(x) && Number.isFinite(z) && !masks.nearWater(x, z, 3) && !bld.inBuilding(x, z, 1.4) && !nearLandmark(x, z, 4) && net.edgeDistance(x, z, false) > 0.6 && !net.inZone(x, z, 2);
+    const stepN = Math.max(1, Math.ceil(pois.trees.length / 2 / 45000));
+    for (let i = 0; i + 1 < pois.trees.length; i += 2 * stepN) { const x = pois.trees[i], z = pois.trees[i + 1]; if (okSpot(x, z)) add(x, z, 0.72 + rnd() * 0.4, heightAt(x, z) + (masks.isPark(x, z) ? 0 : Y_WALK)); }
+    for (const row of Array.isArray(pois.treeRows) ? pois.treeRows : []) {
+      const pts = row?.points; if (!Array.isArray(pts)) continue;
+      for (let k = 0; k + 1 < pts.length; k++) { const a = pts[k], b = pts[k + 1], L = Math.hypot(b[0] - a[0], b[1] - a[1]), n = Math.max(1, Math.round(L / 9)); for (let j = 0; j < n; j++) { const x = a[0] + ((b[0] - a[0]) * j) / n, z = a[1] + ((b[1] - a[1]) * j) / n; if (okSpot(x, z)) add(x, z, 0.85 + rnd() * 0.25, heightAt(x, z) + Y_WALK); } }
+    }
+  }
   // ---------- alignements
   const o = { _k: 0 };
   for (const r of net.roads) {
-    if (r._ped || r._sw < 3) continue;
-    if (!(r.kind === 'avenue' || r.kind === 'boulevard' || r.kind === 'quay' || r.width >= 9)) continue;
+    if (realTrees && r._trees < 2) continue;
+    if (r._ped || r._sw < 3 || !r._trees) continue;
     const sc = r._sw >= 5 ? 1 : r._sw >= 4 ? 0.88 : 0.72;
     const step = (r._sw >= 4 ? 10.5 : 12) / Math.max(0.35, Q.treeDensity);
     for (const [s0, s1] of net.freeRuns(r)) {
@@ -127,8 +141,10 @@ vec4 leafB = texture2D(map, vTP.zy * 0.083 + 0.3) * tw.x + texture2D(map, vTP.xz
       const n = Math.max(1, Math.floor((b - a) / step));
       for (let i = 0; i <= n; i++) {
         const s = a + ((b - a) * i) / n + (rnd() - 0.5) * 0.8;
-        for (const sg of [1, -1]) {
-          net.pointAt(r, s, sg * (r._hw + Math.min(1.7, r._sw * 0.45)), o);
+        for (const sg of r._trees > 1 ? [1, -1, 2, -2] : [1, -1]) {
+          // 2e rangée (Champs-Élysées, Foch) au milieu du large trottoir
+          net.pointAt(r, s + (Math.abs(sg) > 1 ? step * 0.5 : 0), Math.sign(sg) * (r._hw + (Math.abs(sg) > 1 ? r._sw * 0.62 : Math.min(1.7, r._sw * 0.45))), o);
+          if (net.inZone(o.x, o.z, 3)) continue;
           if (masks.nearWater(o.x, o.z, 4) || bld.inBuilding(o.x, o.z, 2.2 * sc) || nearLandmark(o.x, o.z, 6)) continue;
           if (net.edgeDistance(o.x, o.z, true) < 0.9) continue;
           add(o.x, o.z, sc * (0.9 + rnd() * 0.25), heightAt(o.x, o.z) + Y_WALK);
@@ -139,7 +155,7 @@ vec4 leafB = texture2D(map, vTP.zy * 0.083 + 0.3) * tw.x + texture2D(map, vTP.xz
   // ---------- parcs
   for (const info of masks.parkInfos) {
     const { bb, area } = info;
-    const target = Math.min(700, Math.floor((area / 170) * Q.treeDensity));
+    const target = Math.min(700, Math.floor((area / (realTrees ? 420 : 170)) * Q.treeDensity));
     let placed = 0;
     const recent = [];
     for (let t = 0; t < target * 5 && placed < target; t++) {
@@ -177,11 +193,13 @@ vec4 leafB = texture2D(map, vTP.zy * 0.083 + 0.3) * tw.x + texture2D(map, vTP.xz
       far.instanceMatrix = near.instanceMatrix; far.instanceColor = near.instanceColor;
       for (const m of [near, far]) { m.boundingSphere = sphere; m.matrixAutoUpdate = false; m.receiveShadow = true; m.name = 'arbres'; scene.add(m); }
       near.castShadow = Q.shadows; far.castShadow = false;
-      groups.push({ near, far, sphere });
+      const grp = { near, far, sphere };
+      ids.forEach((id, j) => { a.recs[id].group = grp; a.recs[id].j = j; });
+      groups.push(grp);
     }
   }
   return {
-    count,
+    count, mat, geoFar, geoNear, realTrees,
     update(cam) {
       for (const g of groups) {
         const d = Math.hypot(g.sphere.center.x - cam.x, g.sphere.center.z - cam.z) - g.sphere.radius;

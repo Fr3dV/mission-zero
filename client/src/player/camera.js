@@ -17,6 +17,8 @@ export function createCameraRig(ctx, player, input) {
     view: 0,                      // index dans CAMERA_VIEWS (en voiture)
     fov: BASE_FOV,
     trauma: 0,                    // secousse (0..1), décroît seule
+    /** point d'intérêt temporaire (vol de voiture) : la caméra à pied se recadre dessus */
+    focus: null,
     tooClose: false,              // caméra collée au personnage (on le masque)
     get viewName() { return CAMERA_VIEWS[rig.view]; },
     nextView() { rig.view = (rig.view + 1) % CAMERA_VIEWS.length; return rig.viewName; },
@@ -30,7 +32,7 @@ export function createCameraRig(ctx, player, input) {
   };
   const V3 = ctx.THREE.Vector3;
   const look = new V3(), fromPos = new V3(), fromLook = new V3(), want = new V3(), target = new V3();
-  let orbitYaw = 0, orbitPitch = 0, chaseYaw = 0, limit = 99, blend = 1, hasPos = false;
+  let focusS = 0, fx0 = 0, fz0 = 0, downS = 0, orbitYaw = 0, orbitPitch = 0, chaseYaw = 0, limit = 99, blend = 1, hasPos = false;
   let distV = 7, spSmooth = 0, accSmooth = 0, lastSpeed = 0, reverseT = 0, shakeT = 0, backSmooth = 0;
 
   /** Distance maximale libre entre la cible et la caméra (obstacles statiques). */
@@ -62,8 +64,13 @@ export function createCameraRig(ctx, player, input) {
         const k = input.locked ? 0.9 : 1.7;
         rig.yaw = dampAngle(rig.yaw, player.yaw, k * Math.min(1, player.speed / 2), dt);
       }
-      target.set(player.pos.x, player.pos.y + 0.855 * (player.character?.look?.height || 1.78), player.pos.z);
-      dist = rig.footDist;
+      // la cible descend en douceur quand le personnage est à terre
+      downS = damp(downS, player.character?.down || 0, 5, dt);
+      target.set(player.pos.x, player.pos.y + 0.855 * (player.character?.look?.height || 1.78) * (1 - 0.6 * downS), player.pos.z);
+      focusS = damp(focusS, rig.focus ? 1 : 0, 5, dt);
+      if (rig.focus) { fx0 = rig.focus.x; fz0 = rig.focus.z; }
+      if (focusS > 0.01) { target.x += (fx0 - target.x) * 0.45 * focusS; target.z += (fz0 - target.z) * 0.45 * focusS; target.y -= 0.2 * focusS; }
+      dist = rig.footDist * (1 - 0.18 * focusS);
       const cp = Math.cos(rig.pitch), sp = Math.sin(rig.pitch);
       const dx = Math.sin(rig.yaw) * cp, dy = sp, dz = Math.cos(rig.yaw) * cp;
       const free = freeDistance(target.x, target.y, target.z, dx, dy, dz, dist);

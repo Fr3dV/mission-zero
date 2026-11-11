@@ -3,14 +3,17 @@
 Ces scripts produisent les données réelles du monde à partir d'OpenStreetMap (© les contributeurs d'OpenStreetMap, licence ODbL) :
 
 - `shared/world/paris.json` — routes, graphe routable, Seine et îles, parcs, places (format : `docs/ARCHITECTURE.md`, section `ctx.worldData`) ;
-- `shared/world/buildings.json` — un rectangle orienté + hauteur par bâtiment.
+- `shared/world/buildings.json` — un rectangle orienté + hauteur par bâtiment ;
+- `shared/world/buildings-meta.json` — nature, niveaux, toit, couleur des bâtiments renseignés (optionnel) ;
+- `shared/world/pois.json` — arbres, points d'intérêt, allées, bassins, surfaces (contrat v3 « fidélité des lieux »).
 
 ## Régénérer
 
 ```bash
 export PATH="$PWD/.tools/node/bin:$PATH"
-node tools/osm/fetch.mjs        # télécharge le brut dans .data/osm/ (cache ; --force pour tout reprendre, --only roads,water,green,buildings)
-node tools/osm/build.mjs        # écrit shared/world/paris.json et buildings.json (--no-buildings pour paris.json seul)
+node tools/osm/fetch.mjs        # télécharge le brut dans .data/osm/ (cache ; --force pour tout reprendre, --only roads,water,green,buildings,trees,pois,paths,grass,bridges)
+node tools/osm/build.mjs        # écrit shared/world/paris.json, buildings.json et buildings-meta.json (--no-buildings pour paris.json seul)
+node tools/osm/build-pois.mjs   # écrit shared/world/pois.json (à lancer après build.mjs : lit paris.json)
 node tools/osm/check.mjs        # vérifications + statistiques (code de sortie 1 en cas d'échec)
 node tools/osm/preview.mjs      # image de contrôle tools/out/osm-preview.png (port 8101, Chrome via tools/shot.mjs)
 node tools/osm/preview.mjs tools/out/zoom.png -300 100 1600   # zoom : centre x, z et largeur en mètres
@@ -67,12 +70,63 @@ s'approche de l'axe d'une route à moins de sa demi-largeur (bornée à 2,5–6 
 rogné ou coupé en deux, de sorte qu'aucun axe de route ne traverse un bâtiment. Si le fichier dépasse 5 Mo, les plus petits rectangles
 sont retirés.
 
+## Contrat v3 « fidélité des lieux »
+
+Le graphe, les identifiants de routes et les polylignes ne changent pas : seuls des champs sont ajoutés.
+
+**Champs par route (`paris.json`, optionnels sauf `treeLined`).**
+
+- `facadeWidth` — largeur mesurée de façade à façade. Tous les 8 m le long de l'axe, on lance un rayon
+  perpendiculaire de chaque côté (70 m au plus) jusqu'au premier mur d'une emprise de bâtiment OSM ; on retient
+  la médiane de chaque côté, et le champ n'existe que si chaque côté est bâti sur au moins la moitié des profils.
+  La médiane écarte les rues transversales et les cours. Valeurs témoins : Champs-Élysées 70,7 m, avenue de
+  l'Opéra 30,3 m, rue de Rivoli 23 m, boulevard Saint-Germain 31 m, rue Vieille du Temple 8 à 10 m.
+- `width` — largeur de chaussée corrigée, par ordre de priorité : table manuelle des grands axes
+  (`MANUAL_WIDTHS` dans `enrich.mjs`, valeurs approchées à ± 2 m, qui prime sur le tag) ; tag `width:carriageway`
+  ou `width` ; pour une rue de 8 à 45 m entre façades sans tag, profil parisien type (55 % de `facadeWidth`,
+  jamais moins que voies × 3,2 m + bandes cyclables + stationnement) ; sinon voies × 3,2 m ; sinon défaut par type.
+  Une rue piétonne de moins de 14 m est pavée de mur à mur. La répartition des sources est dans `meta.statsV3`.
+- `sidewalk` — largeur d'**un** trottoir : tag `sidewalk:*:width` (très rare), sinon `(facadeWidth − width) / 2`,
+  sinon, s'il n'y a de façade que d'un côté (quai, parc) ou si l'axe est excentré, distance à la façade la plus
+  proche − `width / 2` (plafonnée à 8 m d'un seul côté, 25 m sinon).
+- `median` — largeur du terre-plein quand la même voie est cartographiée en deux chaussées à sens unique
+  (même nom, sens opposés, axes distants de 4 à 60 m) ; `facadeWidth` couvre alors toute l'avenue.
+- `treeLined` — vrai s'il y a au moins 5 arbres OSM pour 100 m entre le bord de chaussée et les façades.
+- `surface` (`asphalt|sett|paving_stones`) et `maxspeed` (km/h) — tags OSM, majorité pondérée par la longueur.
+- `bridgeName` — pour `bridge: true` : nom de la voie si c'est « Pont… / Passerelle… », sinon `bridge:name`,
+  sinon nom du polygone `man_made=bridge` qui contient la route. Les ponts routiers au-dessus des voies ferrées
+  n'ont en général pas de nom.
+
+**`pois.json`** (tout est dans `BOUNDS`, arrondi 0,1 m ; détail dans son `meta`).
+
+- `trees` : tableau plat `[x, z, …]`, un arbre réel par couple ; `treeRows` : alignements `natural=tree_row`.
+- `pois` : `{kind, name, x, z}`. Kinds du contrat, plus `velib` et `busstop`. `cafe` regroupe cafés et bars.
+  `metro` porte le nom de la station la plus proche. Cafés et restaurants : seulement ceux qui déclarent une
+  terrasse ou sont sur un grand axe, plafonnés (1 500 / 2 000). `statue` : mémoriaux, monuments et œuvres en
+  volume (plaques, fresques et pavés de mémoire écartés), plafonné à 700. `hotel` : 4 étoiles et plus ou 80 chambres
+  et plus. `wallace` : fontaines Wallace ; les simples points d'eau potable sont écartés.
+- `paths` : `{kind: footway|steps, points, width}` + `name`, `steps` (nombre de marches), `riverbank` optionnels.
+  Allées situées dans un parc ou jardin public, escaliers extérieurs de 6 m et plus, cheminements à moins de 22 m
+  de la Seine. Les trottoirs et passages piétons cartographiés comme `footway` sont exclus.
+- `water` : bassins et fontaines surfaciques (hors Seine). `areas` : zones piétonnes (`pedestrian`), pavées
+  (`cobble`), stabilisées (`gravel`), pelouses (`grass`), de 250 m² et plus ; elles peuvent recouper `plazas`/`parks`.
+
+**`buildings-meta.json`.** `{ meta, kinds, roofShapes, byIndex }` avec
+`byIndex["<i>"] = [kindIndex, levels, roofShapeIndex, colour?]` pour le bâtiment n° `i` de `buildings.json`
+(rang du sextuplet, à partir de 0). `kindIndex` et `roofShapeIndex` renvoient aux tables `kinds` et `roofShapes`
+(0 = inconnu), `levels` vaut 0 si inconnu, `colour` est un `"#rrggbb"` optionnel. Seuls les bâtiments ayant une
+nature, une forme de toit ou une couleur renseignée sont listés. Les deux fichiers sont écrits par le même
+`build.mjs` : ne jamais en régénérer un sans l'autre. `buildings.json` dépend de `shared/landmarks.js` (disques
+dégagés) et des largeurs de chaussée (dégagement) : son contenu et ses index bougent si l'un des deux change.
+
 ## Fichiers
 
 | Fichier | Rôle |
 | --- | --- |
 | `fetch.mjs` | téléchargement Overpass → `.data/osm/*.json` |
-| `build.mjs` | conversion → `shared/world/*.json` |
+| `build.mjs` | conversion → `paris.json`, `buildings.json`, `buildings-meta.json` |
+| `enrich.mjs` | champs v3 des routes (façade à façade, trottoirs, arbres…), table manuelle des largeurs, métadonnées des bâtiments |
+| `build-pois.mjs` | conversion → `pois.json` |
 | `geom.mjs` | géométrie 2D (simplification, découpe, rectangle d'aire minimale…) |
 | `check.mjs` | vérifications et statistiques |
 | `preview.html`, `preview.mjs` | rendu 2D de contrôle |

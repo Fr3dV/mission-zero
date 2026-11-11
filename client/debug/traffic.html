@@ -22,7 +22,7 @@
     // Paramètres : x, z | tp=<monument> ; h=<altitude> ; speed=<accélération du temps> ; quality ; traffic=<densité> ;
     //   time=<heure> (émet env:time) ; obstacle=1 (voiture « joueur » arrêtée sur la chaussée, pour tester freinage et klaxon) ;
     //   sample=1 (force paris.sample.json) ; lines=0 (masque les lignes) ; ring=min,max (anneau d'apparition des voitures) ;
-    //   boxes=1 (véhicules de repli en boîtes).
+    //   boxes=1 (véhicules de repli en boîtes) ; scenario=rearend|tbone|ped5|ped15|ped60|wreck (accidents provoqués ; ped<km/h>).
     import * as THREE from 'three';
     import { bus } from '/src/core/bus.js';
     import { store } from '/src/core/store.js';
@@ -87,7 +87,7 @@
     const tp = LANDMARK_BY_ID[params.get('tp')];
     const player = { pos: { x: num('x', tp ? tp.x + tp.radius + 25 : 0), y: 0, z: num('z', tp ? tp.z + tp.radius + 25 : 0) }, yaw: 0, speed: 0, mode: 'foot', vehicle: null, enabled: true };
     ctx.player = player;
-    let camH = num('h', 150);
+    let camH = num('h', params.get('scenario') ? 42 : 150);
     const timeScale = num('speed', 1);
 
     // ---- décor minimal : sol + chaussées
@@ -97,8 +97,9 @@
     const traffic = (ctx.traffic = createTraffic(ctx));
     const G = traffic.graph;
     // ring=min,max : anneau d'apparition resserré (et test « hors champ » désactivé) pour tout voir de près
-    if (params.get('ring') && traffic._debug) {
-      const [a, b] = params.get('ring').split(',').map(Number), T = traffic._debug.T;
+    const scenarioName = params.get('scenario');
+    if ((params.get('ring') || scenarioName) && traffic._debug) {
+      const [a, b] = (params.get('ring') || '15,110').split(',').map(Number), T = traffic._debug.T;
       T.SPAWN_MIN = a; T.SPAWN_MAX = b; T.DESPAWN = b + 40; T.PED_RADIUS = Math.min(150, b); T.inView = () => false;
     }
 
@@ -166,6 +167,92 @@
       player.pos.x = v.pos.x; player.pos.z = v.pos.z;
     }
 
+    // ---- scénarios d'accident : ?scenario=rearend|tbone|ped<km/h> (ped5, ped15, ped60…)|wreck|carjack
+    // Une voiture « joueur » (dynamique, driver 'local') est lancée sur une voiture IA ou un piéton après 4 s
+    // de mise en place. window.__scn = { state, target, pc, log } pour les vérifications automatiques.
+    const scn = (window.__scn = { name: scenarioName, state: scenarioName ? 'attente' : '', target: null, pc: null, kind: '', log: [], aim: null, vT: 0 });
+    for (const ev of ['pedestrian:hit', 'vehicle:hit', 'vehicle:crash', 'traffic:honk'])
+      bus.on(ev, (e) => { if (scn.log.length < 200) scn.log.push({ t: +ctx.time.toFixed(2), ev, sev: e?.severity, impact: e?.impact != null ? +e.impact.toFixed(1) : undefined, speed: e?.speed != null ? +e.speed.toFixed(1) : undefined, v: e?.vehicle?.id, vd: e?.vehicle?.driver, by: (e?.by || e?.other)?.id, kind: e?.kind }); });
+    const camFocus = { x: player.pos.x, z: player.pos.z };
+    function launch(x, z, yaw, speed) {
+      const pc = ctx.vehicles.spawn('porsche_cayenne', x, z, yaw, { color: '#f4d000' });
+      pc.driver = 'local'; pc.setTransform(x, z, yaw, speed);
+      player.vehicle = pc; player.mode = 'vehicle'; scn.pc = pc; scn.vT = speed;
+    }
+    function scenarioSetup() {
+      const D = traffic._debug, cars = D.cars.states, cx = player.pos.x, cz = player.pos.z;
+      const d2 = (o) => (o.x - cx) ** 2 + (o.z - cz) ** 2;
+      if (scn.name.startsWith('ped')) {
+        const p = traffic.pedestrians.filter((p) => p.active && !p.idle && p.mode === 0 && p.stage === 1).sort((a, b) => d2(a) - d2(b))[0];
+        if (!p) return false;
+        p.react = 99; // distrait : n'esquive pas
+        const kmh = +scn.name.slice(3) || 15, v = kmh / 3.6, back = Math.max(9, v * 2.4);
+        const ux = G.hUx[p.h], uz = G.hUz[p.h];
+        // on dégage les autres piétons du couloir d'élan pour ne mesurer que le choc voulu
+        for (const q of traffic.pedestrians) {
+          if (q === p || !q.active) continue;
+          const dx = q.x - p.x, dz = q.z - p.z, f = dx * ux + dz * uz, l = dx * -uz + dz * ux;
+          if (f > -8 && f < back + 8 && Math.abs(l) < 3) { q.x += -uz * 7 * (l >= 0 ? 1 : -1); q.z += ux * 7 * (l >= 0 ? 1 : -1); q.idle = true; }
+        }
+        launch(p.x + ux * back, p.z + uz * back, G.yawOf(-ux, -uz), v); // arrive de face
+        scn.target = p; scn.kind = 'ped';
+      } else {
+        const c = cars.filter((c) => c.active && c.mode === 0 && c.phase === 0 && c.speed > 3 && c.s > 26 && c.sEnd - c.s > 35).sort((a, b) => d2(a) - d2(b))[0];
+        if (!c) return false;
+        scn.target = c; scn.kind = 'car';
+        if (scn.name === 'carjack') { // le joueur à pied se plante devant la voiture
+          player.pos.x = c.x + c.fx * 16; player.pos.z = c.z + c.fz * 16; scn.state = 'devant'; scn.t0 = ctx.time; return true;
+        }
+        if (scn.name === 'wreck') { c.v.wrecked = true; D.cars.crashCar(c, 15, null, false); scn.state = 'épave'; return true; }
+        if (scn.name === 'rearend') launch(c.x - c.fx * 24, c.z - c.fz * 24, c.yaw, c.speed + 7);
+        else { // tbone : arrive par la gauche, perpendiculairement, sur le point où sera la voiture
+          const t = 18 / 14, ix = c.x + c.fx * c.speed * t, iz = c.z + c.fz * c.speed * t, lx = c.fz, lz = -c.fx;
+          launch(ix + lx * 18, iz + lz * 18, G.yawOf(-lx, -lz), 14);
+        }
+      }
+      scn.state = 'lancé';
+      return true;
+    }
+    function scenarioTick(dt) {
+      if (!scn.name) return;
+      if (scn.state === 'attente') { if (ctx.time > 4) scenarioSetup(); return; }
+      const tg = scn.target, pc = scn.pc;
+      if (scn.name === 'carjack') {
+        // devant → (voiture arrêtée) portière → éjection + prise du volant → on roule 4 s → abandon
+        const v = scn.stolen || tg.v, el = ctx.time - scn.t0;
+        camFocus.x = v.pos.x; camFocus.z = v.pos.z;
+        if (scn.state === 'devant' && el > 1 && tg.speed < 0.2) { scn.state = 'portière'; scn.t0 = ctx.time; scn.stopD = +Math.hypot(player.pos.x - tg.x, player.pos.z - tg.z).toFixed(1); player.pos.x = tg.x + tg.fz * (tg.halfWid + 1.2); player.pos.z = tg.z - tg.fx * (tg.halfWid + 1.2); }
+        else if (scn.state === 'portière' && el > 1.5) {
+          scn.heldSpeed = +tg.speed.toFixed(2); scn.hadOccupant = !!v.occupant;
+          scn.ejected = traffic.ejectDriver(v, { side: 'left' });
+          scn.after = { driver: v.driver, remote: v.remote, occupant: !!v.occupant, inCars: traffic.cars.includes(v) };
+          scn.again = traffic.ejectDriver(v, { side: 'left' }); // doit refuser
+          scn.stolen = v; v.driver = 'local'; player.vehicle = v; player.mode = 'vehicle';
+          bus.emit('vehicle:carjack', { vehicle: v, by: 'local' });
+          scn.state = 'volée'; scn.t0 = ctx.time;
+        } else if (scn.state === 'volée') {
+          player.pos.x = v.pos.x; player.pos.z = v.pos.z;
+          v.setControls({ throttle: el > 1.2 && el < 4 ? 0.7 : 0, brake: el >= 4 && v.speed > 0.5 ? 1 : 0, handbrake: el >= 4 && v.speed <= 0.5, steer: 0 });
+          if (el > 6) { v.setControls({ throttle: 0, brake: 0, handbrake: true }); v.driver = null; player.vehicle = null; player.mode = 'foot'; player.pos.x += 3; scn.state = 'abandonnée'; }
+        }
+        return;
+      }
+      camFocus.x = tg.x; camFocus.z = tg.z;
+      if (!pc) return;
+      player.pos.x = pc.pos.x; player.pos.z = pc.pos.z;
+      const hitDone = scn.kind === 'ped' ? tg.mode !== 0 || tg.hitCd > 0 : tg.mode === 1;
+      if (scn.state === 'lancé' && hitDone) scn.state = 'choc';
+      const past = scn.state === 'lancé' && (tg.x - pc.pos.x) * -Math.sin(pc.yaw) + (tg.z - pc.pos.z) * -Math.cos(pc.yaw) < -8;
+      if (past) scn.state = 'raté';
+      if (scn.state !== 'lancé') { const slow = Math.abs(pc.speed) < 1; pc.setControls({ throttle: 0, brake: slow ? 0 : 1, handbrake: slow, steer: 0 }); if (!pc.vel) pc.setTransform(pc.pos.x, pc.pos.z, pc.yaw, 0); return; }
+      // visée : la cible, avec un peu d'avance si elle roule
+      const lead = scn.kind === 'car' ? Math.min(1.2, Math.hypot(tg.x - pc.pos.x, tg.z - pc.pos.z) / Math.max(4, scn.vT)) * tg.speed : 0;
+      const ax = tg.x + (tg.fx || 0) * lead, az = tg.z + (tg.fz || 0) * lead;
+      let err = Math.atan2(-(ax - pc.pos.x), -(az - pc.pos.z)) - pc.yaw; err -= Math.round(err / (2 * Math.PI)) * 2 * Math.PI;
+      if (pc.vel) pc.setControls({ throttle: pc.speed < scn.vT ? 1 : 0, brake: 0, steer: Math.max(-1, Math.min(1, -err * 2.5)) });
+      else { const yaw = pc.yaw + Math.max(-1, Math.min(1, err)) * dt * 2; pc.setTransform(pc.pos.x - Math.sin(yaw) * scn.vT * dt, pc.pos.z - Math.cos(yaw) * scn.vT * dt, yaw, scn.vT); }
+    }
+
     const keys = new Set();
     addEventListener('keydown', (e) => keys.add(e.code)); addEventListener('keyup', (e) => keys.delete(e.code));
     addEventListener('resize', () => { renderer.setSize(innerWidth, innerHeight); camera.aspect = innerWidth / innerHeight; camera.updateProjectionMatrix(); });
@@ -183,21 +270,24 @@
       }
       if (keys.has('Equal') || keys.has('NumpadAdd')) camH = Math.max(20, camH * (1 - real));
       if (keys.has('Minus') || keys.has('NumpadSubtract')) camH = Math.min(3000, camH * (1 + real));
-      camera.position.set(player.pos.x, camH, player.pos.z + 0.01);
-      camera.up.set(0, 0, -1); camera.lookAt(player.pos.x, 0, player.pos.z);
+      if (!scn.name) { camFocus.x = player.pos.x; camFocus.z = player.pos.z; }
+      camera.position.set(camFocus.x, camH, camFocus.z + 0.01);
+      camera.up.set(0, 0, -1); camera.lookAt(camFocus.x, 0, camFocus.z);
       camera.updateMatrixWorld();
       marker.position.set(player.pos.x, 1, player.pos.z); marker.visible = !player.vehicle;
       // pas de simulation fixes (≤ 1/30 s), accélérés par `speed`
       let left = Math.min(real, 0.05) * timeScale;
       while (left > 1e-5) {
         const dt = Math.min(left, 1 / 30); left -= dt; ctx.time += dt;
+        scenarioTick(dt);
         ctx.vehicles.update?.(dt);
         traffic.update(dt);
       }
       const s = traffic.stats;
       hud.textContent = `trafic — ${worldData.meta?.source || '?'}  nœuds ${G.nodeCount}  arêtes ${G.edgeCount}  orienté: ${G.directed}\n` +
         `voitures ${s.cars}  garées ${s.parked}  piétons ${s.peds}  klaxons ${honks}\n` +
-        `update ${s.ms.toFixed(2)} ms (max ${s.msMax.toFixed(1)})  fps ${ctx.fps.toFixed(0)}  t=${ctx.time.toFixed(0)} s  x=${player.pos.x.toFixed(0)} z=${player.pos.z.toFixed(0)} h=${camH.toFixed(0)}`;
+        `update ${s.ms.toFixed(2)} ms (max ${s.msMax.toFixed(1)})  fps ${ctx.fps.toFixed(0)}  t=${ctx.time.toFixed(0)} s  x=${player.pos.x.toFixed(0)} z=${player.pos.z.toFixed(0)} h=${camH.toFixed(0)}` +
+        (scn.name ? `\nscénario ${scn.name} : ${scn.state}  cible mode=${scn.target ? scn.target.mode : '-'}${scn.kind === 'car' && scn.target ? ' sev=' + scn.target.sev + ' phase=' + scn.target.phase : ''}` : '');
       renderer.render(scene, camera);
     });
   </script>

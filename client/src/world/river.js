@@ -74,8 +74,8 @@ export function buildRiver(ctx, net, surf, masks) {
         bld.wall(ax, az, bx, bz, -6.5, Y_QUAY, -6.5, Y_QUAY, -nx, -nz, L_STONE, QUAY, L * t0);
         // couronnement (déborde un peu sur l'eau, recouvre le bord du sol découpé par le masque)
         const c0 = -0.45, c1 = 1.7, c2 = 2.4;
-        bld.flatQuad([ax + nx * c0, Y_QUAY, az + nz * c0], [bx + nx * c0, Y_QUAY, bz + nz * c0], [bx + nx * c1, Y_QUAY, bz + nz * c1], [ax + nx * c1, Y_QUAY, az + nz * c1], L_PLAIN, 3, COPING);
-        bld.flatQuad([ax + nx * c1, Y_QUAY, az + nz * c1], [bx + nx * c1, Y_QUAY, bz + nz * c1], [bx + nx * c2, Y_GROUND - 0.01, bz + nz * c2], [ax + nx * c2, Y_GROUND - 0.01, az + nz * c2], L_SIDEWALK, 3, COPING);
+        bld.flatQuad([ax + nx * c0, Y_QUAY, az + nz * c0], [bx + nx * c0, Y_QUAY, bz + nz * c0], [bx + nx * c1, Y_QUAY, bz + nz * c1], [ax + nx * c1, Y_QUAY, az + nz * c1], L_PLAIN, 6, COPING);
+        bld.flatQuad([ax + nx * c1, Y_QUAY, az + nz * c1], [bx + nx * c1, Y_QUAY, bz + nz * c1], [bx + nx * c2, Y_GROUND + 0.006, bz + nz * c2], [ax + nx * c2, Y_GROUND + 0.006, az + nz * c2], L_SIDEWALK, 4, COPING);
         bld.wall(ax + nx * c0, az + nz * c0, bx + nx * c0, bz + nz * c0, Y_QUAY - 0.35, Y_QUAY, Y_QUAY - 0.35, Y_QUAY, -nx, -nz, L_PLAIN, COPING, L * t0);
         if (nearDeck(mx, mz, 0.2) || net.roadAtPad(mx + nx * 0.3, mz + nz * 0.3, 0.6, false)) { flush(); continue; }
         const px = nx * 0.3, pz = nz * 0.3;
@@ -90,8 +90,14 @@ export function buildRiver(ctx, net, surf, masks) {
   // ---------- 3. ponts
   for (const d of decks) {
     const { r, sa, sb, W } = d, L = sb - sa;
-    const nSpan = Math.max(1, Math.round(L / 30)), Ls = L / nSpan, pw = Math.min(1.6, Ls * 0.12);
-    const Y_PIER = -6.5, Y_SPRING = WATER_LEVEL + 0.5, Y_CROWN = -1.0, Y_TOP = Y_GROUND;
+    // ponts célèbres individualisés d'après leur nom
+    const nm = r.bridgeName || r.name || '';
+    const kind = /Alexandre.III/.test(nm) ? 'alex' : /Pont Neuf/.test(nm) ? 'neuf' : /Bir.Hakeim/.test(nm) ? 'bir' : /Arts|Debilly|Senghor|Solf[ée]rino|Passerelle/i.test(nm) ? 'metal' : 'stone';
+    d.kind = kind;
+    const metal = kind === 'alex' || kind === 'metal';
+    const BR = kind === 'alex' ? [150, 160, 158] : kind === 'metal' ? [78, 92, 88] : kind === 'neuf' ? [226, 214, 190] : BRIDGE, BL = metal ? L_PLAIN : L_STONE;
+    const nSpan = kind === 'alex' ? 1 : Math.max(1, Math.round(L / (kind === 'neuf' ? 19 : kind === 'metal' ? 22 : 30))), Ls = L / nSpan, pw = Math.min(kind === 'metal' ? 0.5 : 1.6, Ls * 0.12);
+    const Y_PIER = -6.5, Y_SPRING = WATER_LEVEL + 0.5, Y_CROWN = kind === 'alex' ? -0.75 : metal ? -0.6 : -1.0, Y_TOP = Y_GROUND;
     const prof = []; // [s, yBas]
     for (let i = 0; i < nSpan; i++) {
       const s0 = sa + i * Ls;
@@ -108,8 +114,8 @@ export function buildRiver(ctx, net, surf, masks) {
       const bld = surf.at(lx0, lz0);
       const nx = o2.dz, nz = -o2.dx; // normale gauche
       if (s1 - s0 > 0.01) {
-        bld.wall(lx0, lz0, lx1, lz1, y0, Y_TOP, y1, Y_TOP, nx, nz, L_STONE, BRIDGE, s0);
-        bld.wall(rx0, rz0, rx1, rz1, y0, Y_TOP, y1, Y_TOP, -nx, -nz, L_STONE, BRIDGE, s0);
+        bld.wall(lx0, lz0, lx1, lz1, y0, Y_TOP, y1, Y_TOP, nx, nz, BL, BR, s0);
+        bld.wall(rx0, rz0, rx1, rz1, y0, Y_TOP, y1, Y_TOP, -nx, -nz, BL, BR, s0);
       }
       // intrados (ou face de pile si s0 == s1)
       const vertical = s1 - s0 <= 0.01;
@@ -134,12 +140,82 @@ export function buildRiver(ctx, net, surf, masks) {
           net.pointAt(r, s0 + 1e-3, sg * pOff, o); net.pointAt(r, s1 - 1e-3, sg * pOff, o2);
           const bld = surf.at(o.x, o.z);
           const first = i === 0 && k === 0, lastP = i === brk.length - 2 && k === m - 1;
-          bld.prism(o.x, o.z, o2.x, o2.z, 0.5, Y_GROUND, Y_GROUND, PARAPET_H + 0.1, L_STONE, BRIDGE, first || lastP);
+          if (metal) { bld.prism(o.x, o.z, o2.x, o2.z, 0.1, Y_GROUND + 1.0, Y_GROUND + 1.0, 0.1, L_PLAIN, BR, false); bld.prism(o.x, o.z, o2.x, o2.z, 0.06, Y_GROUND, Y_GROUND, 0.55, L_PLAIN, BR, false); bld.prism(o.x, o.z, o2.x, o2.z, 0.22, Y_GROUND, Y_GROUND, 0.18, L_PLAIN, BR, false); }
+          else bld.prism(o.x, o.z, o2.x, o2.z, 0.5, Y_GROUND, Y_GROUND, PARAPET_H + 0.1, BL, BR, first || lastP);
           // corniche sous le parapet
           net.pointAt(r, s0 + 1e-3, sg * (W + 0.12), o); net.pointAt(r, s1 - 1e-3, sg * (W + 0.12), o2);
           bld.prism(o.x, o.z, o2.x, o2.z, 0.3, -0.45, -0.45, 0.4, L_PLAIN, COPING, false);
           net.pointAt(r, s0, sg * pOff, o); net.pointAt(r, s1, sg * pOff, o2);
           addParapetBox(o.x, o.z, o2.x, o2.z);
+        }
+      }
+    }
+  }
+
+  // éléments propres aux ponts célèbres
+  const box = (x, z, dx, dz, len, w, y0, h, layer, col) => surf.at(x, z).prism(x - dx * len / 2, z - dz * len / 2, x + dx * len / 2, z + dz * len / 2, w, y0, y0, h, layer, col, true);
+  for (const d of decks) {
+    const { r, sa, sb, W } = d, L = sb - sa;
+    if (d.kind === 'alex') {
+      // quatre pylônes de pierre surmontés de groupes dorés, candélabres le long du parapet
+      for (const s of [sa + 1.5, sb - 1.5]) for (const sg of [1, -1]) {
+        net.pointAt(r, s, sg * (W + 1.6), o);
+        if (masks.isWater(o.x, o.z)) continue; // seulement aux culées (le pont peut être découpé en plusieurs tronçons)
+        box(o.x, o.z, o.dx, o.dz, 3.2, 3.2, 0, 15, L_STONE, [236, 228, 210]);
+        box(o.x, o.z, o.dx, o.dz, 3.8, 3.8, 15, 0.7, L_PLAIN, [236, 228, 210]);
+        box(o.x, o.z, o.dx, o.dz, 2.2, 1.2, 15.7, 2.6, L_PLAIN, [235, 180, 45]);
+        box(o.x, o.z, o.dx, o.dz, 0.9, 2.4, 17.2, 1.6, L_PLAIN, [235, 180, 45]);
+        collision.addBox({ x: o.x, z: o.z, hw: 1.7, hd: 1.7, rot: Math.atan2(-o.dz, o.dx), tag: 'parapet' });
+      }
+      for (let s = sa + 10; s < sb - 8; s += 9) for (const sg of [1, -1]) { net.pointAt(r, s, sg * (W - 0.3), o); box(o.x, o.z, o.dx, o.dz, 0.16, 0.16, 1.1, 3.0, L_PLAIN, [40, 46, 44]); box(o.x, o.z, o.dx, o.dz, 0.5, 0.5, 4.1, 0.5, L_PLAIN, [240, 225, 180]); }
+    } else if (d.kind === 'neuf') {
+      // demi-lunes au droit de chaque pile
+      const n = Math.max(1, Math.round(L / 19));
+      for (let i = 1; i < n; i++) for (const sg of [1, -1]) {
+        net.pointAt(r, sa + (L * i) / n, sg * (W + 0.75), o);
+        box(o.x, o.z, o.dx, o.dz, 3.4, 1.9, -6.5, 6.5 + Y_GROUND, L_STONE, [226, 214, 190]);
+        box(o.x, o.z, o.dx, o.dz, 3.4, 1.9, Y_GROUND, 0.14, L_PLAIN, COPING);
+        net.pointAt(r, sa + (L * i) / n, sg * (W + 1.5), o); box(o.x, o.z, o.dx, o.dz, 3.4, 0.4, Y_GROUND, 1.1, L_STONE, [226, 214, 190]);
+      }
+    } else if (d.kind === 'bir') {
+      // viaduc du métro : deux files de colonnettes de fonte et tablier supérieur (sans collision : décor)
+      for (let s = sa; s <= sb; s += 6) for (const sg of [1, -1]) { net.pointAt(r, s, sg * 2.4, o); box(o.x, o.z, o.dx, o.dz, 0.34, 0.34, 0.1, 6.3, L_PLAIN, [96, 112, 104]); }
+      for (let s = sa; s < sb; s += 12) { net.pointAt(r, Math.min(sb, s + 6), 0, o); box(o.x, o.z, o.dx, o.dz, 12.1, 7.4, 6.4, 1.1, L_PLAIN, [110, 126, 118]); }
+    }
+  }
+
+  // ---------- 3 bis. bouquinistes sur les parapets, péniches amarrées
+  const mPerLon = 111320 * Math.cos((48.8656 * Math.PI) / 180), lonX = (lon) => (lon - 2.3212) * mPerLon;
+  const BQ_L = [lonX(2.3285), lonX(2.357)], BQ_R = [lonX(2.333), lonX(2.3575)]; // rive gauche : Voltaire → Tournelle ; rive droite : Louvre → pont Marie
+  let acc = 200, nBoat = 0, nBox = 0;
+  for (const poly of masks.riverPolys) {
+    for (let i = 0; i < poly.length; i++) {
+      const a = poly[i], b = poly[(i + 1) % poly.length];
+      if (outside(a) && outside(b)) continue;
+      const L = Math.hypot(b[0] - a[0], b[1] - a[1]); if (L < 2) continue;
+      const dx = (b[0] - a[0]) / L, dz = (b[1] - a[1]) / L;
+      for (let t = 1.5; t < L - 1.5; t += 2.6) {
+        const x = a[0] + dx * t, z = a[1] + dz * t;
+        let nx = -dz, nz = dx;
+        const wP = masks.isWater(x + nx * probe, z + nz * probe), wM = masks.isWater(x - nx * probe, z - nz * probe);
+        if (wP === wM) continue;
+        if (wP) { nx = -nx; nz = -nz; }
+        // boîtes vertes des bouquinistes (par groupes de 4, un vide entre les groupes)
+        const left = nz > 0.25 && x > BQ_L[0] && x < BQ_L[1], right = nz < -0.25 && x > BQ_R[0] && x < BQ_R[1];
+        if ((left || right) && (Math.floor(t / 2.6) % 6) < 4 && !nearDeck(x, z, 3) && !net.roadAtPad(x + nx * 0.3, z + nz * 0.3, 0.6, false)) {
+          box(x + nx * 0.3, z + nz * 0.3, dx, dz, 2.0, 0.78, Y_QUAY + PARAPET_H, 0.6, L_PLAIN, [26, 62, 42]);
+          box(x + nx * 0.3, z + nz * 0.3, dx, dz, 2.1, 0.86, Y_QUAY + PARAPET_H + 0.6, 0.06, L_PLAIN, [20, 48, 33]); nBox++;
+        }
+        // péniches amarrées le long des quais
+        acc += 2.6;
+        if (acc > 430 && !nearDeck(x, z, 30) && masks.isWater(x - nx * 5, z - nz * 5) && masks.isWater(x - nx * 9, z - nz * 9) && masks.isWater(x - nx * 5 + dx * 16, z - nz * 5 + dz * 16) && masks.isWater(x - nx * 5 - dx * 16, z - nz * 5 - dz * 16)) {
+          acc = 0; nBoat++;
+          const bx = x - nx * 4.6, bz = z - nz * 4.6, long = nBoat % 3 === 0;
+          const hull = nBoat % 2 ? [36, 40, 48] : [92, 34, 30], len = long ? 44 : 30;
+          box(bx, bz, dx, dz, len, 5.2, WATER_LEVEL - 0.4, 1.7, L_PLAIN, hull);
+          box(bx, bz, dx, dz, len - 1.2, 4.6, WATER_LEVEL + 1.3, 0.08, L_PLAIN, [120, 96, 70]);
+          if (long) { box(bx, bz, dx, dz, len * 0.7, 4.2, WATER_LEVEL + 1.3, 1.9, L_PLAIN, [225, 228, 230]); box(bx, bz, dx, dz, len * 0.7 + 0.6, 4.5, WATER_LEVEL + 3.2, 0.12, L_PLAIN, [245, 245, 240]); } // bateau-mouche vitré
+          else box(bx - dx * len * 0.3, bz - dz * len * 0.3, dx, dz, len * 0.28, 3.8, WATER_LEVEL + 1.3, 1.7, L_PLAIN, [228, 224, 214]);
         }
       }
     }
@@ -189,7 +265,7 @@ uniform float uWTime; uniform sampler2D uWNrm; uniform vec3 uWSky; varying vec3 
 
   const tmpC = new THREE.Color();
   return {
-    water, decks, nearDeck,
+    water, decks, nearDeck, boats: nBoat, bookstalls: nBox,
     update(dt, night) {
       uni.uWTime.value += dt;
       // reflet du ciel : couleur du brouillard / fond de scène (fournis par l'agent environnement)

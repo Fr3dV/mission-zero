@@ -115,6 +115,29 @@ export function getPaint(color, finish = 'metal') {
       clearcoatNormalMap: _peel, clearcoatNormalScale: new THREE.Vector2(0.012, 0.012),
     });
   }
+  // masque de dégâts par sommet (attribut `dmg`, absent = 0) : rayures, peinture arrachée, pièce tombée (dmg > 1,5)
+  m.onBeforeCompile = (sh) => {
+    sh.vertexShader = sh.vertexShader
+      .replace('#include <common>', '#include <common>\nattribute float dmg;\nvarying float vDmg;\nvarying vec3 vOP;')
+      .replace('#include <begin_vertex>', '#include <begin_vertex>\nvDmg = dmg; vOP = position;');
+    sh.fragmentShader = sh.fragmentShader
+      .replace('#include <common>', '#include <common>\nvarying float vDmg;\nvarying vec3 vOP;')
+      .replace('#include <color_fragment>', `#include <color_fragment>
+        float mzM = 0.0;
+        if (vDmg > 1.5) discard;
+        if (vDmg > 0.02) {
+          // écailles de peinture : taches organiques (bruit sinusoïdal déformé) + fines rayures horizontales
+          float n1 = 0.5 + 0.5 * sin(vOP.x * 37.0 + sin(vOP.y * 29.0 + vOP.z * 23.0) * 2.0) * sin(vOP.z * 31.0 + sin(vOP.x * 17.0 + vOP.y * 41.0) * 2.0);
+          float stri = step(0.8, fract(sin(dot(floor(vec2(vOP.y * 300.0, vOP.z * 9.0 + vOP.x * 9.0)), vec2(3.1, 7.7))) * 91.7));
+          float lvl = smoothstep(0.1, 0.95, vDmg);
+          float thr = 1.0 - lvl * 0.6;
+          mzM = clamp(smoothstep(thr, thr + 0.06, n1) * step(0.5, vDmg) + stri * lvl * 0.7, 0.0, 1.0);
+          diffuseColor.rgb = mix(diffuseColor.rgb, vec3(0.13, 0.13, 0.14), mzM);
+        }`)
+      .replace('#include <roughnessmap_fragment>', '#include <roughnessmap_fragment>\nroughnessFactor = mix(roughnessFactor, 0.62, mzM);')
+      .replace('#include <lights_physical_fragment>', '#include <lights_physical_fragment>\n#ifdef USE_CLEARCOAT\nmaterial.clearcoat *= (1.0 - mzM);\n#endif');
+  };
+  m.customProgramCacheKey = () => 'mz-veh-paint';
   m.envMapIntensity = 1;
   m.userData.vehicleMat = true;
   paints.set(key, m); registry.add(m);
@@ -187,15 +210,28 @@ export function getGlass() {
   const m = new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.04, metalness: 0, transparent: true, depthWrite: false, envMapIntensity: 1.3 });
   m.onBeforeCompile = (sh) => {
     sh.vertexShader = sh.vertexShader
-      .replace('#include <common>', '#include <common>\nattribute vec3 pbr;\nvarying vec3 vPbr;')
-      .replace('#include <begin_vertex>', '#include <begin_vertex>\nvPbr = pbr;');
+      .replace('#include <common>', '#include <common>\nattribute vec3 pbr;\nvarying vec3 vPbr;\nvarying vec3 vOP;')
+      .replace('#include <begin_vertex>', '#include <begin_vertex>\nvPbr = pbr; vOP = position;');
     sh.fragmentShader = sh.fragmentShader
-      .replace('#include <common>', '#include <common>\nvarying vec3 vPbr;')
+      .replace('#include <common>', '#include <common>\nvarying vec3 vPbr;\nvarying vec3 vOP;')
       .replace('#include <opaque_fragment>', `#include <opaque_fragment>
         vec3 mzSpec = reflectedLight.directSpecular + reflectedLight.indirectSpecular;
-        gl_FragColor.a = clamp(vPbr.x + max(mzSpec.r, max(mzSpec.g, mzSpec.b)) * 1.6, 0.0, 1.0);`);
+        gl_FragColor.a = clamp(vPbr.x + max(mzSpec.r, max(mzSpec.g, mzSpec.b)) * 1.6, 0.0, 1.0);
+        if (vPbr.y > 0.5) {
+          // étoilement : arêtes d'un diagramme de Voronoï dans le plan du vitrage
+          vec2 gp = vec2(vOP.z + vOP.x * 0.6, vOP.y + vOP.x * 0.3) * 13.0;
+          vec2 ip = floor(gp), fp = fract(gp); float d1 = 9.0, d2 = 9.0; float cid = 0.0;
+          for (int j = -1; j <= 1; j++) for (int i = -1; i <= 1; i++) {
+            vec2 o = vec2(float(i), float(j)); vec2 h = fract(sin(vec2(dot(ip + o, vec2(127.1, 311.7)), dot(ip + o, vec2(269.5, 183.3)))) * 43758.5453);
+            float dd = length(o + h - fp); if (dd < d1) { d2 = d1; d1 = dd; cid = h.x; } else if (dd < d2) d2 = dd;
+          }
+          float edge = 1.0 - smoothstep(0.0, 0.045, d2 - d1);
+          if (vPbr.y > 1.5) { if (cid < 0.86) discard; edge = max(edge, 0.5); }
+          gl_FragColor.rgb = mix(gl_FragColor.rgb, vec3(0.85, 0.9, 0.92), edge * 0.8);
+          gl_FragColor.a = max(gl_FragColor.a, edge * 0.9);
+        }`);
   };
-  m.customProgramCacheKey = () => 'mz-veh-glass';
+  m.customProgramCacheKey = () => 'mz-veh-glass2';
   registry.add(m);
   if (_fallbackOn) m.envMap = _fallbackEnv;
   return (_glass = m);

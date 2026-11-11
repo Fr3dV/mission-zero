@@ -1,0 +1,124 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8" />
+  <title>Mission Zéro — banc de crash</title>
+  <link rel="icon" href="data:," />
+  <style>
+    html,body{margin:0;height:100%;overflow:hidden;background:#15171b;font-family:system-ui,sans-serif;color:#dde}
+    canvas{position:fixed;inset:0;width:100%;height:100%;display:block}
+    #info{position:fixed;left:8px;bottom:8px;z-index:2;font:12px/1.4 ui-monospace,monospace;background:#000b;padding:6px 10px;border-radius:6px;white-space:pre}
+    #lab{position:fixed;left:8px;top:8px;z-index:2;font:12px ui-monospace,monospace;background:#000b;padding:4px 8px;border-radius:6px}
+  </style>
+  <script type="importmap">
+  { "imports": { "three": "/vendor/three/build/three.module.js", "three/addons/": "/vendor/three/examples/jsm/", "@shared/": "/shared/" } }
+  </script>
+</head>
+<body>
+  <div id="lab"></div><div id="info"></div>
+  <canvas id="c"></canvas>
+  <script type="module">
+    // Banc de crash : ?crash=front|offset|side|rear&speed=50&id=porsche_911[&secs=3][&view=…]
+    // front/offset : la voiture testée percute un mur (plein / demi-recouvrement) ; side/rear : un taxi la percute.
+    // Affiche l'après (à gauche) à côté d'un exemplaire neuf (à droite), plus les dégâts chiffrés.
+    import * as THREE from 'three';
+    import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
+    import { VEHICLE_BY_ID } from '@shared/catalog.js';
+    import { bus } from '/src/core/bus.js';
+    import { collision } from '/src/core/collision.js';
+    import { createVehicles } from '/src/vehicles/index.js';
+
+    const q = new URLSearchParams(location.search);
+    const mode = q.get('crash') || 'front', kmh = +(q.get('speed') || 50), id = VEHICLE_BY_ID[q.get('id')] ? q.get('id') : 'tesla_model3';
+    const canvas = document.getElementById('c');
+    const renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
+    renderer.setPixelRatio(Math.min(devicePixelRatio, 2)); renderer.setSize(innerWidth, innerHeight);
+    renderer.toneMapping = THREE.ACESFilmicToneMapping;
+    const scene = new THREE.Scene(); scene.background = new THREE.Color(0x8d949c);
+    scene.environment = new THREE.PMREMGenerator(renderer).fromScene(new RoomEnvironment(), 0.03).texture; scene.environmentIntensity = 0.9;
+    const camera = new THREE.PerspectiveCamera(32, innerWidth / innerHeight, 0.1, 500);
+    const key = new THREE.DirectionalLight(0xfff4e6, 2.2); key.position.set(6, 10, -5); scene.add(key);
+    const ground = new THREE.Mesh(new THREE.PlaneGeometry(300, 300), new THREE.MeshStandardMaterial({ color: 0x6d7278, roughness: 0.6 }));
+    ground.rotation.x = -Math.PI / 2; scene.add(ground);
+
+    const events = [];
+    bus.on('vehicle:crash', (e) => events.push({ ev: 'crash', id: e.vehicle.typeId, impact: +e.impact.toFixed(1), kind: e.kind, tag: e.tag, broke: e.broke }));
+    bus.on('vehicle:hit', (e) => events.push({ ev: 'hit', id: e.vehicle.typeId, impact: +e.impact.toFixed(1) }));
+    const ctx = { THREE, renderer, scene, camera, canvas, bus, collision, params: q, quality: 'high', time: 0, heightAt: () => 0, world: null, player: null, env: null };
+    const vehicles = createVehicles(ctx);
+    const spec = VEHICLE_BY_ID[id], sp = kmh / 3.6;
+    const dt = 1 / 60, secs = +(q.get('secs') || 3);
+    const f = (x) => x.toFixed(2);
+    const summary = (car, k) => { const z = car.damageZones; return { id: car.typeId, kmh: k, damage: +f(car.damage), zones: { front: +f(z.front), rear: +f(z.rear), left: +f(z.left), right: +f(z.right) }, wrecked: car.wrecked, power: +f(car.phys.fxm.power), brake: +f(car.phys.fxm.brake), grip: +f(car.phys.fxm.grip), steerBias: +car.phys.fxm.steerBias.toFixed(3), parts: JSON.parse(JSON.stringify(car.dmg.parts)) }; };
+    const line = (r) => `${String(r.kmh).padStart(3)} km/h  damage ${f(r.damage)}  av ${f(r.zones.front)} ar ${f(r.zones.rear)} g ${f(r.zones.left)} d ${f(r.zones.right)}  puissance ${f(r.power)} tire ${r.steerBias}  épave ${r.wrecked}`;
+    let worst = 0, results = [], camT, camP, label;
+    const run = () => { for (let i = 0; i < secs / dt; i++) { ctx.time += dt; const a = performance.now(); vehicles.update(dt); worst = Math.max(worst, performance.now() - a); } };
+    const wallMat = new THREE.MeshStandardMaterial({ color: 0x9a938a, roughness: 0.9, transparent: true, opacity: 0.22, depthWrite: false });
+    window.__bench = { ctx, vehicles, collision };
+    if (mode === 'prop') {
+      // décor cassable : ?crash=prop&tag=lamp|tree&absorb=0.1&speeds=100,50 — l'obstacle cède (faux module ville)
+      const tag = q.get('tag') || 'lamp', absorb = +(q.get('absorb') || 0.1), rad = tag === 'tree' ? 0.3 : 0.12;
+      ctx.world = { onImpact(e) { collision.remove(e.shape); if (e.shape.data?.mesh) e.shape.data.mesh.rotation.x = -1.3; return { broke: true, absorb }; } };
+      const speeds = (q.get('speeds') || String(kmh)).split(',').map(Number), lane = spec.width + 2;
+      const logs = [];
+      const cars = speeds.map((k, i) => {
+        const x = i * lane, off = +(q.get('off') || 0.45);   // poteau légèrement excentré
+        const mesh = new THREE.Mesh(new THREE.CylinderGeometry(rad, rad, 4, 10), new THREE.MeshStandardMaterial({ color: tag === 'tree' ? 0x5a4630 : 0x2c2f33 })); mesh.position.set(x + off, 2, -10); scene.add(mesh);
+        collision.addCircle({ x: x + off, z: -10, r: rad, tag, data: { mesh } });
+        const z0 = -10 + spec.length / 2 + rad + Math.max(1.5, (k / 3.6) * 0.4);
+        const car = vehicles.spawn(id, x, z0, 0); car.driver = 'bench'; car.controls.throttle = 0; car.setTransform(x, z0, 0, k / 3.6); car.phys.kinT = -1;
+        logs.push({ kmh: k, v0: null, vAfter: null, yaw: 0, x0: x });
+        return car;
+      });
+      // on mesure la vitesse juste avant et juste après le contact, et la déviation de cap/trajectoire 1,5 s plus tard
+      for (let i = 0; i < 1.5 / dt; i++) {
+        const pre = cars.map((c) => Math.hypot(c.vel.x, c.vel.z));
+        ctx.time += dt; vehicles.update(dt);
+        cars.forEach((c, k) => { const L2 = logs[k], now = Math.hypot(c.vel.x, c.vel.z); if (L2.v0 == null && c.damage > 0 || (L2.v0 == null && pre[k] - now > pre[k] * 0.02)) { L2.v0 = pre[k]; L2.vAfter = now; } });
+      }
+      results = cars.map((c, i) => ({ ...summary(c, speeds[i]), perteVitessePct: logs[i].v0 ? +(100 * (1 - logs[i].vAfter / logs[i].v0)).toFixed(1) : null, capDeg: +(c.yaw * 57.3).toFixed(2), ecartLateralM: +(c.pos.x - logs[i].x0).toFixed(2) }));
+      const mid = ((speeds.length - 1) * lane) / 2;
+      camT = [mid, 0.5, cars[0].pos.z]; camP = [mid - 5, 3.5, cars[0].pos.z - 9];
+      label = `${id} — ${tag} fauché (absorb ${absorb}) — ${speeds.join(', ')} km/h`;
+    } else if (mode === 'front' || mode === 'offset') {
+      // série graduée : une voiture par vitesse, côte à côte, plus un exemplaire neuf à droite de l'image
+      const speeds = (q.get('speeds') || String(kmh)).split(',').map(Number), lane = spec.width + 1.5;
+      const cars = speeds.map((k, i) => {
+        const x = i * lane;
+        const off = mode === 'offset' ? x + spec.width * 0.5 + 0.9 : x;   // mur décalé : recouvrement d'environ 40 % côté gauche
+        const hwall = mode === 'offset' ? 1.0 : lane * 0.5;
+        collision.addBox({ x: off, z: -14.5, hw: hwall, hd: 0.5, tag: 'building' });
+        const wall = new THREE.Mesh(new THREE.BoxGeometry(hwall * 2, 1.4, 1), wallMat); wall.position.set(off, 0.7, -14.5); scene.add(wall);
+        const z0 = -14 + spec.length / 2 + Math.max(1.2, (k / 3.6) * 0.5);   // environ une demi-seconde d'élan
+        const car = vehicles.spawn(id, x, z0, 0); car.driver = 'bench'; car.setTransform(x, z0, 0, k / 3.6); car.phys.kinT = -1;
+        return car;
+      });
+      run();
+      results = cars.map((c, i) => summary(c, speeds[i]));
+      const fresh = vehicles.createMesh(id, cars[0].color); fresh.position.set(-lane, 0, -11.5); scene.add(fresh);
+      const mid = ((speeds.length - 2) * lane) / 2;
+      camT = [mid, 0.5, -11]; camP = [mid - 2.5 - speeds.length, 3.4 + speeds.length * 0.5, -19.5 - speeds.length * 1.6];
+      label = `${id} — ${mode} — de gauche à droite : ${[...speeds].reverse().join(', ')} km/h, puis neuf`;
+    } else {
+      const car = vehicles.spawn(id, 0, -12, mode === 'side' ? Math.PI / 2 : 0);
+      const rammer = vehicles.spawn('taxi', mode === 'side' ? 0.4 : 0.3, 0, 0); rammer.driver = 'bench'; rammer.setTransform(rammer.pos.x, 0, 0, sp); rammer.phys.kinT = -1;
+      run();
+      results = [summary(car, kmh), { ...summary(rammer, kmh), id: 'taxi (percuteur)' }];
+      const fresh = vehicles.createMesh(id, car.color);
+      const rx = Math.cos(car.yaw), rz = -Math.sin(car.yaw), fx = -Math.sin(car.yaw), fz = -Math.cos(car.yaw);
+      // exemplaire neuf devant la voiture percutée (hors de la trajectoire du taxi)
+      fresh.position.set(car.pos.x + fx * (spec.length + 1), 0, car.pos.z + fz * (spec.length + 1)); fresh.rotation.y = car.yaw; scene.add(fresh);
+      camT = [car.pos.x + fx * 2.5, 0.5, car.pos.z + fz * 2.5];
+      // côté percuté : le taxi arrive de +z
+      camP = mode === 'side' ? [car.pos.x + fx * 2.5 + 3, 3.6, car.pos.z + 11] : [car.pos.x + 6.5, 3.4, car.pos.z + 8.5];
+      label = `${id} — ${mode} — percuté par un taxi à ${kmh} km/h (l'exemplaire neuf est devant)`;
+    }
+    window.__crash = { mode, results, events, worstFrameMs: +worst.toFixed(2), debris: 0 };
+    document.getElementById('lab').textContent = label;
+    document.getElementById('info').textContent = results.map((r) => (r.id !== id ? r.id + ' ' : '') + line(r)).join('\n') + `\nchocs : ${events.map((e) => e.ev + ' ' + e.id + ' ' + e.impact + ' m/s').join(' | ')}\npire frame véhicules ${worst.toFixed(2)} ms`;
+    if (q.get('view') === 'top') { camP = [camT[0] + 0.01, 16, camT[2]]; }
+    camera.position.set(...camP); camera.lookAt(...camT);
+    renderer.setAnimationLoop(() => { ctx.time += 1 / 60; vehicles.update(1 / 60); renderer.render(scene, camera); });
+  </script>
+</body>
+</html>

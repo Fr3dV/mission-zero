@@ -178,15 +178,15 @@ export function buildEiffel(m) {
   const beacon = new THREE.Mesh(bg, bm); beacon.position.y = 296.7; beacon.rotation.z = -0.02; beacon.visible = false; beacon.frustumCulled = false; beacon.name = 'eiffel:phare';
   m.add(beacon);
 
-  // --- lueur dorée au sol sous la tour : une seule SpotLight (version proche uniquement) ---
+  // --- lueur dorée au sol sous la tour : une seule SpotLight (créée une fois, avec la version lointaine) ---
   let spot = null;
-  if (!far && kit.quality !== 'low') {
+  if (far && kit.quality !== 'low') {
     spot = new THREE.SpotLight(0xffb450, 0, 170, 1.05, 0.7, 1.6); spot.position.set(0, 56, 0); spot.target.position.set(0, 0, 0); spot.castShadow = false; spot.name = 'eiffel:lueur';
     m.root.add(spot); m.root.add(spot.target);
   }
 
   m.onUpdate((dt, st, visible) => {
-    if (!far) { kit.lattice.emissiveIntensity = st.night * 1.15; kit.iron.emissiveIntensity = st.night * 1.0; }
+    if (far) { kit.lattice.emissiveIntensity = st.night * 1.15; kit.iron.emissiveIntensity = st.night * 1.0; }
     if (spot) spot.intensity = st.night * 9000;
     if (!visible) return;
     const on = st.night > 0.5;

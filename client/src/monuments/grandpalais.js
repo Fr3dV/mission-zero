@@ -6,7 +6,7 @@ import { P } from './kit.js';
 
 export function buildGrandPalais(m) {
   const { B, kit, far } = m, S = P.stone;
-  const NZ = 38, HL = 88, HD = 26, WH = 19;              // centre de la nef, demi-longueur, demi-profondeur, hauteur des murs
+  const NZ = 48, HL = 108, HD = 26, WH = 19;              // centre de la nef, demi-longueur, demi-profondeur, hauteur des murs
   const ZF = NZ + HD;
   // ---- murs périphériques (anneau : l'intérieur est visible à travers la verrière) ----
   const wall = (w, d, x, z, h = WH) => { B.box(S, w, h + 3, d, x, -3, z); B.box(P.stoneL, w + 0.8, 1.1, d + 0.8, x, h, z); };
@@ -19,14 +19,14 @@ export function buildGrandPalais(m) {
   if (B.hi) for (let i = 0; i < 80; i++) { const x = -HL + 1 + i * (2 * HL - 2) / 79; if (Math.abs(x) > 17) B.box(P.stoneL, 0.35, 1.2, 0.35, x, 20.3, ZF + 0.4, 0, { jit: 0 }); }
   B.box(P.stoneL, 2 * HL, 0.3, 0.6, 0, 21.5, ZF + 0.4);
   for (const sx of [-1, 1]) {
-    B.colonnade(sx * 19.5, ZF - 0.6, sx * 71.5, ZF - 0.6, 14, 3.4, 0.85, 13.2, 'ion');
+    B.colonnade(sx * 19.5, ZF - 0.6, sx * (HL - 16.5), ZF - 0.6, 19, 3.4, 0.85, 13.2, 'ion');
     B.group(0, 0, ZF - 3, 0, () => {
-      B.winRow(sx * 17.5, sx * 73.5, 5, 0, 14, 2.4, 7, { arch: true, lit: 0.5, farMin: 0 });
-      B.box({ ...P.copper, c: [0.32, 0.36, 0.4] }, 56, 2, 0.15, sx * 45.5, 13.6, 0.05, 0, { jit: 0 });   // frise en mosaïque
-      B.box(P.gold, 56, 0.2, 0.18, sx * 45.5, 13.5, 0.06, 0, { jit: 0 });
+      B.winRow(sx * 17.5, sx * (HL - 14.5), 5, 0, 19, 2.4, 7, { arch: true, lit: 0.5, farMin: 0 });
+      B.box({ ...P.copper, c: [0.32, 0.36, 0.4] }, HL - 32, 2, 0.15, sx * (HL + 3) / 2, 13.6, 0.05, 0, { jit: 0 });   // frise en mosaïque
+      B.box(P.gold, HL - 32, 0.2, 0.18, sx * (HL + 3) / 2, 13.5, 0.06, 0, { jit: 0 });
     });
     // pavillons d'angle + quadriges de Récipon
-    B.group(sx * 81, 0, ZF - 1, 0, () => {
+    B.group(sx * (HL - 7), 0, ZF - 1, 0, () => {
       B.box(S, 15, 25, 7, 0, -2, 0); B.box(P.stoneL, 16, 1, 8, 0, 23, 0); B.win(0, 4, 3.5, 4.4, 10, { arch: true, lit: 0.7, farMin: 0 });
       for (const o of [-5.6, 5.6]) B.column(o, 3.4, 3.9, 0.85, 13.2, 'ion');
       B.box(P.stoneD, 9, 3, 6, 0, 24, 0); B.lump(P.verdigris, 0, 27, 0.5, 8, 6.5, 5, 10, sx + 4);
@@ -42,18 +42,19 @@ export function buildGrandPalais(m) {
   });
   // façades latérales et arrière
   for (const sx of [-1, 1]) B.group(sx * HL, 0, NZ, sx * Math.PI / 2, () => B.winRow(-22, 22, 4.5, 0.02, 8, 2.6, 8.5, { arch: true, lit: 0.5 }));
-  B.group(0, 0, NZ - HD, Math.PI, () => { B.winRow(24, 84, 4.5, 0.02, 11, 2.6, 8.5, { arch: true, lit: 0.5 }); B.winRow(-84, -24, 4.5, 0.02, 11, 2.6, 8.5, { arch: true, lit: 0.5 }); });
+  B.group(0, 0, NZ - HD, Math.PI, () => { B.winRow(24, HL - 4, 4.5, 0.02, 15, 2.6, 8.5, { arch: true, lit: 0.5 }); B.winRow(-HL + 4, -24, 4.5, 0.02, 15, 2.6, 8.5, { arch: true, lit: 0.5 }); });
   // ---- nef transversale et palais d'Antin ----
-  const TZ0 = NZ - HD, TZ1 = -52, TL = TZ0 - TZ1, TZc = (TZ0 + TZ1) / 2;
+  const TZ0 = NZ - HD, TZ1 = -96, TL = TZ0 - TZ1, TZc = (TZ0 + TZ1) / 2;
   wall(3, TL, 21.5, TZc); wall(3, TL, -21.5, TZc); B.box(P.pave, 40, 0.3, TL, 0, 0, TZc, 0, { jit: 0 });
   for (const sx of [-1, 1]) B.group(sx * 23, 0, TZc, sx * Math.PI / 2, () => B.winRow(-TL / 2 + 2, TL / 2 - 2, 4.5, 0.02, 10, 2.6, 8.5, { arch: true, lit: 0.5 }));
-  B.box(S, 76, 24, 20, 0, -3, -62); B.box(P.stoneL, 77.2, 1, 21.2, 0, 21, -62); B.frustum(P.zinc, 76, 20, 64, 8, 5, 0, 22, -62);
-  B.group(0, 0, -72.02, Math.PI, () => { B.winRow(-36, 36, 4.5, 0, 12, 2.4, 9, { arch: true, lit: 0.4 }); for (const x of [-12, -8, 8, 12]) B.column(x, 0.5, 1.2, 0.8, 16, 'ion'); B.win(0, 0, 0.3, 5, 11, { arch: true, mat: P.shadow, farMin: 0 }); });
-  B.cyl(S, 11, 11, 6, 0, 21, -62, 24); B.dome(P.zinc, 11.2, 7, 0, 27, -62, 24);
+  B.box(S, 149, 24, 52, 0, -3, -122); B.box(P.stoneL, 150.2, 1, 53.2, 0, 21, -122); B.frustum(P.zinc, 149, 52, 130, 30, 5, 0, 22, -122);
+  B.group(0, 0, -148.02, Math.PI, () => { B.winRow(-70, 70, 4.5, 0, 22, 2.4, 9, { arch: true, lit: 0.4 }); for (const x of [-12, -8, 8, 12]) B.column(x, 0.5, 1.2, 0.8, 16, 'ion'); B.win(0, 0, 0.3, 5, 11, { arch: true, mat: P.shadow, farMin: 0 }); });
+  B.cyl(S, 13, 13, 7, 0, 21, -122, 24); B.dome(P.zinc, 13.2, 8, 0, 28, -122, 24);
+  for (const sx of [-1, 1]) B.group(sx * 74.52, 0, -122, sx * Math.PI / 2, () => B.winRow(-22, 22, 4.5, 0, 7, 2.4, 9, { arch: true, lit: 0.4 }));
   // ---- verrière : berceau longitudinal, culs-de-four, berceau transversal, dôme, lanterne ----
   const parts = [], RISE = 16, RZ = HD - 3.2, GY = WH + 0.6;
   const barrel = (len, rad, rise, ru, rv) => {
-    const g = new THREE.CylinderGeometry(rad, rad, len, far ? 10 : 20, 1, true, -Math.PI / 2, Math.PI);
+    const g = new THREE.CylinderGeometry(rad, rad, len, far ? 10 : 20, 1, true, 0, Math.PI);
     const uv = g.attributes.uv; for (let i = 0; i < uv.count; i++) uv.setXY(i, uv.getX(i) * ru, uv.getY(i) * rv);
     g.rotateZ(Math.PI / 2); g.scale(1, rise / rad, 1); return g;          // axe le long de X, bombé vers +Y
   };
@@ -81,8 +82,8 @@ export function buildGrandPalais(m) {
   if (B.hi) { // drapeau tricolore
     B.box({ ...P.glass, c: [0.02, 0.1, 0.45], r: 0.8, g: 0.3 }, 1.4, 2.6, 0.05, 0.75, GY + 40.6, NZ, 0, { jit: 0 }); B.box({ ...P.stoneW, t: 0, g: 0.3 }, 1.4, 2.6, 0.05, 2.15, GY + 40.6, NZ, 0, { jit: 0 }); B.box({ ...P.glass, c: [0.6, 0.03, 0.04], r: 0.8, g: 0.3 }, 1.4, 2.6, 0.05, 3.55, GY + 40.6, NZ, 0, { jit: 0 });
     // fermes métalliques apparentes sous la verrière
-    for (let i = -6; i <= 6; i++) if (Math.abs(i) > 1) B.add(new THREE.TorusGeometry(RZ - 0.4, 0.28, 5, 20, Math.PI).scale(1, RISE / RZ, 1), P.steel, i * (LB / 6.5), GY, NZ, Math.PI / 2);
+    for (let i = -8; i <= 8; i++) if (Math.abs(i) > 2) B.add(new THREE.TorusGeometry(RZ - 0.4, 0.28, 5, 20, Math.PI).scale(1, RISE / RZ, 1), P.steel, i * (LB / 8.5), GY, NZ, Math.PI / 2);
   }
-  m.collide.box(0, NZ, HL + 0.4, HD + 0.6); m.collide.box(0, ZF + 3.2, 17.4, 3.4); m.collide.box(0, TZc, 23.4, TL / 2); m.collide.box(0, -62, 38.4, 10.4);
+  m.collide.box(0, NZ, HL + 0.4, HD + 0.6); m.collide.box(0, ZF + 3.2, 17.4, 3.4); m.collide.box(0, TZc, 23.4, TL / 2); m.collide.box(0, -122, 74.9, 26.4);
   return { height: 64 };
 }

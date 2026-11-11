@@ -1,7 +1,7 @@
 // Télécharge les données brutes OpenStreetMap (API Overpass) sur l'emprise BBOX de shared/geo.js.
 // Résultat mis en cache dans .data/osm/*.json (un fichier par couche / tuile). Relancer ne retélécharge
 // que ce qui manque (option --force pour tout reprendre).
-// Usage : node tools/osm/fetch.mjs [--force] [--only roads,water,green,buildings]
+// Usage : node tools/osm/fetch.mjs [--force] [--only roads,water,green,buildings,trees,pois,paths,grass,bridges]
 import { mkdirSync, existsSync, writeFileSync, renameSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -105,6 +105,53 @@ out tags geom;`);
   // Bâtiments multipolygones (cours intérieures) : une seule requête, avec la géométrie des membres.
   await layer('buildings_rel', `[out:json][timeout:240];
 relation["building"]["type"="multipolygon"]${bb(BBOX)};
+out body geom;`);
+}
+
+// ───── Contrat v3 « fidélité des lieux » : arbres, points d'intérêt, allées, pelouses, ponts ─────
+if (want('trees')) {
+  await layer('trees', `[out:json][timeout:180];
+node["natural"="tree"]${bb(BBOX)};
+out skel qt;`);
+  await layer('treerows', `[out:json][timeout:120];
+way["natural"="tree_row"]${bb(BBOX)};
+out tags geom;`);
+}
+if (want('pois')) {
+  await layer('pois', `[out:json][timeout:240];
+(
+  node["railway"="subway_entrance"]${bb(BBOX)};
+  node["railway"="station"]${bb(full)};
+  nwr["amenity"~"^(cafe|restaurant|bar|pharmacy|fountain|drinking_water|theatre|place_of_worship|school|bicycle_rental)$"]${bb(BBOX)};
+  nwr["shop"~"^(bakery|kiosk|newsagent|books)$"]${bb(BBOX)};
+  nwr["historic"~"^(memorial|monument)$"]${bb(BBOX)};
+  nwr["tourism"~"^(artwork|museum|hotel)$"]${bb(BBOX)};
+  node["highway"="bus_stop"]${bb(BBOX)};
+);
+out tags center;`);
+  await layer('fountains', `[out:json][timeout:120];
+way["amenity"="fountain"]${bb(BBOX)};
+out tags geom;`);
+}
+if (want('paths')) {
+  await layer('paths', `[out:json][timeout:240];
+way["highway"~"^(footway|path|steps)$"]["footway"!~"^(sidewalk|crossing|traffic_island|link)$"]["tunnel"!~"."]["indoor"!~"."]${bb(BBOX)};
+out tags geom;`);
+}
+if (want('grass')) {
+  await layer('grass', `[out:json][timeout:180];
+(
+  way["landuse"~"^(grass|village_green)$"]${bb(BBOX)};
+  relation["landuse"~"^(grass|village_green)$"]${bb(BBOX)};
+);
+out body geom;`);
+}
+if (want('bridges')) {
+  await layer('bridges', `[out:json][timeout:120];
+(
+  way["man_made"="bridge"]${bb(full)};
+  relation["man_made"="bridge"]${bb(full)};
+);
 out body geom;`);
 }
 console.log('Terminé. Cache :', CACHE);

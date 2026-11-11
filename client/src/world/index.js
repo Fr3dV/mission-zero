@@ -19,6 +19,8 @@ import { buildRiver } from './river.js';
 import { buildBuildings } from './buildings.js';
 import { buildVegetation } from './vegetation.js';
 import { buildProps } from './props.js';
+import { createDamage } from './damage.js';
+import { buildSigns } from './signs.js';
 
 /** Facteur de nuit 0..1 à partir de l'heure (crépuscule ~19h30-21h, aube ~5h30-7h). */
 function nightFromHour(h) {
@@ -65,11 +67,14 @@ export function createWorld(ctx) {
 
 
   t = performance.now();
-  const bld = buildBuildings(ctx, net, masks, Q, uniforms); lap('immeubles', t);
+  const bld = buildBuildings(ctx, net, masks, Q, uniforms, river); lap('immeubles', t);
   t = performance.now();
   const veg = buildVegetation(ctx, net, masks, river, bld, Q); lap('arbres', t);
   t = performance.now();
   const props = buildProps(ctx, net, masks, river, bld, Q, uniforms, streetInfo); lap('mobilier', t);
+  t = performance.now();
+  const signs = buildSigns(ctx, net, bld, Q); lap('plaques', t);
+  const damage = createDamage(ctx, { props, veg, uniforms });
   timings.total = Math.round(performance.now() - t0);
 
   // ---------- cycle jour / nuit
@@ -94,10 +99,17 @@ export function createWorld(ctx) {
       const d = net.edgeDistance(x, z, false);
       return heightAt(x, z) + (d > 0.05 && d < 5 ? Y_WALK : 0);
     },
+    // --- contrat v2 « dégâts et impacts »
+    /** Appelé par le module véhicules à chaque contact voiture/décor : { shape, tag, x, z, dirX, dirZ, speed, mass, vehicle } -> { broke, absorb }. */
+    onImpact: (e) => damage.onImpact(e),
+    /** Objets tombés au sol près de (x,z) : [{x, z, r, tag}]. */
+    propsNear: (x, z, r) => damage.propsNear(x, z, r),
+    _damage: damage,
+    _maskWater: (x, z) => masks.isWater(x, z),
     isWater: (x, z) => masks.isWater(x, z) && !river.nearDeck(x, z, 0),
     isPark: (x, z) => masks.isPark(x, z),
     inBuilding: (x, z, pad) => bld.inBuilding(x, z, pad),
-    stats: { timings, buildings: bld.count, proceduralBuildings: bld.procedural, trees: veg.count, lamps: props.lampCount, props: props.nProps, surfaceTriangles: surfTris, roads: net.roads.length, bridges: river.decks.length, quality: ctx.quality, metros: props.metros.length, kiosks: props.kiosks.length },
+    stats: { timings, buildings: bld.count, proceduralBuildings: bld.procedural, trees: veg.count, lamps: props.lampCount, props: props.nProps, surfaceTriangles: surfTris, roads: net.roads.length, bridges: river.decks.length, boats: river.boats, bookstalls: river.bookstalls, plaques: signs.count, quality: ctx.quality, metros: props.metros.length, kiosks: props.kiosks.length },
     _debug: { metros: props.metros, kiosks: props.kiosks },
     update(dt) {
       // transition douce jour/nuit
@@ -119,6 +131,7 @@ export function createWorld(ctx) {
       bld.update(cam);
       veg.update(cam);
       props.update(cam, night);
+      damage.update(dt, night);
       for (const m of surfMeshes) {
         const s = m.geometry.boundingSphere;
         m.visible = Math.hypot(s.center.x - cam.x, s.center.z - cam.z) - s.radius < Q.viewDist;
