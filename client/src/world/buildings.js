@@ -1,7 +1,8 @@
-// Immeubles parisiens : un gabarit unitaire (murs + brisis + toit + 2 souches de cheminée) instancié par bâtiment
+// Immeubles : un gabarit unitaire (murs + brisis + toit + 2 souches de cheminée) instancié par bâtiment
 // (3 vec4 par instance) et, pour les immeubles proches, un second jeu de pièces en vrai volume (balcons filants,
 // garde-corps, corniches, stores, lucarnes) instancié sur les mêmes données. Shaders : voir facade.js.
-import { tileKey, hash2, mulberry32 } from './util.js';
+import { baseHeightAt } from '@shared/terrain.js';
+import { TILE, tileKeyI, hash2, mulberry32, bucketByTile } from './util.js';
 import { VERT_PARS, FRAG_PARS, FRAG_MAIN, FRAG_NORMAL, FRAG_LIGHT, FRAG_GLASS } from './facade.js';
 
 const BASE_INDEX_COUNT = 72; // murs + brisis + toit (les cheminées suivent)
@@ -195,133 +196,168 @@ function fillerBuildings(ctx, masks) {
   return out;
 }
 
-// Quartiers au bâti plus ancien et plus bas (pas d'haussmannien dominant) : cercles [x, z, rayon] en mètres monde.
-const M_LON = 111320 * Math.cos((48.8656 * Math.PI) / 180), M_LAT = 111320;
-const OLD_ZONES = [[2.358, 48.857, 650], [2.3565, 48.8517, 330], [2.3445, 48.8497, 430], [2.3475, 48.8535, 260]] // Marais, île Saint-Louis, Quartier latin, Saint-Michel / Huchette
-  .map(([lon, lat, r]) => [(lon - 2.3212) * M_LON, -(lat - 48.8656) * M_LAT, r]);
+/**
+ * Immeubles de la ville, diffusés par tuile.
+ *  - Au démarrage : seulement des index en tableaux typés sur le tableau plat des bâtiments (rangement par tuile,
+ *    grille d'occupation pour inBuilding) — coût linéaire, quelques dizaines de ms pour 300 000 bâtiments.
+ *  - À la demande : chaque tuile trie ses bâtiments (rognage sur les chaussées, monuments, eau), choisit style et
+ *    toit (profil de la ville + méta), détecte les murs mitoyens et remplit ses tampons d'instances.
+ */
+/** Hauteur ajoutée au-dessus de l'égout par le toit des styles ≥ 5 (voir mzRoofT dans facade.js). */
+export function roofRise(rt, w, d) {
+  const m = Math.min(w, d) * 0.5;
+  if (rt === 3) return 0.37;
+  return rt === 4 ? Math.min(2.5, Math.max(0.3, m * 0.12)) : Math.min(3.4, Math.max(0.45, m * 0.34));
+}
 
-export function buildBuildings(ctx, net, masks, Q, uniforms, river) {
-  const { THREE, scene, heightAt, collision, LANDMARKS, worldData } = ctx;
+export function createBuildings(ctx, net, masks, Q, uniforms, river, profile) {
+  const { THREE, scene, LANDMARKS, worldData } = ctx;
+  // ---------- source : données réelles, sinon génération le long des rues (petites villes), + remplissage hors emprise
   let src = worldData.buildings;
   const procedural = !src || !src.length;
-  if (procedural) src = proceduralBuildings(ctx, net, masks);
-  const occ = new Map(), OC = 32; // occupation (mitoyenneté, arbres/mobilier hors des immeubles)
-  const list = [];                // immeubles retenus
-  let kept = 0;
-  const addAll = (src, real, filler) => {
-    const n = Math.floor(src.length / 6);
-    for (let i = 0; i < n; i++) {
-      let x = src[i * 6], z = src[i * 6 + 1], w = src[i * 6 + 2], d = src[i * 6 + 3], h = src[i * 6 + 5];
-      const rot = (src[i * 6 + 4] * Math.PI) / 180;
-      if (!(w > 2.5 && d > 2.5) || !(h > 0)) continue;
-      let skip = false;
-      for (const l of LANDMARKS) { const lim = l.radius + Math.min(w, d) * 0.5; const dx = x - l.x, dz = z - l.z; if (dx * dx + dz * dz < lim * lim) { skip = true; break; } }
-      if (skip) continue;
-      h = Math.min(Math.max(h, 5), 75);
-      const c = Math.cos(rot), s = Math.sin(rot);
-      if (real) {
-        // les données réelles sont des rectangles englobants : on rogne ceux qui mordent sur une chaussée
-        let ok = false;
-        for (let it = 0; it < 4 && !ok; it++) {
-          ok = true;
-          const hw = w / 2, hd = d / 2;
-          const nx = Math.max(2, Math.ceil(w / 4)), nz = Math.max(2, Math.ceil(d / 4));
-          const bad = (lx, lz) => net.roadAtPad(x + lx * c + lz * s, z - lx * s + lz * c, 0.7, true);
-          if (bad(0, 0)) ok = false;
-          for (let k = 0; k <= nx && ok; k++) { const lx = -hw + (w * k) / nx; if (bad(lx, -hd) || bad(lx, hd)) ok = false; }
-          for (let k = 1; k < nz && ok; k++) { const lz = -hd + (d * k) / nz; if (bad(-hw, lz) || bad(hw, lz)) ok = false; }
-          if (!ok) { w *= 0.8; d *= 0.8; if (w < 4 || d < 4) break; }
-        }
-        if (!ok) continue;
-        if (masks.isWater(x, z)) continue;
-        // édicules cartographiés aux culées des ponts (pylônes du pont Alexandre III...) : déjà construits avec le pont
-        if (river && Math.max(w, d) < 10 && river.nearDeck(x, z, 7)) continue;
-      }
-      const hw = w / 2, hd = d / 2;
-      // niveau de référence = sol au centre ; le soubassement descend jusqu'au point le plus bas de l'emprise
-      const base = heightAt(x, z); let lo = base;
-      for (const [lx, lz] of [[-hw, -hd], [hw, -hd], [hw, hd], [-hw, hd]]) lo = Math.min(lo, heightAt(x + lx * c + lz * s, z - lx * s + lz * c));
-      const seed = hash2(Math.round(x * 3), Math.round(z * 3)) * 100;
-      // style déterministe : 0 haussmannien, 1 post-haussmannien, 2 immeuble de rapport enduit, 3 Art déco, 4 moderne
-      const hs = hash2(Math.round(x * 7) + 11, Math.round(z * 7) - 5);
-      let style = hs < 0.56 ? 0 : hs < 0.68 ? 1 : hs < 0.87 ? 2 : hs < 0.95 ? 3 : 4;
-      // style par quartier : bâti ancien enduit au Marais, sur l'île Saint-Louis, au Quartier latin et sur la butte Montmartre
-      let old = false; for (const q of OLD_ZONES) if ((x - q[0]) ** 2 + (z - q[1]) ** 2 < q[2] * q[2]) { old = true; break; }
-      const sc = ctx.LANDMARK_BY_ID?.sacrecoeur; if (!old && sc && (x - sc.x) ** 2 + (z - sc.z) ** 2 < 520 * 520) old = true;
-      if (old) style = hs < 0.68 ? 2 : hs < 0.86 ? 0 : hs < 0.94 ? 1 : 3;
-      if (h > 34 || Math.min(w, d) > 42) style = 4; else if (h < 11 && style < 2) style = 2;
-      const b = { x, z, hw, hd, c, s, rot, w, d, h, base, drop: base - lo + 1.0, seed, style, blind: 0, filler };
-      list.push(b);
-      collision.addBox({ x, z, hw, hd, rot, top: base + h, tag: 'building' });
-      const r = Math.hypot(hw, hd);
-      for (let ix = Math.floor((x - r) / OC); ix <= Math.floor((x + r) / OC); ix++) for (let iz = Math.floor((z - r) / OC); iz <= Math.floor((z + r) / OC); iz++) {
-        const kk = (ix + 1024) * 2048 + iz + 1024; let a = occ.get(kk); if (!a) occ.set(kk, (a = [])); a.push(b);
-      }
-      if (!filler) kept++;
-    }
+  if (procedural) src = net.roads.length < 6000 ? proceduralBuildings(ctx, net, masks) : [];
+  const nData = Math.floor(src.length / 6);
+  const fill = profile.filler && worldData.meta?.source !== 'sample' ? fillerBuildings(ctx, masks) : [];
+  const n = nData + Math.floor(fill.length / 6);
+  const RAW = new Float32Array(n * 6);
+  RAW.set(src.length % 6 ? src.slice(0, nData * 6) : src, 0); RAW.set(fill, nData * 6);
+  // ---------- méta (nature, murs, toit, niveaux) : binaire aligné (grandes villes) ou table byIndex (Paris)
+  const legend = worldData.buildingsMeta || null, metaBin = worldData.buildingsMetaBin || null;
+  const stride = legend?.stride | 0, fields = legend?.fields || [];
+  const fK = fields.indexOf('kind'), fW = fields.indexOf('wall'), fR = fields.indexOf('roof'), fL = fields.indexOf('levels');
+  const kinds = legend?.kinds || [], walls = legend?.walls || [], roofs = legend?.roofs || legend?.roofShapes || [];
+  const byIndex = legend?.byIndex || null;
+  const metaOf = (i, out) => {
+    out.kind = ''; out.wall = ''; out.roof = ''; out.levels = 0;
+    if (i >= nData) return out;
+    if (metaBin && stride > 0 && (i + 1) * stride <= metaBin.length) {
+      const o = i * stride;
+      if (fK >= 0) out.kind = kinds[metaBin[o + fK]] || ''; if (fW >= 0) out.wall = walls[metaBin[o + fW]] || '';
+      if (fR >= 0) out.roof = roofs[metaBin[o + fR]] || ''; if (fL >= 0) out.levels = metaBin[o + fL];
+    } else if (byIndex) { const m = byIndex[i]; if (m) { out.kind = kinds[m[0]] || ''; out.levels = m[1] | 0; out.roof = roofs[m[2]] || ''; } }
+    return out;
   };
-  addAll(src, !procedural, false);
-  if (worldData.meta?.source !== 'sample') addAll(fillerBuildings(ctx, masks), false, true);
-
-  /** Le point (avec marge) est-il dans un immeuble ? (les immeubles de remplissage hors emprise ne comptent pas si real=true) */
-  function inBuilding(x, z, pad = 0, self = null) {
-    const a = occ.get((Math.floor(x / OC) + 1024) * 2048 + Math.floor(z / OC) + 1024); if (!a) return false;
-    for (const b of a) {
-      if (b === self) continue;
-      const dx = x - b.x, dz = z - b.z, lx = dx * b.c - dz * b.s, lz = dx * b.s + dz * b.c;
-      if (Math.abs(lx) < b.hw + pad && Math.abs(lz) < b.hd + pad) return true;
+  // ---------- index globaux typés
+  const COS = new Float32Array(n), SIN = new Float32Array(n), SC = new Float32Array(n).fill(1), ST = new Uint8Array(n); // ST : 0 non trié, 1 gardé, 2 écarté
+  for (let i = 0; i < n; i++) { const rot = (RAW[i * 6 + 4] * Math.PI) / 180; COS[i] = Math.cos(rot); SIN[i] = Math.sin(rot); }
+  const BT = 1000; // taille des tuiles d'immeubles (m)
+  const tiles = bucketByTile(n, (i, p) => { p[0] = RAW[i * 6]; p[1] = RAW[i * 6 + 1]; }, BT);
+  // grille d'occupation (cases de 32 m) : pour chaque case, les bâtiments dont le cercle englobant la touche
+  const OC = 32;
+  let bx0 = Infinity, bx1 = -Infinity, bz0 = Infinity, bz1 = -Infinity;
+  for (let i = 0; i < n; i++) { const x = RAW[i * 6], z = RAW[i * 6 + 1]; if (x < bx0) bx0 = x; if (x > bx1) bx1 = x; if (z < bz0) bz0 = z; if (z > bz1) bz1 = z; }
+  if (!n) { bx0 = bz0 = 0; bx1 = bz1 = 1; }
+  const ox0 = Math.floor((bx0 - 80) / OC), oz0 = Math.floor((bz0 - 80) / OC), ow = Math.floor((bx1 + 80) / OC) - ox0 + 1, oh = Math.floor((bz1 + 80) / OC) - oz0 + 1;
+  const oStart = new Int32Array(ow * oh + 1);
+  const eachCell = (i, fn) => {
+    const x = RAW[i * 6], z = RAW[i * 6 + 1], r = Math.hypot(RAW[i * 6 + 2], RAW[i * 6 + 3]) * 0.5;
+    for (let cz = Math.floor((z - r) / OC) - oz0, c1 = Math.floor((z + r) / OC) - oz0; cz <= c1; cz++) for (let cx = Math.floor((x - r) / OC) - ox0, c2 = Math.floor((x + r) / OC) - ox0; cx <= c2; cx++) fn(cz * ow + cx);
+  };
+  for (let i = 0; i < n; i++) eachCell(i, (c) => { oStart[c + 1]++; });
+  for (let c = 0; c < ow * oh; c++) oStart[c + 1] += oStart[c];
+  const oItems = new Int32Array(oStart[ow * oh]);
+  { const f = oStart.slice(0, ow * oh); for (let i = 0; i < n; i++) eachCell(i, (c) => { oItems[f[c]++] = i; }); }
+  /** Le point (avec marge) est-il dans un immeuble ? Instantané partout (index global). self = indice à ignorer. */
+  function inBuilding(x, z, pad = 0, self = -1) {
+    const cx = Math.floor(x / OC) - ox0, cz = Math.floor(z / OC) - oz0;
+    if (cx < 0 || cz < 0 || cx >= ow || cz >= oh) return false;
+    const c = cz * ow + cx;
+    for (let k = oStart[c], e = oStart[c + 1]; k < e; k++) {
+      const i = oItems[k]; if (i === self || ST[i] === 2) continue;
+      const o = i * 6, dx = x - RAW[o], dz = z - RAW[o + 1], lx = dx * COS[i] - dz * SIN[i], lz = dx * SIN[i] + dz * COS[i];
+      if (Math.abs(lx) < RAW[o + 2] * 0.5 * SC[i] + pad && Math.abs(lz) < RAW[o + 3] * 0.5 * SC[i] + pad) return true;
     }
     return false;
   }
-  // faces mitoyennes : le mur est collé à un voisin → pignon aveugle (bit par face, ordre de FACES)
-  for (const b of list) {
-    for (let f = 0; f < 4; f++) {
-      const [nx, nz] = FACES[f], tx = nz, tz = -nx;
-      const half = Math.abs(nx) * b.hw + Math.abs(nz) * b.hd, L2 = Math.abs(tx) * b.hw + Math.abs(tz) * b.hd;
-      let inside = 0;
-      for (const u of [-0.6, 0, 0.6]) {
-        const lx = nx * (half + 0.9) + tx * L2 * u, lz = nz * (half + 0.9) + tz * L2 * u;
-        if (inBuilding(b.x + lx * b.c + lz * b.s, b.z - lx * b.s + lz * b.c, 0, b)) inside++;
+  /** Trie un bâtiment (une seule fois) : écarté s'il est sur un monument, dans l'eau, sous un pont ; rogné s'il mord sur une chaussée. */
+  function sort(i) {
+    if (ST[i]) return ST[i] === 1;
+    const o = i * 6, x = RAW[o], z = RAW[o + 1]; let w = RAW[o + 2], d = RAW[o + 3];
+    const drop = () => { ST[i] = 2; return false; };
+    if (!(w > 2.5 && d > 2.5) || !(RAW[o + 5] > 0)) return drop();
+    for (const l of LANDMARKS) { const lim = l.radius + Math.min(w, d) * 0.5; const dx = x - l.x, dz = z - l.z; if (dx * dx + dz * dz < lim * lim) return drop(); }
+    if (i < nData && !procedural) {
+      // les données réelles sont des rectangles englobants : on rogne ceux qui mordent sur une chaussée
+      const c = COS[i], s = SIN[i]; let ok = false, sc = 1;
+      for (let it = 0; it < 4 && !ok; it++) {
+        ok = true;
+        const hw = w / 2, hd = d / 2, nx = Math.max(2, Math.ceil(w / 4)), nz = Math.max(2, Math.ceil(d / 4));
+        const bad = (lx, lz) => net.roadAtPad(x + lx * c + lz * s, z - lx * s + lz * c, 0.7, true, 0);
+        if (bad(0, 0)) ok = false;
+        for (let k = 0; k <= nx && ok; k++) { const lx = -hw + (w * k) / nx; if (bad(lx, -hd) || bad(lx, hd)) ok = false; }
+        for (let k = 1; k < nz && ok; k++) { const lz = -hd + (d * k) / nz; if (bad(-hw, lz) || bad(hw, lz)) ok = false; }
+        if (!ok) { w *= 0.8; d *= 0.8; sc *= 0.8; if (w < 4 || d < 4) break; }
       }
-      if (inside >= 2) b.blind |= 1 << f;
+      if (!ok || masks.isWater(x, z)) return drop();
+      // édicules cartographiés aux culées des ponts : déjà construits avec le pont
+      if (river && Math.max(w, d) < 10 && river.nearDeck(x, z, 7)) return drop();
+      SC[i] = sc;
     }
+    ST[i] = 1;
+    return true;
   }
 
-  // ---------- tuiles du gabarit (toutes distances)
-  const tiles = new Map();
-  const NG = 96, near = new Map(); // grille des immeubles pour le jeu de détails proche
-  list.forEach((b, i) => {
-    const k = tileKey(b.x, b.z, 700);
-    let t = tiles.get(k); if (!t) tiles.set(k, (t = { a: [], b: [], c: [], maxR: 0, minY: Infinity, maxY: -Infinity }));
-    t.a.push(b.x, b.base, b.z, b.rot); t.b.push(b.w, b.d, b.h, b.seed); t.c.push(b.blind, b.style, b.drop, 0);
-    t.maxR = Math.max(t.maxR, Math.hypot(b.hw, b.hd)); t.minY = Math.min(t.minY, b.base - b.drop); t.maxY = Math.max(t.maxY, b.base + b.h + 2);
-    if (!b.filler) { const nk = tileKey(b.x, b.z, NG); let a = near.get(nk); if (!a) near.set(nk, (a = [])); a.push(i); }
-  });
   const unit = unitGeometry(THREE);
   const { mat, depth } = createBuildingMaterial(THREE, uniforms, Q, false);
-  const meshes = [];
-  for (const [, t] of tiles) {
+  const loaded = new Map(); // clé de tuile -> objet de tuile
+  const meta = { kind: '', wall: '', roof: '', levels: 0 }, bb = { x: 0, z: 0, w: 0, d: 0, h: 0, kind: '', wall: '', roof: '', levels: 0 };
+  /** Générateur : construit la tuile d'immeubles (ix, iz). */
+  function* buildTile(ix, iz) {
+    const rg = tiles.range(ix, iz); if (!rg) return null;
+    const A = [], Bv = [], C = [], col = [];
+    let maxR = 0, minY = Infinity, maxY = -Infinity, steps = 0;
+    for (let k = rg[0]; k < rg[1]; k++) {
+      const i = tiles.items[k];
+      if ((++steps & 31) === 0) yield;
+      if (!sort(i)) continue;
+      const o = i * 6, x = RAW[o], z = RAW[o + 1], w = RAW[o + 2] * SC[i], d = RAW[o + 3] * SC[i], c = COS[i], s = SIN[i];
+      const h = Math.min(Math.max(RAW[o + 5], 3.2), 90), hw = w / 2, hd = d / 2, rot = (RAW[o + 4] * Math.PI) / 180;
+      // niveau de référence = sol au centre ; le soubassement descend jusqu'au point le plus bas de l'emprise
+      const base = baseHeightAt(x, z); let lo = base;
+      for (const [lx, lz] of [[-hw, -hd], [hw, -hd], [hw, hd], [-hw, hd]]) lo = Math.min(lo, baseHeightAt(x + lx * c + lz * s, z - lx * s + lz * c));
+      const seed = hash2(Math.round(x * 3), Math.round(z * 3)) * 100, hs = hash2(Math.round(x * 7) + 11, Math.round(z * 7) - 5);
+      metaOf(i, meta);
+      bb.x = x; bb.z = z; bb.w = w; bb.d = d; bb.h = h; bb.kind = meta.kind; bb.wall = meta.wall; bb.roof = meta.roof; bb.levels = meta.levels;
+      const st = profile.buildingStyle(ctx, bb, hs);
+      // faces mitoyennes : le mur est collé à un voisin → pignon aveugle (bit par face, ordre de FACES)
+      let blind = 0;
+      for (let f = 0; f < 4; f++) {
+        const [nx, nz] = FACES[f], tx = nz, tz = -nx;
+        const half = Math.abs(nx) * hw + Math.abs(nz) * hd, L2 = Math.abs(tx) * hw + Math.abs(tz) * hd;
+        let inside = 0;
+        for (const u of [-0.6, 0, 0.6]) { const lx = nx * (half + 0.9) + tx * L2 * u, lz = nz * (half + 0.9) + tz * L2 * u; if (inBuilding(x + lx * c + lz * s, z - lx * s + lz * c, 0, i)) inside++; }
+        if (inside >= 2) blind |= 1 << f;
+      }
+      // styles ≥ 5 : la hauteur des données est celle de l'égout, le toit s'ajoute (même formule que mzRoofT dans facade.js)
+      A.push(x, base, z, rot); Bv.push(w, d, st.style > 4.5 ? h + roofRise(st.roof | 0, w, d) : h, seed); C.push(blind, st.style, base - lo + 1.0, st.roof | 0);
+      col.push(x, z, hw, hd, rot, base + h);
+      maxR = Math.max(maxR, Math.hypot(hw, hd)); minY = Math.min(minY, lo - 1); maxY = Math.max(maxY, base + h + 2);
+    }
+    const cnt = A.length / 4; if (!cnt) return null;
     const g = new THREE.InstancedBufferGeometry();
     for (const k of ['position', 'aFn', 'aPart', 'aSlot', 'aNrm']) g.setAttribute(k, unit[k]);
     g.setIndex(unit.index);
-    g.setAttribute('iA', new THREE.InstancedBufferAttribute(new Float32Array(t.a), 4));
-    g.setAttribute('iB', new THREE.InstancedBufferAttribute(new Float32Array(t.b), 4));
-    g.setAttribute('iC', new THREE.InstancedBufferAttribute(new Float32Array(t.c), 4));
-    g.instanceCount = t.a.length / 4;
-    let cx = 0, cz = 0; const cnt = t.a.length / 4;
-    for (let i = 0; i < cnt; i++) { cx += t.a[i * 4]; cz += t.a[i * 4 + 2]; }
-    cx /= cnt; cz /= cnt; const cy = (t.minY + t.maxY) / 2;
-    let r2 = 0; for (let i = 0; i < cnt; i++) r2 = Math.max(r2, (t.a[i * 4] - cx) ** 2 + (t.a[i * 4 + 2] - cz) ** 2);
-    g.boundingSphere = new THREE.Sphere(new THREE.Vector3(cx, cy, cz), Math.hypot(Math.sqrt(r2) + t.maxR, (t.maxY - t.minY) / 2));
+    const a = new Float32Array(A), b = new Float32Array(Bv), c = new Float32Array(C);
+    g.setAttribute('iA', new THREE.InstancedBufferAttribute(a, 4));
+    g.setAttribute('iB', new THREE.InstancedBufferAttribute(b, 4));
+    g.setAttribute('iC', new THREE.InstancedBufferAttribute(c, 4));
+    g.instanceCount = cnt;
+    let cx = 0, cz = 0;
+    for (let i = 0; i < cnt; i++) { cx += a[i * 4]; cz += a[i * 4 + 2]; }
+    cx /= cnt; cz /= cnt; const cy = (minY + maxY) / 2;
+    let r2 = 0; for (let i = 0; i < cnt; i++) r2 = Math.max(r2, (a[i * 4] - cx) ** 2 + (a[i * 4 + 2] - cz) ** 2);
+    g.boundingSphere = new THREE.Sphere(new THREE.Vector3(cx, cy, cz), Math.hypot(Math.sqrt(r2) + maxR, (maxY - minY) / 2));
     const m = new THREE.Mesh(g, mat);
     m.customDepthMaterial = depth;
     m.castShadow = Q.shadows; m.receiveShadow = true; m.matrixAutoUpdate = false; m.name = 'immeubles';
-    m.userData.center = g.boundingSphere.center; m.userData.radius = g.boundingSphere.radius;
-    scene.add(m); meshes.push(m);
+    scene.add(m);
+    const t = { mesh: m, a, b, c, n: cnt, col: new Float32Array(col), key: tileKeyI(ix, iz), ix, iz, center: g.boundingSphere.center, radius: g.boundingSphere.radius, shapes: null };
+    loaded.set(t.key, t); nearDirty = true;
+    return t;
   }
 
   // ---------- détails en volume pour les immeubles proches (1 seul draw call, tampon d'instances dynamique)
-  let detail = null;
+  let detail = null, nearDirty = true;
   if (Q.detailLod[1] > 0) {
     const CAP = 1600, du = detailGeometry(THREE);
     const g = new THREE.InstancedBufferGeometry();
@@ -332,37 +368,37 @@ export function buildBuildings(ctx, net, masks, Q, uniforms, river) {
     g.setAttribute('iA', A); g.setAttribute('iB', B); g.setAttribute('iC', C);
     g.instanceCount = 0;
     const m = new THREE.Mesh(g, createBuildingMaterial(THREE, uniforms, Q, true).mat);
-    m.frustumCulled = false; m.castShadow = false; m.receiveShadow = true; m.matrixAutoUpdate = false; m.name = 'immeubles-details';
+    m.frustumCulled = false; m.castShadow = false; m.receiveShadow = true; m.matrixAutoUpdate = false; m.name = 'immeubles-details'; m.visible = false;
     scene.add(m);
     let lx = Infinity, lz = Infinity;
     detail = {
       mesh: m, count: 0,
       update(cam) {
-        if (Math.abs(cam.x - lx) + Math.abs(cam.z - lz) < 10) return;
-        lx = cam.x; lz = cam.z;
-        const R = Q.detailLod[1] + 12; let n = 0;
-        for (let ix = Math.floor((cam.x - R - 60) / NG); ix <= Math.floor((cam.x + R + 60) / NG); ix++) for (let iz = Math.floor((cam.z - R - 60) / NG); iz <= Math.floor((cam.z + R + 60) / NG); iz++) {
-          const a = near.get((ix + 512) * 1024 + iz + 512); if (!a) continue;
-          for (const i of a) {
-            const b = list[i];
-            if (n >= CAP || Math.hypot(b.x - cam.x, b.z - cam.z) - 0.5 * Math.max(b.w, b.d) > R) continue;
-            A.array[n * 4] = b.x; A.array[n * 4 + 1] = b.base; A.array[n * 4 + 2] = b.z; A.array[n * 4 + 3] = b.rot;
-            B.array[n * 4] = b.w; B.array[n * 4 + 1] = b.d; B.array[n * 4 + 2] = b.h; B.array[n * 4 + 3] = b.seed;
-            C.array[n * 4] = b.blind; C.array[n * 4 + 1] = b.style; C.array[n * 4 + 2] = b.drop; n++;
+        if (!nearDirty && Math.abs(cam.x - lx) + Math.abs(cam.z - lz) < 10) return;
+        lx = cam.x; lz = cam.z; nearDirty = false;
+        const R = Q.detailLod[1] + 12; let k = 0;
+        for (let ix = Math.floor((cam.x - R - 40) / BT); ix <= Math.floor((cam.x + R + 40) / BT); ix++) for (let iz = Math.floor((cam.z - R - 40) / BT); iz <= Math.floor((cam.z + R + 40) / BT); iz++) {
+          const t = loaded.get(tileKeyI(ix, iz)); if (!t) continue;
+          for (let i = 0; i < t.n && k < CAP; i++) {
+            const o = i * 4;
+            if (Math.hypot(t.a[o] - cam.x, t.a[o + 2] - cam.z) - 0.5 * Math.max(t.b[o], t.b[o + 1]) > R) continue;
+            A.array.set(t.a.subarray(o, o + 4), k * 4); B.array.set(t.b.subarray(o, o + 4), k * 4); C.array.set(t.c.subarray(o, o + 4), k * 4); k++;
           }
         }
         A.needsUpdate = B.needsUpdate = C.needsUpdate = true;
-        g.instanceCount = n; detail.count = n; m.visible = n > 0;
+        g.instanceCount = k; detail.count = k; m.visible = k > 0;
       },
     };
   }
   return {
-    meshes, count: kept, procedural, inBuilding, detail,
+    total: n, procedural, inBuilding, detail, loaded, buildTile, size: BT,
+    has: (ix, iz) => !!tiles.range(ix, iz),
+    dispose(t) { if (!t) return; scene.remove(t.mesh); t.mesh.geometry.dispose(); loaded.delete(t.key); nearDirty = true; },
+    count() { let c = 0; for (const t of loaded.values()) c += t.n; return c; },
     update(cam) {
-      for (const m of meshes) {
-        const c = m.userData.center, dist = Math.hypot(c.x - cam.x, c.z - cam.z) - m.userData.radius;
-        m.visible = dist < Q.viewDist;
-        if (m.visible) m.geometry.setDrawRange(0, Q.chimneys && dist < Q.detailDist ? unit.indexCount : BASE_INDEX_COUNT);
+      for (const t of loaded.values()) {
+        const dist = Math.hypot(t.center.x - cam.x, t.center.z - cam.z) - t.radius;
+        t.mesh.geometry.setDrawRange(0, Q.chimneys && dist < Q.detailDist ? unit.indexCount : BASE_INDEX_COUNT);
       }
       detail?.update(cam);
     },

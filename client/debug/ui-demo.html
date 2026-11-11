@@ -16,63 +16,192 @@
   <div id="game"></div>
   <div id="ui-root"></div>
   <script type="module">
-    // Banc d'essai isolé de l'interface : faux contexte, faux joueur, événements simulés.
-    // Paramètres : autostart=1, drive=1 (en voiture), demo=1 (mission, chat, joueurs, argent), touch=1.
+    // Banc d'essai isolé de l'interface : faux contexte, faux joueur, événements simulés (aucune 3D).
+    // Paramètres : city=paris|toulouse, autostart=1, drive=1 (en voiture), speed=<m/s>, demo=1 (mission, chat, joueurs, argent),
+    //   touch=1, boot=1 (reste sur le chargement), slow=<ms par fichier> (téléchargement simulé), nodata=1 (données absentes),
+    //   synth=1 (réseau synthétique à l'échelle de la ville, utilisé d'office si les données de la ville manquent ; synth=0 pour l'interdire).
     import { bus } from '/src/core/bus.js';
     import { store } from '/src/core/store.js';
+    import { CITY, CITIES } from '@shared/cities.js';
     import { LANDMARKS, LANDMARK_BY_ID } from '@shared/landmarks.js';
     import { BOUNDS } from '@shared/geo.js';
     import { VEHICLE_BY_ID } from '@shared/catalog.js';
     import { PROPERTIES } from '@shared/properties.js';
     import { createUI } from '/src/ui/index.js';
     const params = new URLSearchParams(location.search);
-    const json = async (u) => { const r = await fetch(u); if (!r.ok) throw new Error(u); return r.json(); };
-    const ctx = { bus, store, params, uiRoot: document.getElementById('ui-root'), LANDMARKS, LANDMARK_BY_ID, BOUNDS, quality: params.get('quality') || 'high', time: 0, fps: 60 };
+    const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+    const json = async (u) => { const r = await fetch(u); if (!r.ok) throw new Error(u + ' ' + r.status); return r.json(); };
+    const ctx = { bus, store, params, uiRoot: document.getElementById('ui-root'), LANDMARKS, LANDMARK_BY_ID, BOUNDS, city: CITY, cities: CITIES, quality: params.get('quality') || 'high', time: 0, fps: 60 };
     window.__game = ctx;
-    const drive = params.get('drive') === '1';
+    const drive = params.get('drive') === '1', speed = Number(params.get('speed')) || (drive ? 31 : 2);
     const veh = { typeId: 'porsche_911', spec: VEHICLE_BY_ID.porsche_911, speed: 0, yaw: 0 };
     ctx.player = { pos: { x: 0, y: 0, z: 0 }, yaw: 0, speed: 0, mode: drive ? 'vehicle' : 'foot', vehicle: drive ? veh : null, enabled: true };
-    ctx.gameplay = { startMission: (id) => bus.emit('toast', { text: 'Mission démarrée : ' + id, kind: 'info' }), abortMission() {}, dealers: [{ x: -900, z: -380, brand: 'Porsche' }, { x: 700, z: 250, brand: 'Tesla' }] };
-    for (const t of ['intent:login', 'intent:chat', 'intent:buyCar', 'intent:buyProperty', 'intent:sellProperty', 'intent:transfer', 'intent:spawnCar', 'intent:setActiveCar', 'intent:respawn', 'audio:volume'])
-      bus.on(t, (p) => { console.log(t, JSON.stringify(p)); (window.__log ||= []).push([t, p]); });
+    const L = LANDMARKS.filter((l) => !l.hidden);
+    ctx.gameplay = { startMission: (id) => bus.emit('toast', { text: 'Mission démarrée : ' + id, kind: 'info' }), abortMission() {},
+      dealers: [{ x: (L[1]?.x ?? 0) + 120, z: (L[1]?.z ?? 0) + 60, brand: 'Porsche' }, { x: (L[3]?.x ?? 0) - 90, z: (L[3]?.z ?? 0) + 140, brand: 'Tesla' }] };
+    for (const t of ['intent:login', 'intent:chat', 'intent:buyCar', 'intent:buyProperty', 'intent:sellProperty', 'intent:transfer', 'intent:spawnCar', 'intent:setActiveCar', 'intent:respawn', 'audio:volume', 'gps:set'])
+      bus.on(t, (p) => { (window.__log ||= []).push([t, p]); });
     bus.on('intent:login', ({ name, room }) => { store.set({ room, online: true, me: { id: 'me', name } }); setTimeout(() => { bus.emit('net:status', { state: 'online' }); bus.emit('net:welcome', { offline: false }); }, 300); });
     bus.on('intent:chat', ({ text }) => bus.emit('chat:message', { from: store.me.name, text }));
     bus.on('intent:buyCar', ({ typeId }) => { const c = VEHICLE_BY_ID[typeId]; store.set({ me: { money: store.me.money - c.price, cars: [...store.me.cars, typeId] } }); bus.emit('money:change', { delta: -c.price, reason: 'buyCar' }); });
+
+
+    // ------------------------------------------------------------------------------------------------
+    // Réseau SYNTHÉTIQUE à l'échelle d'une ville (pour mesurer le coût des cartes quand les vraies données
+    // ne sont pas là) : rocade + pénétrantes à deux chaussées, voies rapides, bretelles, grands axes, quelques
+    // dizaines de milliers de rues, giratoires, rails, tram, canaux, fleuve, parcs, zones, aéroport, quartiers.
+    // density = 1 → ≈ 50 000 voies et ≈ 380 000 sommets sur l'emprise de Toulouse (15,3 × 15,6 km).
+    function synthCity(B, cityId, density = 1) {
+      let seed = 20261111;
+      const rnd = () => ((seed = (seed * 1664525 + 1013904223) >>> 0) / 4294967296);
+      const r1 = (v) => Math.round(v * 10) / 10;
+      const W = B.maxX - B.minX, H = B.maxZ - B.minZ;
+      const roads = []; let id = 1;
+      const add = (kind, name, pts, o = {}) => { roads.push({ id: id++, name, kind, width: o.width || 7, lanes: o.lanes || 2, oneway: !!o.oneway, bridge: false, points: pts.map((p) => [r1(p[0]), r1(p[1])]), ...(o.extra || {}) }); };
+      const inB = (x, z) => x > B.minX && x < B.maxX && z > B.minZ && z < B.maxZ;
+      const R = Math.min(W, H) * 0.3;
+      // rocade (deux chaussées)
+      for (const off of [0, 15]) { const pts = []; for (let a = 0; a <= 360; a += 0.5) { const t = (a * Math.PI) / 180; pts.push([(R + off) * Math.cos(t) * 1.05, (R + off) * Math.sin(t) * 0.92]); } add('motorway', 'Périphérique', pts, { width: 11, lanes: 3, oneway: true, extra: { ref: 'A620', maxspeed: 90 } }); }
+      // pénétrantes autoroutières
+      [['A61', 0.6], ['A62', -1.45], ['A64', 2.4], ['A68', -0.5], ['A624', 3.1]].forEach(([ref, ang]) => {
+        for (const off of [0, 15]) { const pts = []; for (let d = R; d < 14000; d += 40) { const w = Math.sin(d / 900) * 120, x = Math.cos(ang) * d - Math.sin(ang) * (w + off), z = Math.sin(ang) * d * 0.92 + Math.cos(ang) * (w + off); if (!inB(x, z)) break; pts.push([x, z]); } if (pts.length > 2) add('motorway', `Autoroute ${ref}`, pts, { width: 11, lanes: 3, oneway: true, extra: { ref, maxspeed: 110 } }); }
+      });
+      // voies rapides radiales
+      ['N124', 'M820', 'M632', 'M2', 'M112', 'M888'].forEach((ref, k) => {
+        const ang = k * 1.047 + 0.3, pts = [];
+        for (let d = 700; d < R; d += 35) { const w = Math.sin(d / 500 + k) * 60; pts.push([Math.cos(ang) * d - Math.sin(ang) * w, Math.sin(ang) * d * 0.92 + Math.cos(ang) * w]); }
+        add('trunk', `Route de ${['Auch', 'Paris', 'Lombez', 'Albi', 'Castres', 'Revel'][k]}`, pts, { width: 14, lanes: 4, extra: { ref, maxspeed: 70 } });
+      });
+      // bretelles
+      for (let k = 0; k < 90; k++) { const t = rnd() * 6.283, pts = []; for (let i = 0; i <= 10; i++) { const u = i / 10; pts.push([(R + 20 + u * 90) * Math.cos(t + u * 0.03) * 1.05, (R + 20 + u * 90) * Math.sin(t + u * 0.03) * 0.92]); } add('ramp', '', pts, { width: 6, lanes: 1, oneway: true }); }
+      // grands axes (grille large, tronçons de ~450 m)
+      const AV = ['Jean Jaurès', 'de Grande-Bretagne', 'des Minimes', 'de Muret', 'Camille Pujol', 'de Lardenne', 'Honoré Serres', 'Carnot', 'de Strasbourg', 'Lascrosses', 'de la Gloire', 'Étienne Billières', 'de Lyon', 'des États-Unis', 'Saint-Exupéry', 'de Rangueil', 'Jules Julien', 'de Fronton'];
+      let av = 0;
+      for (let gx = B.minX + 300; gx < B.maxX; gx += 650) { const nm = `${rnd() < 0.5 ? 'Avenue' : 'Boulevard'} ${AV[av++ % AV.length]}`; for (let z = B.minZ + 60; z < B.maxZ - 500; z += 450) { const pts = []; for (let i = 0; i <= 9; i++) { const zz = z + i * 50; pts.push([gx + Math.sin(zz / 700 + gx) * 70, zz]); } add(nm.startsWith('Avenue') ? 'avenue' : 'boulevard', nm, pts, { width: 14 + Math.floor(rnd() * 3) * 3, lanes: 4 }); } }
+      for (let gz = B.minZ + 300; gz < B.maxZ; gz += 650) { const nm = `${rnd() < 0.5 ? 'Avenue' : 'Boulevard'} ${AV[av++ % AV.length]}`; for (let x = B.minX + 60; x < B.maxX - 500; x += 450) { const pts = []; for (let i = 0; i <= 9; i++) { const xx = x + i * 50; pts.push([xx, gz + Math.sin(xx / 700 + gz) * 70]); } add(nm.startsWith('Avenue') ? 'avenue' : 'boulevard', nm, pts, { width: 14 + Math.floor(rnd() * 3) * 3, lanes: 4 }); } }
+      // rues (grille serrée déformée ; chaque tronçon est une voie de 7 sommets)
+      const step = 95 / Math.sqrt(density), nx = Math.floor(W / step), nz = Math.floor(H / step);
+      const jx = new Float32Array((nx + 1) * (nz + 1)), jz = new Float32Array((nx + 1) * (nz + 1));
+      for (let j = 0; j <= nz; j++) for (let i = 0; i <= nx; i++) { jx[j * (nx + 1) + i] = B.minX + i * step + (rnd() - 0.5) * 34; jz[j * (nx + 1) + i] = B.minZ + j * step + (rnd() - 0.5) * 34; }
+      const seg = (a, b, name, kind, width) => { const pts = [], bend = (rnd() - 0.5) * 14, dx = jx[b] - jx[a], dz = jz[b] - jz[a], l = Math.hypot(dx, dz) || 1; for (let i = 0; i <= 6; i++) { const u = i / 6, o = Math.sin(u * Math.PI) * bend; pts.push([jx[a] + dx * u - (dz / l) * o, jz[a] + dz * u + (dx / l) * o]); } add(kind, name, pts, { width, lanes: width >= 10 ? 3 : 2, oneway: rnd() < 0.4 }); };
+      for (let j = 0; j <= nz; j++) for (let i = 0; i < nx; i++) { if (rnd() < 0.12) continue; const c = Math.hypot(jx[j * (nx + 1) + i], jz[j * (nx + 1) + i]) < 900 && rnd() < 0.3; seg(j * (nx + 1) + i, j * (nx + 1) + i + 1, `Rue ${j}-${Math.floor(i / 6)}`, c ? 'pedestrian' : 'street', c ? 5 : rnd() < 0.08 ? 10 : 5 + rnd() * 3); }
+      for (let i = 0; i <= nx; i++) for (let j = 0; j < nz; j++) { if (rnd() < 0.12) continue; seg(j * (nx + 1) + i, (j + 1) * (nx + 1) + i, `Rue du ${i}-${Math.floor(j / 6)}`, 'street', rnd() < 0.08 ? 10 : 5 + rnd() * 3); }
+      // giratoires
+      for (let k = 0; k < 160; k++) { const x = B.minX + rnd() * W, z = B.minZ + rnd() * H, rr = 14 + rnd() * 10, pts = []; for (let a = 0; a <= 16; a++) pts.push([x + Math.cos(a / 16 * 6.2832) * rr, z + Math.sin(a / 16 * 6.2832) * rr]); pts[16] = pts[0]; add('street', '', pts, { width: 8, lanes: 2, oneway: true, extra: { roundabout: true } }); }
+      // rails, tram, métro
+      const rails = [];
+      const line = (kind, name, ang, from, to, wig) => { const pts = []; for (let d = from; d < to; d += 60) { const w = Math.sin(d / 1300 + ang) * wig, x = Math.cos(ang) * d - Math.sin(ang) * w, z = Math.sin(ang) * d + Math.cos(ang) * w; if (inB(x, z)) pts.push([r1(x), r1(z)]); } if (pts.length > 1) rails.push({ kind, name, points: pts }); };
+      [0.2, 1.3, 2.2, 3.4, 4.4, 5.3].forEach((a, k) => line('train', `Ligne ${k + 1}`, a, 900, 12000, 300));
+      line('tram', 'T1', 2.9, 300, 9000, 200); line('tram', 'T2', 3.6, 300, 7000, 160); line('metro', 'A', 0.9, -6000, 6000, 120); line('metro', 'B', 2.0, -6500, 6500, 150);
+      // canaux et ruisseaux
+      const waterways = [];
+      const canal = (name, kind, width, x0, z0, ang, len, wig) => { const pts = []; for (let d = 0; d < len; d += 50) { const w = Math.sin(d / 1500) * wig, x = x0 + Math.cos(ang) * d - Math.sin(ang) * w, z = z0 + Math.sin(ang) * d + Math.cos(ang) * w; if (inB(x, z)) pts.push([r1(x), r1(z)]); } if (pts.length > 1) waterways.push({ name, kind, width, points: pts }); };
+      canal('Canal du Midi', 'canal', 20, 900, -1200, 0.9, 11000, 500); canal('Canal de Brienne', 'canal', 16, -1200, -900, -0.3, 1600, 60); canal('Canal latéral à la Garonne', 'canal', 18, -900, -1500, -1.5, 9000, 400);
+      for (let k = 0; k < 16; k++) canal(`Ruisseau ${k + 1}`, 'stream', 3, B.minX + rnd() * W, B.minZ + rnd() * H, rnd() * 6.28, 2500, 200);
+      // fleuve (polygone)
+      const left = [], right = [];
+      for (let z = B.minZ - 100; z <= B.maxZ + 100; z += 60) { const x = -700 + Math.sin(z / 2400) * 900 + Math.sin(z / 700) * 120; left.push([r1(x - 85), r1(z)]); right.push([r1(x + 85), r1(z)]); }
+      const river = { polygons: [left.concat(right.reverse())], islands: [] };
+      // parcs, places, zones, aéroport
+      const blob = (x, z, rx, rz, n = 10) => { const p = []; for (let a = 0; a < n; a++) { const t = (a / n) * 6.2832, k = 0.75 + rnd() * 0.5; p.push([r1(x + Math.cos(t) * rx * k), r1(z + Math.sin(t) * rz * k)]); } return p; };
+      const rp = () => [B.minX + rnd() * W, B.minZ + rnd() * H];
+      const parks = [], plazas = [], areas = [], water = [];
+      for (let k = 0; k < 260; k++) { const [x, z] = rp(); parks.push({ name: k % 3 ? '' : `Jardin ${k}`, polygon: blob(x, z, 40 + rnd() * 220, 40 + rnd() * 200) }); }
+      for (let k = 0; k < 110; k++) { const [x, z] = rp(); plazas.push({ name: '', polygon: blob(x, z, 20 + rnd() * 40, 20 + rnd() * 40, 6) }); }
+      const zone = (kind, n, a, b, pts = 10) => { for (let k = 0; k < n; k++) { const [x, z] = rp(); areas.push({ kind, name: kind === 'forest' && k % 4 === 0 ? `Bois ${k}` : '', polygon: blob(x, z, a + rnd() * b, a + rnd() * b, pts) }); } };
+      zone('forest', 130, 150, 500, 14); zone('industrial', 150, 120, 380); zone('commercial', 90, 100, 260); zone('farmland', 90, 250, 600); zone('cemetery', 12, 80, 160);
+      zone('parking', 700, 15, 45, 5); zone('pitch', 320, 30, 30, 4); zone('grass', 1600, 12, 60, 7);
+      const ax = B.minX + W * 0.2, az = B.minZ + H * 0.25, rot = 0.55;
+      const rect = (cx, cz, l, w) => [[-l, -w], [l, -w], [l, w], [-l, w]].map(([u, v]) => [r1(ax + cx + Math.cos(rot) * u - Math.sin(rot) * v), r1(az + cz + Math.sin(rot) * u + Math.cos(rot) * v)]);
+      areas.push({ kind: 'runway', name: '14R/32L', polygon: rect(0, 0, 1750, 23) }, { kind: 'runway', name: '14L/32R', polygon: rect(-150, 420, 1500, 23) });
+      for (let k = 0; k < 8; k++) areas.push({ kind: 'taxiway', name: '', polygon: rect(-1400 + k * 400, 210, 12, 200) });
+      areas.push({ kind: 'apron', name: '', polygon: rect(300, 700, 600, 160) }, { kind: 'apron', name: '', polygon: rect(-900, 650, 350, 120) });
+      for (let k = 0; k < 10; k++) { const [x, z] = rp(); water.push({ name: k % 2 ? '' : `Lac ${k}`, polygon: blob(x, z, 60 + rnd() * 160, 50 + rnd() * 120, 12) }); }
+      const Q = ['Carmes', 'Saint-Cyprien', 'Les Minimes', 'Compans-Caffarelli', 'Saint-Michel', 'Rangueil', 'Côte Pavée', 'Borderouge', 'Lardenne', 'Purpan', 'Le Mirail', 'Bagatelle', 'Empalot', 'Guilheméry', 'Bonnefoy', 'Croix-Daurade', 'Lalande', 'Sept-Deniers', 'Arènes', 'Patte-d’Oie', 'Saint-Agne', 'Pouvourville', 'Montaudran', 'Jolimont', 'Roseraie', 'Soupetard', 'Blagnac', 'Balma', 'L’Union', 'Ramonville', 'Tournefeuille', 'Colomiers', 'Saint-Orens', 'Aucamville', 'Launaguet', 'Cugnaux'];
+      const poi = Q.map((name, k) => { const a = k * 2.4, d = 500 + k * 190; return { kind: 'quarter', name, x: r1(Math.cos(a) * d), z: r1(Math.sin(a) * d) }; }).filter((p) => inB(p.x, p.z));
+      ['Capitole', 'Jean-Jaurès', 'Esquirol', 'Marengo-SNCF', 'Jolimont', 'Arènes', 'Mirail-Université', 'Basso-Cambo', 'Compans-Caffarelli', 'Palais de Justice', 'Saint-Michel', 'Rangueil', 'Ramonville', 'Borderouge', 'Trois-Cocus', 'Minimes'].forEach((name, k) => poi.push({ kind: 'metro', name, x: r1(Math.cos(k * 0.9) * (300 + k * 260)), z: r1(Math.sin(k * 0.9) * (300 + k * 260)) }));
+      const pts = roads.reduce((s, r) => s + r.points.length, 0);
+      console.log(`[synth] ${cityId} : ${roads.length} voies, ${pts} sommets, ${areas.length + parks.length} aplats`);
+      return { roads: { meta: { source: 'synthetic', sources: ['réseau synthétique (banc d’essai)'], stats: { roads: roads.length, points: pts } }, roads, graph: { nodes: [], edges: [] }, river, parks, plazas, rails, waterways }, pois: { pois: poi, areas, water, paths: [], trees: [], treeRows: [] } };
+    }
+
+    async function loadData() {
+      // même séquence d'événements que main.js : boot:progress { step: 'data', city, file, done, total }
+      const f = CITY.files, names = ['roads', 'buildings', 'pois', 'buildingsMeta', 'buildingsMetaBin', 'terrain'], out = {};
+      const slow = Number(params.get('slow')) || 0, nodata = params.get('nodata') === '1';
+      let done = 0;
+      bus.emit('boot:progress', { step: 'data', city: CITY.id, done, total: names.length });
+      for (const n of names) {
+        if (slow) await wait(slow * (n === 'buildings' ? 3 : 1));
+        try { out[n] = !nodata && (n === 'roads' || n === 'pois') && f[n] ? await json(f[n]) : null; } catch { out[n] = null; }
+        bus.emit('boot:progress', { step: 'data', city: CITY.id, file: n, done: ++done, total: names.length });
+      }
+      let data = out.roads, source = 'réel';
+      const force = params.get('synth') && params.get('synth') !== '0';
+      if ((!data || force) && params.get('synth') !== '0' && !nodata) { const t0 = performance.now(); const s = synthCity(BOUNDS, CITY.id, Number(params.get('synth')) || 1); data = s.roads; out.pois = s.pois; source = `synthétique (${Math.round(performance.now() - t0)} ms)`; }
+      if (!data) { data = await json('/shared/world/paris.sample.json'); source = 'jeu d’essai'; }
+      data.pois = out.pois;
+      window.__dataSource = source;
+      return data;
+    }
+
     (async () => {
-      try { ctx.worldData = await json('/shared/world/paris.json'); } catch { ctx.worldData = await json('/shared/world/paris.sample.json'); }
-      store.set({ me: { id: 'me', name: 'Test', money: 128500, properties: [PROPERTIES[0]?.id].filter(Boolean), cars: ['citadine', 'tesla_model3', 'porsche_911'], activeCar: 'porsche_911', stats: { missionsDone: 12, distance: 48200, playTimeSec: 5400, totalEarned: 212000 } }, timeOfDay: 21.6, room: params.get('room') || 'paris' });
-      for (const step of ['env', 'world', 'monuments', 'vehicles', 'player', 'traffic', 'gameplay', 'net']) { bus.emit('boot:progress', { step }); if (!params.get('autostart')) await new Promise((r) => setTimeout(r, 60)); }
+      ctx.worldData = await loadData();
+      const firstProp = PROPERTIES[0]?.id;
+      store.set({ me: { id: 'me', name: 'Test', money: 128500, properties: [firstProp].filter(Boolean), cars: ['citadine', 'tesla_model3', 'porsche_911'], activeCar: 'porsche_911', stats: { missionsDone: 12, distance: 48200, playTimeSec: 5400, totalEarned: 212000 } }, timeOfDay: 21.6, room: params.get('room') || CITY.id });
+      for (const step of ['env', 'world', 'monuments', 'vehicles', 'player', 'traffic', 'gameplay', 'net']) { bus.emit('boot:progress', { step }); if (!params.get('autostart')) await wait(50); }
+      bus.emit('boot:progress', { step: 'ui' });
       ctx.ui = createUI(ctx);
       bus.emit('boot:progress', { step: 'audio' });
       if (params.get('boot') === '1') return;
       bus.emit('boot:done');
       bus.emit('net:status', { state: params.get('offline') ? 'offline' : 'online' });
-      if (params.get('autostart')) bus.emit('intent:login', { name: 'Test', room: params.get('room') || 'paris' });
+      if (params.get('autostart')) bus.emit('intent:login', { name: 'Test', room: params.get('room') || CITY.id });
+      const tp = LANDMARK_BY_ID[params.get('tp')];
+      if (tp) { ctx.player.pos.x = tp.x + tp.radius + 20; ctx.player.pos.z = tp.z + tp.radius + 20; }
       if (params.get('demo') === '1') {
-        store.players.set('a', { id: 'a', name: 'Camille', x: 180, z: -120, mode: 'vehicle', vehicleType: 'tesla_models', money: 342000 });
-        store.players.set('b', { id: 'b', name: 'Léo', x: -260, z: 90, mode: 'foot', money: 18400 });
-        store.players.set('c', { id: 'c', name: 'Inès', x: 900, z: 400, mode: 'vehicle', vehicleType: 'lambo_urus', money: 96000 });
-        store.set({ propertyOwners: { [PROPERTIES[1]?.id]: { id: 'a', name: 'Camille' } } });
+        const P = ctx.player.pos;
+        store.players.set('a', { id: 'a', name: 'Camille', x: P.x + 180, z: P.z - 120, mode: 'vehicle', vehicleType: 'tesla_models', money: 342000 });
+        store.players.set('b', { id: 'b', name: 'Léo', x: P.x - 260, z: P.z + 90, mode: 'foot', money: 18400 });
+        store.players.set('c', { id: 'c', name: 'Inès', x: P.x + 900, z: P.z + 400, mode: 'vehicle', vehicleType: 'lambo_urus', money: 96000 });
+        if (PROPERTIES[1]) store.set({ propertyOwners: { [PROPERTIES[1].id]: { id: 'a', name: 'Camille' } } });
+        const dest = L[0] || { x: 600, z: 300, name: 'Destination' };
         setTimeout(() => {
-          bus.emit('mission:update', { mission: { title: 'Livraison express', steps: [1, 2, 3] }, stepIndex: 1, stepCount: 3, text: 'Déposez le colis au pied de la Tour Eiffel', timeLeft: 83, distance: 1840 });
-          bus.emit('gps:set', { x: LANDMARK_BY_ID.eiffel.x + 90, z: LANDMARK_BY_ID.eiffel.z, label: 'Tour Eiffel' });
+          bus.emit('mission:update', { mission: { title: 'Livraison express', steps: [1, 2, 3] }, stepIndex: 1, stepCount: 3, text: `Déposez le colis : ${dest.name}`, timeLeft: 83, distance: 1840 });
+          bus.emit('gps:set', { x: dest.x + 90, z: dest.z, label: dest.name });
           bus.emit('player:prompt', { text: 'F — Monter dans la Porsche 911' });
           bus.emit('net:playerJoin', { id: 'c', name: 'Inès' });
-          bus.emit('chat:message', { from: 'Camille', text: 'Rendez-vous place de la Concorde ?' });
-          bus.emit('chat:message', { from: 'Léo', text: 'J’arrive, je sors la Lambo.' });
+          bus.emit('chat:message', { from: 'Camille', text: `Rendez-vous ${CITY.id === 'toulouse' ? 'place du Capitole' : 'place de la Concorde'} ?` });
           bus.emit('toast', { text: 'Loyers encaissés : Ƶ 150', kind: 'success' });
           store.set({ me: { money: store.me.money + 1500 } }); bus.emit('money:change', { delta: 1500, reason: 'mission' });
         }, 700);
       }
+      // Faux joueur : suit une route du jeu de données (la première autoroute s'il y en a une, drive=1), sinon tourne en rond.
+      const roads = ctx.worldData.roads || [];
+      const track = (drive && (roads.find((r) => r.kind === 'motorway' && r.points.length > 40) || roads.find((r) => r.kind === 'trunk' && r.points.length > 20))) || null;
+      let ti = 0, tt = 0;
+      if (track && !tp) { ctx.player.pos.x = track.points[0][0]; ctx.player.pos.z = track.points[0][1]; }
       let last = performance.now();
       const loop = (now) => {
         const dt = Math.min((now - last) / 1000, 0.05); last = now; ctx.time += dt;
         const p = ctx.player;
-        if (p.enabled !== false) {
-          p.yaw = Math.sin(ctx.time * 0.25) * 0.9 + 1.1; const sp = drive ? 31 : 2;
-          p.pos.x += -Math.sin(p.yaw) * sp * dt; p.pos.z += -Math.cos(p.yaw) * sp * dt; p.speed = sp;
-          if (p.pos.x < -1500) p.pos.x = 0, p.pos.z = 0;
-          veh.speed = sp + Math.sin(ctx.time) * 6; veh.yaw = p.yaw;
+        if (p.enabled !== false || params.get('run') === '1') {
+          if (track) {
+            const a = track.points[ti], b = track.points[(ti + 1) % track.points.length];
+            const len = Math.hypot(b[0] - a[0], b[1] - a[1]) || 1;
+            tt += speed * dt / len;
+            while (tt >= 1) { tt -= 1; ti = (ti + 1) % (track.points.length - 1); }
+            const a2 = track.points[ti], b2 = track.points[ti + 1];
+            p.pos.x = a2[0] + (b2[0] - a2[0]) * tt; p.pos.z = a2[1] + (b2[1] - a2[1]) * tt;
+            const want = Math.atan2(-(b2[0] - a2[0]), -(b2[1] - a2[1]));
+            let d = want - p.yaw; while (d > Math.PI) d -= 2 * Math.PI; while (d < -Math.PI) d += 2 * Math.PI;
+            p.yaw += d * Math.min(1, dt * 4);
+          } else {
+            p.yaw = Math.sin(ctx.time * 0.25) * 0.9 + 1.1;
+            p.pos.x += -Math.sin(p.yaw) * speed * dt; p.pos.z += -Math.cos(p.yaw) * speed * dt;
+            if (p.pos.x < BOUNDS.minX + 200 || p.pos.x > BOUNDS.maxX - 200 || p.pos.z < BOUNDS.minZ + 200 || p.pos.z > BOUNDS.maxZ - 200) { p.pos.x = 0; p.pos.z = 0; }
+          }
+          p.speed = speed; veh.speed = speed; veh.yaw = p.yaw;
         }
         ctx.ui.update(dt);
         requestAnimationFrame(loop);

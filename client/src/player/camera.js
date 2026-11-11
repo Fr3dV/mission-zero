@@ -1,5 +1,8 @@
 // Caméra 3e personne : orbite à pied, poursuite à ressort en voiture (recul + FOV avec la vitesse,
 // tremblement, regard arrière, 3 vues), anti-traversée des murs, jamais sous le sol.
+// Niveaux superposés : ctx.heightAt reçoit la hauteur de la caméra ; elle reste SOUS un tablier ou une dalle
+// quand le joueur est dessous (jamais « posée » dessus), et sur le tablier quand il est dessus.
+import { STEP_UP } from '@shared/terrain.js';
 const TAU = Math.PI * 2;
 const wrap = (a) => { a = (a + Math.PI) % TAU; if (a < 0) a += TAU; return a - Math.PI; };
 const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
@@ -37,11 +40,17 @@ export function createCameraRig(ctx, player, input) {
 
   /** Distance maximale libre entre la cible et la caméra (obstacles statiques). */
   function freeDistance(tx, ty, tz, dx, dy, dz, dist) {
-    if (!collision?.test) return dist;
     const N = 10;
+    let sPrev = heightAt ? heightAt(tx, tz, ty) : 0;
     for (let i = 1; i <= N; i++) {
-      const d = (dist * i) / N;
-      if (collision.test(tx + dx * d, tz + dz * d, 0.28, ty + dy * d)) return Math.max(0.7, (dist * (i - 1)) / N - 0.1);
+      const d = (dist * i) / N, x = tx + dx * d, y = ty + dy * d, z = tz + dz * d;
+      if (collision?.test && collision.test(x, z, 0.28, y)) return Math.max(0.7, (dist * (i - 1)) / N - 0.1);
+      if (heightAt) {
+        // un niveau supérieur apparaît au-dessus du rayon (tablier de pont, dalle de trémie) : la caméra reste dessous
+        const s = heightAt(x, z, y);
+        if (s - sPrev > STEP_UP * 0.9 && y < s + 0.35) return Math.max(0.7, (dist * (i - 1)) / N - 0.1);
+        sPrev = s;
+      }
     }
     return dist;
   }
@@ -89,7 +98,8 @@ export function createCameraRig(ctx, player, input) {
       const spec = v.spec || {};
       const len = spec.length || 4.2, hgt = spec.height || 1.45;
       const speed = v.speed || 0, abs = Math.abs(speed);
-      const sp = clamp(abs / 55, 0, 1);
+      // 0..1 sans palier : ≈ 0,3 à 50 km/h, 0,6 à 130, 0,77 à 200, 0,84 à 250 (lisible sur rocade)
+      const sp = 1 - Math.exp(-abs / 38);
       spSmooth = damp(spSmooth, sp, 3, dt);
       const acc = dt > 0 ? (speed - lastSpeed) / dt : 0; lastSpeed = speed;
       accSmooth = damp(accSmooth, clamp(acc, -25, 25), 4, dt);
@@ -114,7 +124,7 @@ export function createCameraRig(ctx, player, input) {
         want.set(v.pos.x + fx * off, vy + hgt + 0.1, v.pos.z + fz * off);
         look.set(want.x - sy * 20, want.y - 1.1 + orbitPitch * -14, want.z - cy * 20);
         fovTarget = 70 + 18 * spSmooth;
-        shakeAmp = 0.012 * clamp((spSmooth - 0.45) / 0.55, 0, 1);
+        shakeAmp = 0.006 * clamp((spSmooth - 0.5) / 0.4, 0, 1);
         limit = 99; hideCharacter = false;
         dist = 0;
       } else {
@@ -122,7 +132,7 @@ export function createCameraRig(ctx, player, input) {
         const k = len / 4.4;
         const base = (far ? 8.4 : 5.3) * k;
         // recul avec la vitesse + inertie à l'accélération / au freinage
-        distV = damp(distV, base * (1 + 0.2 * spSmooth) + clamp(accSmooth * 0.045, -0.6, 0.8), 5, dt);
+        distV = damp(distV, base * (1 + 0.26 * spSmooth) + clamp(accSmooth * 0.045, -0.6, 0.8), 5, dt);
         const pitch = (far ? 0.27 : 0.19) + orbitPitch - 0.04 * spSmooth;
         target.set(v.pos.x, vy + hgt * 0.8 + 0.25, v.pos.z);
         const cp = Math.cos(pitch), sp2 = Math.sin(pitch);
@@ -132,10 +142,10 @@ export function createCameraRig(ctx, player, input) {
         const d = Math.min(distV, Math.max(limit, 1.6));
         want.set(target.x + dx * d, target.y + dy * d, target.z + dz * d);
         // on regarde un peu en avant de la voiture
-        const ahead = (1.2 + 2.2 * spSmooth) * (1 - 2 * backSmooth);
+        const ahead = (1.2 + 3.2 * spSmooth) * (1 - 2 * backSmooth);
         look.set(v.pos.x + fx * ahead, vy + hgt * 0.75, v.pos.z + fz * ahead);
-        fovTarget = BASE_FOV + 19 * Math.pow(spSmooth, 0.9);
-        shakeAmp = 0.035 * clamp((spSmooth - 0.5) / 0.5, 0, 1);
+        fovTarget = BASE_FOV + 21 * Math.pow(spSmooth, 0.9);
+        shakeAmp = 0.014 * clamp((spSmooth - 0.5) / 0.4, 0, 1);
       }
     }
 
@@ -159,10 +169,20 @@ export function createCameraRig(ctx, player, input) {
     } else { camera.position.copy(want); blend = 1; }
     hasPos = true;
 
-    // jamais sous le sol
-    const ground = heightAt ? heightAt(camera.position.x, camera.position.z) : 0;
-    const minY = (Number.isFinite(ground) ? ground : 0) + 0.35;
-    if (camera.position.y < minY) camera.position.y = minY;
+    // jamais sous le sol — sol du niveau de la caméra (on passe SA hauteur)
+    if (heightAt) {
+      const cx = camera.position.x, cz = camera.position.z;
+      let cy = camera.position.y, ground = heightAt(cx, cz, cy);
+      const feet = v ? (v.pos.y ?? player.pos.y) : player.pos.y;
+      if (ground > cy + 0.5 && ground > feet + STEP_UP) {
+        // la surface trouvée est AU-DESSUS de la caméra alors que le joueur est à un niveau inférieur : c'est un plafond
+        // (dessous de tablier, dalle). On reste dessous au lieu de se poser dessus.
+        cy = Math.min(cy, ground - 1.3);
+        ground = heightAt(cx, cz, feet);
+      }
+      const minY = (Number.isFinite(ground) ? ground : 0) + 0.35;
+      camera.position.y = cy < minY ? minY : cy;
+    }
 
     camera.lookAt(look);
     rig.fov = damp(rig.fov, fovTarget, 3.5, dt);

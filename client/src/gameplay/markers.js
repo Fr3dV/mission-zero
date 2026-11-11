@@ -63,8 +63,12 @@ const COMMON_VS = /* glsl */ `
   varying float vPhase;
 `;
 
-export function createMarkers(ctx) {
+/**
+ * @param opts.yAt  (x, z, ele?) => hauteur du sol au niveau voulu (ele = élévation relative de la chaussée : ponts, trémies)
+ */
+export function createMarkers(ctx, opts = {}) {
   const { THREE, scene } = ctx;
+  const yAt = opts.yAt || ((x, z) => ctx.heightAt?.(x, z) ?? 0);
   const uTime = { value: 0 };
   const group = new THREE.Group();
   group.name = 'gameplay-markers';
@@ -181,7 +185,7 @@ export function createMarkers(ctx) {
     for (const list of layers.values()) {
       for (const k of list) {
         if (n >= CAP) break;
-        const y = k.y ?? ctx.heightAt?.(k.x, k.z) ?? 0;
+        const y = Number.isFinite(k.y) ? k.y : yAt(k.x, k.z);
         col.set(k.color ?? 0xffffff);
         aColor.setXYZ(n, col.r, col.g, col.b);
         const phase = (k.x * 0.37 + k.z * 0.71) % 6.283;
@@ -240,17 +244,22 @@ export function createMarkers(ctx) {
     for (let i = startIndex; i < path.length - 1 && q < MAXQ && left > 0; i++) {
       let ax = path[i][0], az = path[i][1];
       const bx0 = path[i + 1][0], bz0 = path[i + 1][1];
-      if (i === startIndex) { ax += (bx0 - ax) * startT; az += (bz0 - az) * startT; }
+      // élévation de la chaussée (3e composante des points d'itinéraire) : le ruban suit les ponts et les trémies
+      let e0 = path[i][2], e1 = path[i + 1][2];
+      if (!Number.isFinite(e0)) e0 = e1;
+      if (!Number.isFinite(e1)) e1 = e0;
+      if (i === startIndex) { ax += (bx0 - ax) * startT; az += (bz0 - az) * startT; if (Number.isFinite(e0)) e0 += (e1 - e0) * startT; }
       let segLen = Math.hypot(bx0 - ax, bz0 - az);
       if (segLen < 0.05) continue;
       const dx = (bx0 - ax) / segLen, dz = (bz0 - az) / segLen;
       const use = Math.min(segLen, left);
-      // découpe en tronçons de 25 m max pour épouser le relief (Montmartre)
+      // découpe en tronçons de 25 m max pour épouser le relief
       const parts = Math.max(1, Math.ceil(use / 25));
       for (let p = 0; p < parts && q < MAXQ; p++) {
         const s0 = (use * p) / parts, s1 = (use * (p + 1)) / parts;
         const x0 = ax + dx * s0, z0 = az + dz * s0, x1 = ax + dx * s1, z1 = az + dz * s1;
-        const y0 = (ctx.heightAt?.(x0, z0) ?? 0) + 0.22, y1 = (ctx.heightAt?.(x1, z1) ?? 0) + 0.22;
+        const y0 = yAt(x0, z0, Number.isFinite(e0) ? e0 + ((e1 - e0) * s0) / segLen : undefined) + 0.22;
+        const y1 = yAt(x1, z1, Number.isFinite(e0) ? e0 + ((e1 - e0) * s1) / segLen : undefined) + 0.22;
         const o = q * 12, u = q * 8;
         const a = ribPos.array, uv = ribUv.array;
         a[o] = x0 - dz * hw; a[o + 1] = y0; a[o + 2] = z0 + dx * hw;

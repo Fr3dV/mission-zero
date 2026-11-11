@@ -1,6 +1,11 @@
 // Protocole réseau Mission Zéro — partagé client / serveur / robots (aucune dépendance).
 // Transport : WebSocket texte, un objet JSON compact par message : { t: <type>, ... }.
 // Les états de position sont des tableaux numériques arrondis (voir encodeState).
+//
+// Multi-villes : `hello` porte la ville du client (`city`, voir shared/cities.js). Champ OPTIONNEL : un client
+// qui ne l'envoie pas (onglet ouvert avant la mise à jour) est à Paris. Une salle appartient à une ville : le
+// même code de salle dans deux villes désigne deux salles distinctes. `welcome` renvoie la ville retenue.
+// La version de protocole reste 1 : l'ajout est rétrocompatible dans les deux sens.
 export const PROTOCOL_VERSION = 1;
 export const WS_PATH = '/ws';
 
@@ -12,11 +17,11 @@ export const MAX_MESSAGE_BYTES = 2048;
 export const MAX_PLAYERS_PER_ROOM = 32;
 export const DEFAULT_ROOM = 'paris';
 export const MAX_CHAT_LEN = 200;
-export const MAX_SPEED = 130; // m/s — au-delà, le déplacement est traité comme une téléportation
+export const MAX_SPEED = 130; // m/s (468 km/h) — vitesse moyenne au-delà de laquelle un déplacement est traité comme une téléportation
 
 // Messages client -> serveur
 export const C = {
-  HELLO: 'hello', //            { v, name, room, token? }
+  HELLO: 'hello', //            { v, name, room, city?, token? }   (city absent = 'paris')
   STATE: 'st', //               { s: [x, y, z, yaw, speed, mode, anim, vehicleType, vehicleColor] }
   PING: 'ping', //              { c: horloge client }
   CHAT: 'chat', //              { text }
@@ -32,7 +37,7 @@ export const C = {
 
 // Messages serveur -> client
 export const S = {
-  WELCOME: 'welcome', //  { v, id, token?, room, me, players:[{id,name}], owners, lb, ts }
+  WELCOME: 'welcome', //  { v, id, token?, room, city, me, players:[{id,name}], owners, lb, ts }
   ERROR: 'error', //      { op, code, text, fatal? }
   PROFILE: 'profile', //  { me, delta?, reason? }
   SNAPSHOT: 'snap', //    { ts, p: [[id, x, y, z, yaw, speed, mode, anim, vehicleType, vehicleColor], ...] }

@@ -16,22 +16,28 @@
   <canvas id="game"></canvas>
   <div id="hud"></div>
   <script type="module">
-    // Page de test isolée du module trafic. Caméra aérienne qui suit un point (flèches / ZQSD pour le déplacer,
-    // +/- pour l'altitude). Lignes de debug : axe des arêtes (jaune), voies + chevrons de sens (cyan),
-    // trottoirs (vert).
-    // Paramètres : x, z | tp=<monument> ; h=<altitude> ; speed=<accélération du temps> ; quality ; traffic=<densité> ;
-    //   time=<heure> (émet env:time) ; obstacle=1 (voiture « joueur » arrêtée sur la chaussée, pour tester freinage et klaxon) ;
-    //   sample=1 (force paris.sample.json) ; lines=0 (masque les lignes) ; ring=min,max (anneau d'apparition des voitures) ;
-    //   boxes=1 (véhicules de repli en boîtes) ; scenario=rearend|tbone|ped5|ped15|ped60|wreck (accidents provoqués ; ped<km/h>).
+    // Page de test isolée du module trafic, pour la ville courante (?city=paris|toulouse) ou un réseau d'essai.
+    // Caméra aérienne qui suit un point (flèches / ZQSD pour le déplacer, +/- pour l'altitude). Lignes de debug :
+    // axe des arêtes (jaune), voies + chevrons de sens (cyan), trottoirs (vert), carrefours à réservation (anneau rose)
+    // et « cédez le passage » (anneau orange). Les chaussées en hauteur (ponts) sont plus claires, les trémies plus sombres.
+    // Paramètres : city ; net=test (échangeur + pont + giratoire d'essai) | net=big (≈100 000 nœuds, mesure de la
+    //   construction) ; x, z | tp=<monument> ; h=<distance caméra> ; pitch=<degrés> (90 = à la verticale) ; rot=<degrés> ;
+    //   speed=<accélération du temps> ; quality ; traffic=<densité> ; time=<heure> (émet env:time) ;
+    //   chase=<m/s> (le point suivi roule sur la voie rapide la plus proche, comme un joueur) ; follow=1 (la caméra suit une voiture IA) ;
+    //   obstacle=1 (voiture « joueur » arrêtée sur la chaussée) ; sample=1 (force paris.sample.json) ; lines=0 ; draw=<rayon dessiné, m> ;
+    //   ring=min,max (anneau d'apparition) ; boxes=1 (véhicules de repli en boîtes) ;
+    //   scenario=rearend|tbone|ped<km/h>|wreck|carjack (accidents provoqués).
     import * as THREE from 'three';
     import { bus } from '/src/core/bus.js';
     import { store } from '/src/core/store.js';
     import { collision } from '/src/core/collision.js';
-    import { heightAt, WATER_LEVEL } from '@shared/terrain.js';
+    import { heightAt, baseHeightAt, WATER_LEVEL, setHeightmap } from '@shared/terrain.js';
+    import { CITY, CITIES } from '@shared/cities.js';
     import { LANDMARKS, LANDMARK_BY_ID } from '@shared/landmarks.js';
     import { BOUNDS } from '@shared/geo.js';
     import { VEHICLE_BY_ID } from '@shared/catalog.js';
     import { createTraffic } from '/src/traffic/index.js';
+    import { makeTestNet, makeBigNet } from './traffic-testnet.js';
 
     const params = new URLSearchParams(location.search);
     const num = (k, d) => (params.get(k) != null && isFinite(+params.get(k)) ? +params.get(k) : d);
@@ -43,16 +49,24 @@
     scene.background = new THREE.Color(0x10141c);
     scene.add(new THREE.HemisphereLight(0xffffff, 0x556070, 1.6));
     const sun = new THREE.DirectionalLight(0xffffff, 1.6); sun.position.set(200, 500, 100); scene.add(sun);
-    const camera = new THREE.PerspectiveCamera(60, innerWidth / innerHeight, 1, 9000);
+    const camera = new THREE.PerspectiveCamera(60, innerWidth / innerHeight, 1, 20000);
 
     async function loadJSON(url) { const r = await fetch(url); if (!r.ok) throw new Error(url + ' ' + r.status); return r.json(); }
-    let worldData;
-    try { if (params.get('sample')) throw 0; worldData = await loadJSON('/shared/world/paris.json'); }
-    catch { worldData = await loadJSON('/shared/world/paris.sample.json'); }
+    let worldData, dataNote = CITY.id;
+    const net = params.get('net');
+    if (net === 'test') { worldData = makeTestNet(); dataNote = 'réseau d\'essai'; }
+    else if (net === 'big') { worldData = makeBigNet(num('n', 100000)); dataNote = 'grand réseau d\'essai'; }
+    else {
+      try { if (params.get('sample')) throw 0; worldData = await loadJSON(CITY.files.roads); }
+      catch { worldData = await loadJSON('/shared/world/paris.sample.json'); dataNote = CITY.id + ' (jeu d\'essai)'; }
+      try { worldData.pois = CITY.files.pois ? await loadJSON(CITY.files.pois) : null; } catch { worldData.pois = null; }
+      try { if (CITY.files.terrain) { worldData.terrain = await loadJSON(CITY.files.terrain); setHeightmap(worldData.terrain); } } catch { /* relief plat */ }
+    }
 
     const ctx = {
       THREE, renderer, scene, camera, canvas, bus, store, collision, params, uiRoot: document.body,
-      heightAt, WATER_LEVEL, LANDMARKS, LANDMARK_BY_ID, BOUNDS, quality: params.get('quality') || 'high', worldData, time: 0, fps: 60,
+      heightAt, WATER_LEVEL, LANDMARKS: net ? [] : LANDMARKS, LANDMARK_BY_ID, BOUNDS, city: CITY, cities: CITIES,
+      quality: params.get('quality') || 'high', worldData, time: 0, fps: 60,
     };
     window.__game = ctx;
 
@@ -75,7 +89,7 @@
           nose.position.set(0, spec.height * 0.85, -spec.length / 2 + 0.4); group.add(nose);
           const v = { id: 'v' + list.length, typeId: spec.id, spec, color, group, pos: { x, y: 0, z }, yaw, speed: 0, driver: null, remote: !!opts.remote, controls: {},
             setControls() {}, update() {},
-            setTransform(nx, nz, ny, sp = 0) { v.pos.x = nx; v.pos.z = nz; v.yaw = ny; v.speed = sp; v.pos.y = heightAt(nx, nz); group.position.set(nx, v.pos.y, nz); group.rotation.y = ny; } };
+            setTransform(nx, nz, ny, sp = 0) { v.pos.x = nx; v.pos.z = nz; v.yaw = ny; v.speed = sp; v.pos.y = heightAt(nx, nz, v.pos.y); group.position.set(nx, v.pos.y, nz); group.rotation.y = ny; } };
           v.setTransform(x, z, yaw, 0); scene.add(group); list.push(v); return v;
         },
         remove(v) { scene.remove(v.group); const i = list.indexOf(v); if (i >= 0) list.splice(i, 1); },
@@ -84,15 +98,13 @@
     }
 
     // Point suivi par la caméra = faux joueur à pied.
-    const tp = LANDMARK_BY_ID[params.get('tp')];
+    const tp = net ? null : LANDMARK_BY_ID[params.get('tp')];
     const player = { pos: { x: num('x', tp ? tp.x + tp.radius + 25 : 0), y: 0, z: num('z', tp ? tp.z + tp.radius + 25 : 0) }, yaw: 0, speed: 0, mode: 'foot', vehicle: null, enabled: true };
+    player.pos.y = heightAt(player.pos.x, player.pos.z);
     ctx.player = player;
     let camH = num('h', params.get('scenario') ? 42 : 150);
+    const camPitch = (num('pitch', 90) * Math.PI) / 180, camRot = (num('rot', 0) * Math.PI) / 180;
     const timeScale = num('speed', 1);
-
-    // ---- décor minimal : sol + chaussées
-    const ground = new THREE.Mesh(new THREE.PlaneGeometry(20000, 20000), new THREE.MeshBasicMaterial({ color: 0x1b222c }));
-    ground.rotation.x = -Math.PI / 2; ground.position.y = -0.1; scene.add(ground);
 
     const traffic = (ctx.traffic = createTraffic(ctx));
     const G = traffic.graph;
@@ -100,37 +112,36 @@
     const scenarioName = params.get('scenario');
     if ((params.get('ring') || scenarioName) && traffic._debug) {
       const [a, b] = (params.get('ring') || '15,110').split(',').map(Number), T = traffic._debug.T;
-      T.SPAWN_MIN = a; T.SPAWN_MAX = b; T.DESPAWN = b + 40; T.PED_RADIUS = Math.min(150, b); T.inView = () => false;
+      T.SPAWN_MIN = a; T.SPAWN_MAX = b; T.DESPAWN = b + 40; T.PED_RADIUS = Math.min(150, b); T.inView = () => false; T.fixedRing = true;
     }
 
+    // ---- décor minimal : chaussées (à leur hauteur réelle : relief + élévation), dans un rayon `draw` autour du départ
+    const drawR = num('draw', 1500), dx0 = player.pos.x, dz0 = player.pos.z;
+    const near = (h) => { const x = G.nx[G.hFrom[h]] - dx0, z = G.nz[G.hFrom[h]] - dz0; return x * x + z * z < drawR * drawR; };
+    const yAt = (h, s, off) => { const x = G.pointX(h, s, off), z = G.pointZ(h, s, off); return baseHeightAt(x, z) + G.eleAt(h, s); };
     {
-      const pos = [], idx = [];
+      let n = 0; for (let e = 0; e < G.edgeCount; e++) if (near(2 * e)) n++;
+      const pos = new Float32Array(n * 12), col = new Float32Array(n * 12), idx = new Uint32Array(n * 6);
+      let q = 0;
       for (let e = 0; e < G.edgeCount; e++) {
-        const h = 2 * e, w = G.hWidth[h] / 2, len = G.hLen[h], b = pos.length / 3;
-        for (const [s, o] of [[0, -w], [0, w], [len, w], [len, -w]]) pos.push(G.pointX(h, s, o), 0, G.pointZ(h, s, o));
-        idx.push(b, b + 1, b + 2, b, b + 2, b + 3);
+        const h = 2 * e; if (!near(h)) continue;
+        const w = G.hWidth[h] / 2, len = G.hLen[h], b = q * 4, ele = (G.nodeEle[G.hFrom[h]] + G.nodeEle[G.hTo[h]]) / 2;
+        const c = ele > 2 ? [0.36, 0.42, 0.52] : ele < -2 ? [0.16, 0.17, 0.2] : G.hKind[h] >= 5 ? [0.27, 0.29, 0.34] : [0.22, 0.25, 0.29];
+        [[0, -w], [0, w], [len, w], [len, -w]].forEach(([s, o], k) => { pos.set([G.pointX(h, s, o), yAt(h, s, o) - 0.03, G.pointZ(h, s, o)], (b + k) * 3); col.set(c, (b + k) * 3); });
+        idx.set([b, b + 1, b + 2, b, b + 2, b + 3], q * 6); q++;
       }
       const g = new THREE.BufferGeometry();
-      g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3)); g.setIndex(idx);
-      scene.add(new THREE.Mesh(g, new THREE.MeshBasicMaterial({ color: 0x39404b, side: THREE.DoubleSide })));
-      // disques aux nœuds pour boucher les coins
-      const disc = new THREE.CircleGeometry(1, 12); disc.rotateX(-Math.PI / 2);
-      const inst = new THREE.InstancedMesh(disc, new THREE.MeshBasicMaterial({ color: 0x39404b }), G.nodeCount);
-      const m = new THREE.Matrix4();
-      for (let i = 0; i < G.nodeCount; i++) {
-        let r = 0;
-        for (let k = G.outStart[i]; k < G.outStart[i + 1]; k++) r = Math.max(r, G.hWidth[G.outList[k]] / 2);
-        m.makeScale(r, 1, r); m.setPosition(G.nx[i], 0.005, G.nz[i]); inst.setMatrixAt(i, m);
-      }
-      scene.add(inst);
+      g.setAttribute('position', new THREE.BufferAttribute(pos, 3)); g.setAttribute('color', new THREE.BufferAttribute(col, 3)); g.setIndex(new THREE.BufferAttribute(idx, 1));
+      scene.add(new THREE.Mesh(g, new THREE.MeshBasicMaterial({ vertexColors: true, side: THREE.DoubleSide })));
     }
     if (params.get('lines') !== '0') {
       const axis = [], lanes = [], walks = [];
-      const seg = (arr, h, s0, o0, s1, o1, y) => arr.push(G.pointX(h, s0, o0), y, G.pointZ(h, s0, o0), G.pointX(h, s1, o1), y, G.pointZ(h, s1, o1));
+      const seg = (arr, h, s0, o0, s1, o1, y) => arr.push(G.pointX(h, s0, o0), yAt(h, s0, o0) + y, G.pointZ(h, s0, o0), G.pointX(h, s1, o1), yAt(h, s1, o1) + y, G.pointZ(h, s1, o1));
       for (let h = 0; h < G.hCount; h++) {
+        if (!near(h)) continue;
         const len = G.hLen[h];
         if (!(h & 1)) seg(axis, h, 0, 0, len, 0, 0.05);
-        seg(walks, h, 0, G.hWalk[h], len, G.hWalk[h], 0.05);
+        if (G.hFlag[h] & 16) seg(walks, h, 0, G.hWalk[h], len, G.hWalk[h], 0.05); // trottoirs marchables seulement
         if (!G.hDrive[h]) continue;
         for (let i = 0; i < G.hLanes[h]; i++) {
           const o = G.hOff0[h] + i * G.hLaneW[h], mid = len / 2;
@@ -140,13 +151,20 @@
       }
       const add = (arr, color) => { const g = new THREE.BufferGeometry(); g.setAttribute('position', new THREE.Float32BufferAttribute(arr, 3)); scene.add(new THREE.LineSegments(g, new THREE.LineBasicMaterial({ color }))); };
       add(axis, 0xd8b021); add(lanes, 0x2fb7c9); add(walks, 0x3fa34d);
-      // carrefours à verrou
+      // nœuds contrôlés : réservation (rose) ou cédez le passage (orange)
       const jg = new THREE.RingGeometry(0.85, 1, 20); jg.rotateX(-Math.PI / 2);
-      let nJ = 0; for (let i = 0; i < G.nodeCount; i++) if (G.nodeJunction[i]) nJ++;
-      const rings = new THREE.InstancedMesh(jg, new THREE.MeshBasicMaterial({ color: 0xc94f7c }), Math.max(1, nJ));
-      const m = new THREE.Matrix4(); let k = 0;
-      for (let i = 0; i < G.nodeCount; i++) if (G.nodeJunction[i]) { const r = G.nodeRadius[i] + 1.5; m.makeScale(r, 1, r); m.setPosition(G.nx[i], 0.07, G.nz[i]); rings.setMatrixAt(k++, m); }
-      rings.count = k; scene.add(rings);
+      for (const [ctl, color] of [[1, 0xc94f7c], [2, 0xe08a2a]]) {
+        const ids = []; for (let i = 0; i < G.nodeCount; i++) if (G.nodeCtl[i] === ctl && (G.nx[i] - dx0) ** 2 + (G.nz[i] - dz0) ** 2 < drawR * drawR) ids.push(i);
+        if (!ids.length) continue;
+        const rings = new THREE.InstancedMesh(jg, new THREE.MeshBasicMaterial({ color }), ids.length), m = new THREE.Matrix4();
+        ids.forEach((i, k) => { const r = G.nodeRadius[i] + 1.5; m.makeScale(r, 1, r); m.setPosition(G.nx[i], baseHeightAt(G.nx[i], G.nz[i]) + G.nodeEle[i] + 0.07, G.nz[i]); rings.setMatrixAt(k, m); });
+        scene.add(rings);
+      }
+    }
+    // rails (tramway) et zones (pois.areas) pour repère
+    for (const r of worldData.rails || []) {
+      const pts = (r.points || []).map((p) => new THREE.Vector3(p[0], baseHeightAt(p[0], p[1]) + 0.08, p[1]));
+      if (pts.length > 1) scene.add(new THREE.Line(new THREE.BufferGeometry().setFromPoints(pts), new THREE.LineBasicMaterial({ color: 0xb04ad0 })));
     }
     // repère du point suivi
     const marker = new THREE.Mesh(new THREE.CylinderGeometry(0.5, 0.5, 2, 10), new THREE.MeshBasicMaterial({ color: 0xff3355 }));
@@ -173,7 +191,7 @@
     const scn = (window.__scn = { name: scenarioName, state: scenarioName ? 'attente' : '', target: null, pc: null, kind: '', log: [], aim: null, vT: 0 });
     for (const ev of ['pedestrian:hit', 'vehicle:hit', 'vehicle:crash', 'traffic:honk'])
       bus.on(ev, (e) => { if (scn.log.length < 200) scn.log.push({ t: +ctx.time.toFixed(2), ev, sev: e?.severity, impact: e?.impact != null ? +e.impact.toFixed(1) : undefined, speed: e?.speed != null ? +e.speed.toFixed(1) : undefined, v: e?.vehicle?.id, vd: e?.vehicle?.driver, by: (e?.by || e?.other)?.id, kind: e?.kind }); });
-    const camFocus = { x: player.pos.x, z: player.pos.z };
+    const camFocus = { x: player.pos.x, y: player.pos.y, z: player.pos.z };
     function launch(x, z, yaw, speed) {
       const pc = ctx.vehicles.spawn('porsche_cayenne', x, z, yaw, { color: '#f4d000' });
       pc.driver = 'local'; pc.setTransform(x, z, yaw, speed);
@@ -253,6 +271,31 @@
       else { const yaw = pc.yaw + Math.max(-1, Math.min(1, err)) * dt * 2; pc.setTransform(pc.pos.x - Math.sin(yaw) * scn.vT * dt, pc.pos.z - Math.cos(yaw) * scn.vT * dt, yaw, scn.vT); }
     }
 
+    // ---- chase=<m/s> : le point suivi roule sur la voie rapide la plus proche (comme un joueur à cette vitesse)
+    const follow = !!params.get('follow'); let followed = null;
+    const chase = { v: num('chase', 0), h: -1, s: 0 };
+    window.__chaseTick = (dt) => chaseTick(dt);
+    function chaseTick(dt) {
+      if (!chase.v) return;
+      if (chase.h < 0) {
+        let best = -1, bd = 1e12;
+        for (let h = 0; h < G.hCount; h++) { if (!G.hDrive[h] || !(G.hFlag[h] & 8) || G.hKind[h] < 6) continue; const d = (G.nx[G.hFrom[h]] - player.pos.x) ** 2 + (G.nz[G.hFrom[h]] - player.pos.z) ** 2; if (d < bd) { bd = d; best = h; } }
+        if (best < 0) { chase.v = 0; return; }
+        chase.h = best; chase.s = 0;
+      }
+      chase.s += chase.v * dt;
+      while (chase.s > G.hLen[chase.h]) {
+        chase.s -= G.hLen[chase.h];
+        const h = chase.h, node = G.hTo[h]; let best = -1, bc = -2;
+        for (let k = G.outStart[node]; k < G.outStart[node + 1]; k++) { const o = G.outList[k]; if (!G.hDrive[o] || o === (h ^ 1)) continue; const c = G.hUx[h] * G.hUx[o] + G.hUz[h] * G.hUz[o] + (G.hKind[o] === G.hKind[h] ? 0.5 : 0); if (c > bc) { bc = c; best = o; } }
+        if (best < 0) { chase.v = 0; return; }
+        chase.h = best;
+      }
+      const off = G.hOff0[chase.h];
+      player.pos.x = G.pointX(chase.h, chase.s, off); player.pos.z = G.pointZ(chase.h, chase.s, off);
+      player.pos.y = baseHeightAt(player.pos.x, player.pos.z) + G.eleAt(chase.h, chase.s);
+    }
+
     const keys = new Set();
     addEventListener('keydown', (e) => keys.add(e.code)); addEventListener('keyup', (e) => keys.delete(e.code));
     addEventListener('resize', () => { renderer.setSize(innerWidth, innerHeight); camera.aspect = innerWidth / innerHeight; camera.updateProjectionMatrix(); });
@@ -270,22 +313,30 @@
       }
       if (keys.has('Equal') || keys.has('NumpadAdd')) camH = Math.max(20, camH * (1 - real));
       if (keys.has('Minus') || keys.has('NumpadSubtract')) camH = Math.min(3000, camH * (1 + real));
-      if (!scn.name) { camFocus.x = player.pos.x; camFocus.z = player.pos.z; }
-      camera.position.set(camFocus.x, camH, camFocus.z + 0.01);
-      camera.up.set(0, 0, -1); camera.lookAt(camFocus.x, 0, camFocus.z);
+      if (follow && traffic._debug) { // la caméra suit une voiture IA (la même tant qu'elle existe)
+        const st = traffic._debug.cars.states;
+        if (!followed || !followed.active) followed = st.filter((c) => c.active && c.speed > 2).sort((a, b) => b.speed - a.speed)[0] || null;
+        if (followed) { camFocus.x = followed.x; camFocus.z = followed.z; camFocus.y = followed.y; }
+      } else if (!scn.name) { camFocus.x = player.pos.x; camFocus.z = player.pos.z; camFocus.y = player.pos.y; }
+      const fy = camFocus.y || 0, ch = Math.cos(camPitch) * camH;
+      camera.position.set(camFocus.x + Math.sin(camRot) * ch, fy + Math.sin(camPitch) * camH, camFocus.z + Math.cos(camRot) * ch + 0.01);
+      camera.up.set(0, camPitch > 1.5 ? 0 : 1, camPitch > 1.5 ? -1 : 0); camera.lookAt(camFocus.x, fy, camFocus.z);
       camera.updateMatrixWorld();
-      marker.position.set(player.pos.x, 1, player.pos.z); marker.visible = !player.vehicle;
+      marker.position.set(player.pos.x, player.pos.y + 1, player.pos.z); marker.visible = !player.vehicle;
       // pas de simulation fixes (≤ 1/30 s), accélérés par `speed`
       let left = Math.min(real, 0.05) * timeScale;
       while (left > 1e-5) {
         const dt = Math.min(left, 1 / 30); left -= dt; ctx.time += dt;
         scenarioTick(dt);
+        chaseTick(dt);
         ctx.vehicles.update?.(dt);
         traffic.update(dt);
       }
       const s = traffic.stats;
-      hud.textContent = `trafic — ${worldData.meta?.source || '?'}  nœuds ${G.nodeCount}  arêtes ${G.edgeCount}  orienté: ${G.directed}\n` +
-        `voitures ${s.cars}  garées ${s.parked}  piétons ${s.peds}  klaxons ${honks}\n` +
+      const TT = traffic._debug ? traffic._debug.T : null;
+      hud.textContent = `trafic — ${dataNote}  nœuds ${G.nodeCount}  arêtes ${G.edgeCount}  orienté: ${G.directed}  graphe ${s.buildMs.toFixed(0)} ms, ${(s.graphBytes / 1048576).toFixed(1)} Mo  (réservation ${G.lockNodes}, cédez ${G.yieldNodes})\n` +
+        `voitures ${s.cars}/${s.carTarget}  garées ${s.parked}  piétons ${s.peds}/${s.pedTarget}  trams ${s.trams}  klaxons ${honks}  densité lieu : voit. ${s.carDens.toFixed(2)} piét. ${s.pedDens.toFixed(2)}` +
+        (TT ? `  v=${(TT.vF * 3.6).toFixed(0)} km/h  rayon ${TT.SPAWN_MAX.toFixed(0)} m` : '') + '\n' +
         `update ${s.ms.toFixed(2)} ms (max ${s.msMax.toFixed(1)})  fps ${ctx.fps.toFixed(0)}  t=${ctx.time.toFixed(0)} s  x=${player.pos.x.toFixed(0)} z=${player.pos.z.toFixed(0)} h=${camH.toFixed(0)}` +
         (scn.name ? `\nscénario ${scn.name} : ${scn.state}  cible mode=${scn.target ? scn.target.mode : '-'}${scn.kind === 'car' && scn.target ? ' sev=' + scn.target.sev + ' phase=' + scn.target.phase : ''}` : '');
       renderer.render(scene, camera);

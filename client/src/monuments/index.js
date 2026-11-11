@@ -1,37 +1,26 @@
-// Monuments de Paris : construction procédurale, LOD, collisions, éclairage nocturne.
+// Monuments et grands repères de la ville courante : construction procédurale, LOD, collisions, éclairage nocturne.
 // Contrat : ctx.monuments = { update(dt), get(id), list, stats() }.
+// Le module est indépendant de la ville : chaque ville a son registre (monuments/<ville>/index.js, export DEFS :
+// id de shared/cities/<ville>/landmarks.js -> fonction de construction), chargé à la demande par import() dynamique.
+// Le code d'une ville n'est donc ni chargé ni exécuté dans l'autre.
 // Chaque édifice est construit dans un repère local (façade principale vers +Z), posé à heightAt et tourné de
-// `rot` (shared/landmarks.js). La version lointaine (légère) et les collisions sont créées au démarrage ;
-// la version détaillée n'est construite qu'à l'approche du joueur (une par image au plus).
+// `rot`. La version lointaine (légère) et les collisions sont créées au démarrage ; la version détaillée n'est
+// construite qu'à l'approche du joueur (une par image au plus).
 import * as THREE from 'three';
 import { createKit, Builder, DEG } from './kit.js';
-import { buildEiffel } from './eiffel.js';
-import { buildArc } from './arc.js';
-import { buildNotreDame } from './notredame.js';
-import { buildLouvre, buildCourCarree, buildCarrousel } from './louvre.js';
-import { buildSacreCoeur } from './sacrecoeur.js';
-import { buildInvalides, buildHotelInvalides } from './invalides.js';
-import { buildConcorde } from './concorde.js';
-import { buildPantheon } from './pantheon.js';
-import { buildOpera } from './opera.js';
-import { buildGrandPalais } from './grandpalais.js';
-import { buildMadeleine } from './madeleine.js';
-import { buildTrocadero } from './trocadero.js';
-import * as civic from './civic.js';
-import * as culture from './culture.js';
-import * as churches from './churches.js';
-import * as city from './city.js';
+import { lonLatToXZ } from '@shared/geo.js';
 
-// id de shared/landmarks.js -> fonction de construction. Les ids absents sont de simples compléments d'emprise.
-export const DEFS = {
-  eiffel: buildEiffel, arc: buildArc, notredame: buildNotreDame, louvre: buildLouvre, courcarree: buildCourCarree, carrousel: buildCarrousel,
-  sacrecoeur: buildSacreCoeur, invalides: buildInvalides, hotelinvalides: buildHotelInvalides, concorde: buildConcorde, pantheon: buildPantheon,
-  opera: buildOpera, grandpalais: buildGrandPalais, madeleine: buildMadeleine, trocadero: buildTrocadero,
-  ...civic.DEFS, ...culture.DEFS, ...churches.DEFS, ...city.DEFS,
+const REGISTRY = {
+  paris: () => import('./paris/index.js'),
+  toulouse: () => import('./toulouse/index.js'),
 };
 
-export function createMonuments(ctx, opts = {}) {
+export async function createMonuments(ctx, opts = {}) {
   const { scene, camera, bus, LANDMARKS, heightAt, collision, store } = ctx;
+  const cityId = ctx.city?.id || 'paris';
+  let DEFS = {};
+  try { DEFS = (await (REGISTRY[cityId] || REGISTRY.paris)()).DEFS || {}; }
+  catch (e) { console.error(`[monuments] registre de ${cityId} indisponible`, e); }
   const q = ctx.quality || 'high';
   const kit = createKit(ctx);
   const lodDist = opts.lodDist ?? (q === 'low' ? 600 : q === 'medium' ? 950 : 1300);
@@ -50,10 +39,12 @@ export function createMonuments(ctx, opts = {}) {
       onUpdate: (fn) => updaters.push({ fn, g, item }),
       // hauteur du terrain relative au pied du monument, en coordonnées locales
       ground: (x, z) => { const [wx, wz] = item.toWorld(x, z); return heightAt(wx, wz) - item.y0; },
+      // coordonnées locales d'un point donné en latitude / longitude (éléments calés sur des relevés réels)
+      ll: (lat, lon) => { const [wx, wz] = lonLatToXZ(lon, lat), dx = wx - l.x, dz = wz - l.z, c = Math.cos(item.yaw), sn = Math.sin(item.yaw); return [dx * c - dz * sn, dx * sn + dz * c]; },
     };
     const res = item.build(m) || {};
     if (res.height) item.height = res.height;
-    for (const mesh of B.meshes(kit.main, l.id)) { mesh.castShadow = !far; mesh.receiveShadow = true; g.add(mesh); }
+    for (const mesh of B.meshes(kit.main, l.id)) { if (!mesh.geometry.attributes.position.count) continue; mesh.castShadow = !far; mesh.receiveShadow = true; g.add(mesh); }
     item.root.add(g); g.updateMatrixWorld(true);
     return g;
   }

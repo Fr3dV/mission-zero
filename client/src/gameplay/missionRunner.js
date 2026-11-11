@@ -5,6 +5,7 @@ import { MISSIONS, MISSION_BY_ID, MISSION_TYPES, LEVELS, levelForMissionsDone } 
 import { VEHICLE_BY_ID } from '@shared/catalog.js';
 import { createCharacter } from '../player/index.js';
 import { ICON } from './markers.js';
+import { snapStepToRoad } from './gps.js';
 
 const TYPE_ICON = { delivery: ICON.parcel, taxi: ICON.person, race: ICON.clock, tour: ICON.pin, courier: ICON.parcel, convoy: ICON.car, photo: ICON.camera };
 const STEP_ICON = { goto: ICON.flag, checkpoint: ICON.flag, pickup: ICON.person, dropoff: ICON.flag, stop: ICON.wait, photo: ICON.camera };
@@ -15,19 +16,42 @@ const fmtZ = (n) => `${Math.round(n).toLocaleString('fr-FR')} Ƶ`;
 export function createMissionRunner(g) {
   const { ctx, bus, store, markers } = g;
 
-  // Positions résolues (recalées sur la chaussée) pour chaque mission.
+  // Positions résolues (recalées sur la chaussée, avec leur hauteur `y`) pour chaque mission de la ville courante.
   const resolved = {};
   for (const m of MISSIONS) {
-    // départ au bord de la chaussée (carrossable si la mission se fait en voiture)
-    const start = g.curbPoint(m.start.x, m.start.z, -1.6, m.requireVehicle ? g.drivable : null);
+    // départ au bord de la chaussée (une rue carrossable si la mission se fait en voiture)
+    const start = g.curbPoint(m.start.x, m.start.z, -1.6, m.requireVehicle ? g.isStreet : g.isWalkable);
     resolved[m.id] = {
       start,
       steps: m.steps.map((s) => {
-        const p = s.snap === false ? { x: s.x, z: s.z } : s.kind === 'photo' ? g.accessPoint(s.x, s.z) : g.roadPoint(s.x, s.z);
-        return { ...s, x: p.x, z: p.z };
+        // photo : un point accessible à pied (trottoir) ; sinon l'axe de la chaussée, éventuellement ciblée (snapTo)
+        if (s.kind === 'photo' && s.snap !== false && !s.snapTo) { const a = g.accessPoint(s.x, s.z); return { ...s, x: a.x, z: a.z, y: a.y, ele: a.ele }; }
+        const p = snapStepToRoad(g.roads, s);
+        return { ...s, x: p.x, z: p.z, ele: p.ele, y: g.groundY(p.x, p.z, p.ele) };
       }),
     };
   }
+  // Plusieurs missions partent du même lieu (une place, une gare) : on écarte leurs marqueurs de départ le long
+  // de la rue pour que chacun reste visible et accessible avec E.
+  {
+    const placed = [];
+    const SPACING = 11;
+    for (const m of MISSIONS) {
+      const st = resolved[m.id].start;
+      const clash = (x, z) => placed.some((q) => Math.hypot(q.x - x, q.z - z) < SPACING - 1 && g.sameLevel(q.y, st.y, 4));
+      if (st.road && clash(st.x, st.z)) {
+        for (let k = 1; k <= 12; k++) {
+          // +1, -1, +2, -2… pas le long de la chaussée
+          const d = (k % 2 ? 1 : -1) * Math.ceil(k / 2) * SPACING;
+          const c = g.curbPoint(st.ax + st.dirX * d, st.az + st.dirZ * d, -1.6, m.requireVehicle ? g.isStreet : g.isWalkable);
+          if (!clash(c.x, c.z)) { resolved[m.id].start = c; break; }
+        }
+      }
+      placed.push(resolved[m.id].start);
+    }
+  }
+  /** Le joueur est-il dans le disque d'un point (même niveau : un pont n'est pas la voie qui passe dessous) ? */
+  const within = (p, s, r) => Math.hypot(s.x - p.x, s.z - p.z) <= r && g.sameLevel(p.y, s.y, 6, s.x, s.z);
 
   let active = null; // mission en cours
   let tracked = null; // id de mission suivie au GPS (départ à rejoindre)
@@ -61,20 +85,20 @@ export function createMissionRunner(g) {
     for (const m of MISSIONS) {
       const st = status(m);
       const p = st.start;
-      if (st.locked) list.push({ x: p.x, z: p.z, color: '#8d99ae', icon: ICON.lock, radius: 3.2, beamH: 0, range: 260, iconSize: 1.2, iconY: 3.4 });
-      else if (st.cooldownLeft > 0) list.push({ x: p.x, z: p.z, color: '#8d99ae', icon: ICON.clock, radius: 3.2, beamH: 0, range: 320, iconSize: 1.2, iconY: 3.4 });
-      else list.push({ x: p.x, z: p.z, color: MISSION_TYPES[m.type]?.color || '#ffb703', icon: TYPE_ICON[m.type] ?? ICON.mission, radius: 3.6, beamH: tracked === m.id ? 110 : 60, beamR: tracked === m.id ? 1.3 : 0.8, range: tracked === m.id ? 1e5 : 1500, iconSize: 2.3, iconY: 4.6 });
+      if (st.locked) list.push({ x: p.x, z: p.z, y: p.y, color: '#8d99ae', icon: ICON.lock, radius: 3.2, beamH: 0, range: 260, iconSize: 1.2, iconY: 3.4 });
+      else if (st.cooldownLeft > 0) list.push({ x: p.x, z: p.z, y: p.y, color: '#8d99ae', icon: ICON.clock, radius: 3.2, beamH: 0, range: 320, iconSize: 1.2, iconY: 3.4 });
+      else list.push({ x: p.x, z: p.z, y: p.y, color: MISSION_TYPES[m.type]?.color || '#ffb703', icon: TYPE_ICON[m.type] ?? ICON.mission, radius: 3.6, beamH: tracked === m.id ? 110 : 60, beamR: tracked === m.id ? 1.3 : 0.8, range: tracked === m.id ? 1e5 : 1500, iconSize: 2.3, iconY: 4.6 });
     }
     markers.set('missionStarts', list);
   }
 
   // ---------------------------------------------------------------- interaction (touche E)
-  function collect(px, pz, out) {
+  function collect(px, pz, out, py) {
     if (active) return;
     for (const m of MISSIONS) {
       const p = resolved[m.id].start;
       const d = Math.hypot(p.x - px, p.z - pz);
-      if (d > START_RADIUS + 1.5) continue;
+      if (d > START_RADIUS + 1.5 || !g.sameLevel(py, p.y, 4, p.x, p.z)) continue;
       const st = status(m);
       let text, ok = false;
       if (st.locked) text = `${m.title} — niveau ${m.level} requis (${LEVELS[m.level - 1].missionsDone} missions réussies)`;
@@ -94,10 +118,10 @@ export function createMissionRunner(g) {
       if (st.locked) { g.toast(`Niveau ${m.level} requis pour « ${m.title} ».`, 'error'); return false; }
       if (st.cooldownLeft > 0) { g.toast(`« ${m.title} » sera disponible dans ${fmtTime(st.cooldownLeft)}.`, 'info'); return false; }
       const p = g.playerPos();
-      if (Math.hypot(p.x - st.start.x, p.z - st.start.z) > START_RADIUS + 2) {
+      if (!within(p, st.start, START_RADIUS + 2)) {
         // trop loin : on guide jusqu'au départ, la mission démarrera à l'arrivée
         tracked = id;
-        g.nav.set(st.start.x, st.start.z, `Départ : ${m.title}`, 'track');
+        g.nav.set(st.start.x, st.start.z, `Départ : ${m.title}`, 'track', st.start.ele);
         refreshStartMarkers();
         g.toast(`Rendez-vous au départ de « ${m.title} ».`, 'info');
         return true;
@@ -114,9 +138,10 @@ export function createMissionRunner(g) {
     };
     // véhicule fourni (convoyage, voiturier)
     if (m.vehicle?.provided && ctx.vehicles?.spawn) {
-      const sp = g.lanePoint(r.start.x, r.start.z, 7);
+      const sp = g.lanePoint(r.start.x, r.start.z, 7, r.start.ele);
       try {
-        active.vehicle = ctx.vehicles.spawn(m.vehicle.typeId, sp.x, sp.z, sp.yaw, {});
+        // opts.y : la voiture apparaît au niveau de la chaussée choisie (pont, trémie), pas à celui de la rue
+        active.vehicle = ctx.vehicles.spawn(m.vehicle.typeId, sp.x, sp.z, sp.yaw, { y: sp.y });
         active.vehicle.mission = id;
       } catch (e) { console.warn('[gameplay] véhicule de mission', e); }
     }
@@ -126,7 +151,7 @@ export function createMissionRunner(g) {
       try {
         const c = createCharacter(ctx, { color: m.passenger.color, name: m.passenger.name });
         const side = g.accessPoint(pick.x, pick.z);
-        c.group.position.set(side.x, ctx.heightAt?.(side.x, side.z) ?? 0, side.z);
+        c.group.position.set(side.x, side.y, side.z);
         c.group.rotation.y = (side.yaw ?? 0) + Math.PI / 2;
         c.setState?.({ anim: 'idle', speed: 0 });
         ctx.scene.add(c.group);
@@ -153,7 +178,7 @@ export function createMissionRunner(g) {
     const step = currentTargets()[0] || a.steps[stepCount - 1];
     return {
       id: a.def.id, title: a.def.title, type: a.def.type, reward: a.def.reward, giver: a.def.giver,
-      phase: a.phase, stepIndex, stepCount, step: step ? { label: step.label, kind: step.kind, x: step.x, z: step.z, radius: step.radius } : null,
+      phase: a.phase, stepIndex, stepCount, step: step ? { label: step.label, kind: step.kind, x: step.x, z: step.z, y: step.y, radius: step.radius } : null,
       text: a.text, timeLeft: a.timeLeft, elapsed: a.elapsed, distance: a.distance,
       damage: a.def.maxDamage != null ? a.damage : null, maxDamage: a.def.maxDamage ?? null,
     };
@@ -271,8 +296,10 @@ export function createMissionRunner(g) {
     if (s.kind === 'pickup' && a.passenger) { a.aboard = true; a.passenger.group.visible = false; g.toast(`${m.passenger?.name || 'Le client'} monte à bord.`, 'info'); }
     if (s.kind === 'dropoff' && a.passenger) {
       a.aboard = false;
-      const p = g.playerPos(), side = g.accessPoint(p.x, p.z);
-      a.passenger.group.position.set(side.x, ctx.heightAt?.(side.x, side.z) ?? 0, side.z);
+      const p = g.playerPos();
+      // le client descend sur le trottoir, au niveau où l'on se trouve
+      const side = g.accessPoint(p.x, p.z);
+      a.passenger.group.position.set(side.x, g.sameLevel(side.y, p.y, 3) ? side.y : p.y, side.z);
       a.passenger.group.visible = true;
       a.passenger.setState?.({ anim: 'idle', speed: 0 });
     }
@@ -293,12 +320,12 @@ export function createMissionRunner(g) {
     const sig = targets.map((s) => a.steps.indexOf(s)).join(',') + '|' + (vehicleHint ? `${Math.round(vehicleHint.x / 3)}:${Math.round(vehicleHint.z / 3)}` : '');
     if (sig === lastObjectiveSig) return;
     lastObjectiveSig = sig;
-    const list = targets.map((s) => ({ x: s.x, z: s.z, color: OBJECTIVE_COLOR, icon: STEP_ICON[s.kind] ?? ICON.flag, radius: s.radius, beamH: 120, beamR: 1.4, range: 1e5, iconSize: 2.6, iconY: 5.5 }));
+    const list = targets.map((s) => ({ x: s.x, z: s.z, y: s.y, color: OBJECTIVE_COLOR, icon: STEP_ICON[s.kind] ?? ICON.flag, radius: s.radius, beamH: 120, beamR: 1.4, range: 1e5, iconSize: 2.6, iconY: 5.5 }));
     if (!a.def.anyOrder) {
       const next = a.steps[a.stepIndex + 1];
-      if (next) list.push({ x: next.x, z: next.z, color: '#ffffff', icon: null, radius: next.radius * 0.8, beamH: 35, beamR: 0.5, range: 900 });
+      if (next) list.push({ x: next.x, z: next.z, y: next.y, color: '#ffffff', icon: null, radius: next.radius * 0.8, beamH: 35, beamR: 0.5, range: 900 });
     }
-    if (vehicleHint) list.push({ x: vehicleHint.x, z: vehicleHint.z, color: '#c77dff', icon: ICON.car, radius: 0, beamH: 45, beamR: 0.6, range: 1e5, iconSize: 2, iconY: 4.2 });
+    if (vehicleHint) list.push({ x: vehicleHint.x, z: vehicleHint.z, y: vehicleHint.y, color: '#c77dff', icon: ICON.car, radius: 0, beamH: 45, beamR: 0.6, range: 1e5, iconSize: 2, iconY: 4.2 });
     markers.set('objective', list);
   }
 
@@ -309,7 +336,7 @@ export function createMissionRunner(g) {
     // mission suivie : démarrage automatique à l'arrivée au départ
     if (!active && tracked) {
       const st = resolved[tracked].start;
-      if (Math.hypot(p.x - st.x, p.z - st.z) <= START_RADIUS) startMission(tracked);
+      if (within(p, st, START_RADIUS)) startMission(tracked);
     }
     const a = active;
     if (!a) return;
@@ -363,13 +390,14 @@ export function createMissionRunner(g) {
     let nearest = null, nd = Infinity;
     for (const s of targets) { const d = Math.hypot(s.x - p.x, s.z - p.z); if (d < nd) { nd = d; nearest = s; } }
     let text = nearest ? nearest.label : '';
-    if (nearest && nd <= nearest.radius) {
+    if (nearest && nd <= nearest.radius && g.sameLevel(p.y, nearest.y, 6, nearest.x, nearest.z)) {
       const s = nearest, i = a.steps.indexOf(s);
-      let ok = true;
+      let ok = true, need = s.holdSec || 0;
       if (s.kind === 'photo') {
         if (inVehicle) { ok = false; text = 'Descendez du véhicule pour photographier'; }
         else if (s.lookAt && !isLookingAt(s.lookAt)) { ok = false; text = `Cadrez : ${s.lookAt.name || 'le monument'} (tournez la caméra)`; }
-        else text = 'Ne bougez plus… clic !';
+        else if (s.goldenHours && !inHours(s.goldenHours)) { need *= 3; text = 'Lumière un peu plate… pose longue, ne bougez plus'; }
+        else text = s.goldenHours ? 'Lumière dorée, parfait ! Ne bougez plus…' : 'Ne bougez plus… clic !';
       } else if (!vehicleOk && (m.requireVehicle || a.vehicle || m.vehicleMinPrice)) { ok = false; text = vehicleMsg; }
       else if (s.kind === 'pickup' || s.kind === 'dropoff' || s.kind === 'stop') {
         if (speed > 1.5) { ok = false; text = 'Arrêtez-vous'; }
@@ -377,7 +405,7 @@ export function createMissionRunner(g) {
       }
       if (ok) {
         a.hold += dt;
-        if (a.hold >= (s.holdSec || 0)) { stepDone(i); if (!active || active.phase !== 'active') return; }
+        if (a.hold >= need) { stepDone(i); if (!active || active.phase !== 'active') return; }
       } else a.hold = 0;
     } else {
       a.hold = 0;
@@ -392,8 +420,8 @@ export function createMissionRunner(g) {
       hudT = 0;
       const t2 = currentTargets();
       refreshObjective(t2, vehicleHint);
-      const dest = vehicleHint ? { x: vehicleHint.x, z: vehicleHint.z, label: vehicleMsg } : nearestOf(t2, p);
-      if (dest) g.nav.set(dest.x, dest.z, dest.label, 'mission');
+      const dest = vehicleHint ? { x: vehicleHint.x, z: vehicleHint.z, label: vehicleMsg, ele: g.eleOf(vehicleHint.x, vehicleHint.z, vehicleHint.y) } : nearestOf(t2, p);
+      if (dest) g.nav.set(dest.x, dest.z, dest.label, 'mission', dest.ele);
       emitUpdate();
     }
   }
@@ -403,6 +431,9 @@ export function createMissionRunner(g) {
     for (const s of list) { const d = Math.hypot(s.x - p.x, s.z - p.z); if (d < bd) { bd = d; b = s; } }
     return b;
   };
+
+  /** L'heure du jeu est-elle dans le créneau [h0, h1] ? */
+  const inHours = ([h0, h1]) => { const h = +store.timeOfDay; return !Number.isFinite(h) || (h >= h0 && h <= h1); };
 
   /** La caméra regarde-t-elle vers la cible (à ±40° en horizontal) ? */
   const dir = new ctx.THREE.Vector3();

@@ -16,6 +16,15 @@ void mzRoof(float h, float style, out float mh, out float rh) {
   rh = h > 11.0 ? 1.3 : 0.6;
   if (style > 2.5) { mh = 1.0; rh = 0.2; } // Art déco / moderne : attique et toit-terrasse
 }
+// Styles ≥ 5 (Toulouse) : la hauteur des données est celle de l'ÉGOUT ; le toit vient par-dessus, selon son type :
+// 1 quatre pentes en tuiles, 2 deux pentes en tuiles, 3 terrasse (acrotère), 4 deux pentes en bac acier, 5 quatre pentes en ardoise.
+// (même formule que roofRise() dans buildings.js)
+void mzRoofT(float w, float d, float rt, out float mh, out float rh) {
+  float m = min(w, d) * 0.5;
+  if (rt > 2.5 && rt < 3.5) { mh = 0.35; rh = 0.02; }
+  else if (rt > 3.5 && rt < 4.5) { mh = 0.0; rh = clamp(m * 0.12, 0.3, 2.5); }
+  else { mh = 0.0; rh = clamp(m * 0.34, 0.45, 3.4); }
+}
 void mzLayout(float L, float he, float style, out float rdc, out float nF, out float fH, out float nS, out float nB, out float bw) {
   rdc = he < 9.0 ? 3.3 : 4.4;
   nF = max(1.0, floor((he - rdc) / 3.05 + 0.5));
@@ -23,6 +32,11 @@ void mzLayout(float L, float he, float style, out float rdc, out float nF, out f
   nS = max(1.0, floor(L / 5.4 + 0.5));
   nB = L < 3.4 ? 1.0 : nS * 2.0;
   bw = max(L, 0.01) / nB;
+  if (style > 5.5) { // maisons, barres, hangars : rez-de-chaussée bas, étages de 2,8 m ; une baie par travée pour les maisons
+    rdc = he < 4.6 ? he + 0.02 : 2.9;
+    nF = max(1.0, floor((he - rdc) / 2.8 + 0.5)); fH = max((he - rdc) / nF, 0.05);
+    if (style < 6.5 || style > 8.5) { nS = max(1.0, floor(L / 4.2 + 0.5)); nB = L < 3.0 ? 1.0 : nS; bw = max(L, 0.01) / nB; }
+  }
 }
 float mzBalc(float fi, float nF, float style) { // balcon filant à l'étage fi ?
   if (style > 1.5) return 0.0;
@@ -51,10 +65,13 @@ flat varying vec4 vFD;
 flat varying vec4 vFT;
 vec3 bP; vec3 bN;
 void mzBuilding() {
-  float w = iB.x, d = iB.y, h = iB.z, style = iC.y;
-  float mh, rh; mzRoof(h, style, mh, rh);
+  float w = iB.x, d = iB.y, h = iB.z, styleRaw = iC.y, rtp = iC.w;
+  // styles ≥ 5 : rendus avec la modénature d'un style de base (5 → 1, maisons → 2, barres et hangars → 4)
+  float style = styleRaw > 4.5 ? (styleRaw < 5.5 ? 1.0 : ((styleRaw < 6.5 || styleRaw > 8.5) ? 2.0 : 4.0)) : styleRaw;
+  float mh, rh; if (styleRaw > 4.5) mzRoofT(w, d, rtp, mh, rh); else mzRoof(h, style, mh, rh);
+  float gable = (styleRaw > 4.5 && (abs(rtp - 2.0) < 0.5 || abs(rtp - 4.0) < 0.5)) ? 1.0 : 0.0, gEnd = 0.0;
   float he = h - mh - rh;
-  float inset = style > 2.5 ? 0.0 : mh * 0.3;
+  float inset = (style > 2.5 || styleRaw > 4.5) ? 0.0 : mh * 0.3;
   vec2 hf = vec2(w, d) * 0.5;
   vec3 n = vec3(aFn.x, 0.0, aFn.y);
   vec2 t = vec2(aFn.y, -aFn.x);
@@ -75,8 +92,13 @@ void mzBuilding() {
     if (lvl < 0.5) p = vec3(sg.x * hf.x, -iC.z, sg.y * hf.y);
     else if (lvl < 1.5) p = vec3(sg.x * hf.x, he, sg.y * hf.y);
     else if (lvl < 2.5) p = vec3(sg.x * (hf.x - ins.x), he + mh, sg.y * (hf.y - ins.y));
-    else p = vec3(sg.x * max(hf.x - inset - run, 0.0), he + mh + rh, sg.y * max(hf.y - inset - run, 0.0));
-    if (aPart > 1.5) { n = normalize(n * rh + vec3(0.0, run, 0.0)); vFUv = p.xz; }
+    else {
+      vec2 top = vec2(max(hf.x - inset - run, 0.0), max(hf.y - inset - run, 0.0));
+      if (gable > 0.5) { if (hf.x >= hf.y) top.x = hf.x; else top.y = hf.y; } // deux pentes : le faîte va d'un pignon à l'autre
+      p = vec3(sg.x * top.x, he + mh + rh, sg.y * top.y);
+    }
+    if (aPart > 1.5 && gable > 0.5 && ((hf.x >= hf.y) ? abs(aFn.x) : abs(aFn.y)) > 0.5) { gEnd = 1.0; vFUv = vec2(dot(p.xz, t) + L * 0.5, p.y); } // pignon (mur)
+    else if (aPart > 1.5) { n = normalize(n * rh + vec3(0.0, run, 0.0)); vFUv = p.xz; }
     else if (aPart > 0.5) { if (blind < 0.5 && inset > 0.0) n = normalize(n * mh + vec3(0.0, inset, 0.0)); vFUv = vec2(dot(p.xz, t) + L * 0.5, he + (lvl - 1.0) * mh); }
     else vFUv = vec2(dot(p.xz, t) + L * 0.5, p.y);
   } else if (aPart < 4.5) {
@@ -84,7 +106,7 @@ void mzBuilding() {
     vec2 sg = position.xz; float lvl = position.y;
     float side = aPart < 3.5 ? -1.0 : 1.0;
     float sm = min(hf.x, hf.y), lg = max(hf.x, hf.y);
-    float cs = (sm < 3.6 || style > 2.5) ? 0.0 : (sm - inset - 0.9) * 0.7;
+    float cs = (sm < 3.6 || style > 2.5 || styleRaw > 4.5) ? 0.0 : (sm - inset - 0.9) * 0.7;
     float c = side * lg * (0.42 + 0.2 * fract(iB.w * 7.31 + side * 0.37));
     float th = cs > 0.0 ? 0.32 : 0.0;
     float y = lvl < 4.5 ? he + mh - 0.3 : he + mh + rh + 1.25;
@@ -94,9 +116,9 @@ void mzBuilding() {
     vFUv = vec2(dot(sg, t) * L * 0.5, y - (he + mh + rh + 1.25));
   } else {
     // ---------- détails en volume (immeubles proches) : repère de façade (u le long du mur, y, o vers l'extérieur)
-    float rdc, nF, fH, nS, nB, bw; mzLayout(L, he, style, rdc, nF, fH, nS, nB, bw);
+    float rdc, nF, fH, nS, nB, bw; mzLayout(L, he, styleRaw, rdc, nF, fH, nS, nB, bw);
     float a = position.x, b = position.y, c = position.z;
-    float show = (1.0 - blind) * step(0.01, lodF) * step(3.4, L);
+    float show = (1.0 - blind) * step(0.01, lodF) * step(3.4, L) * step(styleRaw, 5.5);
     float u = 0.0, y = 0.0, o = 0.0;
     if (aPart < 6.5) {            // 5 dalle de balcon, 6 garde-corps
       float fi = aSlot < 0.5 ? 1.0 : nF - 1.0;
@@ -129,7 +151,7 @@ void mzBuilding() {
   vWP = bP;
   vFB = vec4(L, he, iB.w, aPart);
   vFC = vec4(mh, w, d, h);
-  vFD = vec4(blind, style, lodF, 0.0);
+  vFD = vec4(blind, styleRaw, lodF, styleRaw > 4.5 ? rtp + 10.0 * gEnd : 0.0);
   vFT = vec4(t.x * cr + t.y * sr, -t.x * sr + t.y * cr, aFn.x * cr + aFn.y * sr, -aFn.x * sr + aFn.y * cr);
 }`;
 
@@ -228,7 +250,11 @@ vec3 fRoom(vec2 g, vec3 r, float hw, float hh, float dep, float id, out float k,
 
 // ------------------------------------------------------------------ fragment : couleur / matière
 export const FRAG_MAIN = `
-float fPart = vFB.w, fL = vFB.x, fHe = vFB.y, fSeed = vFB.z, fStyle = vFD.y, fLod = vFD.z;
+float fPart = vFB.w, fL = vFB.x, fHe = vFB.y, fSeed = vFB.z, fStyleRaw = vFD.y, fLod = vFD.z;
+// styles ≥ 5 (Toulouse) : modénature d'un style de base + matières propres ; fMat = matériau des murs des données (1 brique, 2 enduit…)
+float fStyle = fStyleRaw > 4.5 ? (fStyleRaw < 5.5 ? 1.0 : ((fStyleRaw < 6.5 || fStyleRaw > 8.5) ? 2.0 : 4.0)) : fStyleRaw;
+float fRt = mod(vFD.w, 10.0), fMat = floor(fract(fStyleRaw) * 20.0 + 0.5);
+float fHouse = (fStyleRaw > 5.5 && (fStyleRaw < 6.5 || fStyleRaw > 8.5)) ? 1.0 : 0.0;
 vec2 fuv = vFUv;
 float aw = fwidth(fuv.x) * 0.7 + 1e-4, ah = fwidth(fuv.y) * 0.7 + 1e-4;
 float fRough = 0.86, fGlass = 0.0, fOcc = 0.0, fUseNt = 0.0, fTilt = 0.0; vec3 fEmis = vec3(0.0); vec3 fCol; vec3 fNt = vec3(0.0, 0.0, 1.0); vec2 fBump = vec2(0.0);
@@ -238,9 +264,22 @@ vec3 stone = t1 < 0.45 ? mix(vec3(0.80, 0.725, 0.595), vec3(0.87, 0.80, 0.67), t
 if (fStyle > 3.5) stone = mix(vec3(0.7, 0.7, 0.68), vec3(0.82, 0.81, 0.78), t3);
 else if (fStyle > 2.5) stone = t2 < 0.6 ? mix(vec3(0.60, 0.33, 0.24), vec3(0.74, 0.55, 0.36), t3) : mix(vec3(0.84, 0.8, 0.72), vec3(0.9, 0.87, 0.8), t3);
 else if (fStyle > 1.5) stone = t1 < 0.5 ? mix(vec3(0.88, 0.86, 0.8), vec3(0.8, 0.79, 0.76), t3) : mix(vec3(0.87, 0.78, 0.63), vec3(0.86, 0.76, 0.7), t3);
-stone = fS(stone);
 float fBrick = (fStyle > 2.5 && fStyle < 3.5 && t2 < 0.6) ? 1.0 : 0.0;
-float rdc, nF, fH, nS, nB, bw; mzLayout(fL, fHe, fStyle, rdc, nF, fH, nS, nB, bw);
+vec3 trim = vec3(0.0); float fTrim = 0.0;
+if (fStyleRaw > 4.5) {
+  fBrick = 0.0;
+  vec3 brickC = mix(vec3(0.70, 0.40, 0.29), vec3(0.80, 0.51, 0.37), t3);                 // brique foraine rose-orangé
+  vec3 renderC = t2 < 0.4 ? mix(vec3(0.90, 0.86, 0.76), vec3(0.93, 0.90, 0.83), t3)      // enduits : blanc cassé, sable, ocre rosé
+    : (t2 < 0.75 ? mix(vec3(0.88, 0.78, 0.60), vec3(0.91, 0.83, 0.67), t3) : mix(vec3(0.87, 0.69, 0.56), vec3(0.90, 0.80, 0.68), t3));
+  if (fStyleRaw < 5.5) { fBrick = fMat == 1.0 ? 1.0 : (fMat == 2.0 ? 0.0 : step(t1, 0.7)); stone = fBrick > 0.5 ? brickC : renderC; trim = vec3(0.86, 0.82, 0.74); fTrim = fBrick; }
+  else if (fStyleRaw < 6.5) { fBrick = fMat == 1.0 ? 1.0 : 0.0; stone = fBrick > 0.5 ? brickC : renderC; trim = vec3(0.88, 0.85, 0.78); fTrim = fBrick; }
+  else if (fStyleRaw < 7.5) { stone = t1 > 0.7 ? mix(vec3(0.84, 0.76, 0.64), vec3(0.88, 0.82, 0.72), t3) : mix(vec3(0.80, 0.79, 0.75), vec3(0.90, 0.88, 0.82), t3); if (fMat == 1.0) { stone = brickC; fBrick = 1.0; } }
+  else if (fStyleRaw < 8.5) { stone = fMat == 2.0 ? renderC : (fMat == 1.0 ? brickC : (t1 < 0.45 ? mix(vec3(0.72, 0.73, 0.74), vec3(0.84, 0.84, 0.82), t3) : (t1 < 0.7 ? vec3(0.82, 0.80, 0.70) : (t1 < 0.85 ? vec3(0.42, 0.50, 0.60) : vec3(0.50, 0.56, 0.50))))); }
+  else { fBrick = fMat == 2.0 ? 0.0 : (fMat == 1.0 ? 1.0 : step(t1, 0.6)); stone = fBrick > 0.5 ? brickC : renderC; trim = vec3(0.87, 0.83, 0.75); fTrim = fBrick; }
+}
+stone = fS(stone);
+trim = fTrim > 0.5 ? fS(trim) / 1.08 : stone; // encadrements, bandeaux et appuis (pierre ou brique claire sur les façades de brique)
+float rdc, nF, fH, nS, nB, bw; mzLayout(fL, fHe, fStyleRaw, rdc, nF, fH, nS, nB, bw);
 float bi = floor(fuv.x / bw), bu = fuv.x - (bi + 0.5) * bw;
 float ww = min(0.62, bw * 0.27);
 if (fStyle > 2.5) ww = min(1.05, bw * 0.36);
@@ -253,7 +292,23 @@ float relief = 1.0 - smoothstep(0.02, 0.085, max(aw, ah));
 float sunUp = max(st.y, 0.0) / max(st.z, 0.08); // longueur d'ombre verticale par mètre de saillie
 float sunFace = step(0.03, st.z);
 
-if (fPart < 1.5 && vFD.x > 0.5) {
+if (fStyleRaw > 7.5 && fStyleRaw < 8.5 && fPart < 1.5) {
+  // ================= hangar, commerce, annexe : bardage nervuré (ou enduit), soubassement, portes sectionnelles — très peu coûteux
+  float det = 1.0 - smoothstep(0.03, 0.12, aw), plain = fMat == 2.0 || fMat == 1.0 ? 1.0 : 0.0;
+  float rib = fBox(fract(fuv.x / 0.3), 0.0, 0.5, aw / 0.3) * (1.0 - plain);
+  fCol = stone * (0.88 + 0.14 * fNoise(fuv * vec2(0.2, 0.05) + fSeed * 3.0)) * (1.0 - 0.1 * rib * det);
+  fCol *= 1.0 - 0.18 * smoothstep(0.5, 0.9, fNoise(vec2(fuv.x * 1.3 + fSeed, fuv.y * 0.05)));          // coulures
+  float big = step(5.5, fHe);
+  fCol = mix(fCol, fS(vec3(0.60, 0.59, 0.56)), fBox(fuv.y, -9.0, 0.25 + 0.65 * big, ah) * 0.9);        // soubassement
+  fCol = mix(fCol, fS(fPal(t2 * 2.99 + 0.02)) * 0.7, fBox(fuv.y, fHe - 0.9, fHe + 3.0, ah) * step(0.55, t3) * big * (1.0 - plain)); // bandeau de couleur
+  float sw = fL / max(1.0, floor(fL / 13.0 + 0.5)), si = floor(fuv.x / sw), sx = fuv.x - (si + 0.5) * sw;
+  float dw = big > 0.5 ? 2.0 : min(1.25, fL * 0.5 - 0.3), dh = min(big > 0.5 ? 4.2 : 2.1, fHe - 0.3);
+  float door = fBox(sx, -dw, dw, aw) * fBox(fuv.y, 0.0, dh, ah) * step(0.45, fH21(vec2(si + fSeed * 3.0, fL))) * step(2.6, fL) * (1.0 - vFD.x);
+  fCol = mix(fCol, fS(vec3(0.80, 0.81, 0.82)) * (0.82 + 0.18 * step(0.5, fract(fuv.y / 0.5))) * (1.0 - 0.3 * fBox(fuv.y, dh - 0.12, dh, ah)), door);
+  fCol *= mix(0.72, 1.0, smoothstep(0.0, 1.4, fuv.y));
+  fRough = mix(plain > 0.5 ? 0.9 : 0.55, 0.5, door);
+  fEmis += fCol * vec3(1.0, 0.68, 0.36) * uNight * 0.16 * (1.0 - smoothstep(0.5, 9.0, fuv.y));
+} else if (fPart < 1.5 && vFD.x > 0.5) {
   // ================= mur mitoyen / pignon aveugle : enduit, héberges, traces de conduits
   vec3 pl = fS(mix(vec3(0.74, 0.71, 0.65), vec3(0.83, 0.79, 0.7), t3));
   float n1 = fNoise(fuv * vec2(0.22, 0.09) + fSeed * 7.0), n2 = fNoise(fuv * 2.7 + fSeed);
@@ -278,7 +333,7 @@ if (fPart < 1.5 && vFD.x > 0.5) {
     float joint = max(fBox(fract(fuv.y / 0.075), 0.0, 0.16, ah / 0.075), fBox(bx, 0.0, 0.06, aw / 0.23));
     fCol *= mix(1.0, 0.82 + 0.36 * fH21(vec2(floor(fuv.x / 0.23 + 0.5 * mod(row, 2.0)), row)), detail);
     fCol = mix(fCol, vec3(0.62, 0.58, 0.5), joint * detail * 0.75);
-  } else if (fStyle < 1.5) {
+  } else if (fStyle < 1.5 && fStyleRaw < 4.5) {
     // appareillage de pierre de taille : assises de 34 cm, joints verticaux décalés
     float row = floor(fuv.y / 0.34), jx = fract(fuv.x / 0.95 + 0.5 * mod(row, 2.0));
     float joint = max(fBox(fract(fuv.y / 0.34), 0.0, 0.03, ah / 0.34), fBox(jx, 0.0, 0.011, aw / 0.95));
@@ -296,7 +351,7 @@ if (fPart < 1.5 && vFD.x > 0.5) {
     fCol *= 1.0 - 0.06 * orn * fBox(abs(bu), bw * 0.5 - 0.06, bw * 0.5 + 0.1, aw);
     // bandeau d'étage (saillie de 6 cm : dessus clair, ombre portée dessous)
     float band = fBox(fv, -0.05, 0.2, ah) * orn;
-    fCol = mix(fCol, stone * 1.07, band * 0.85);
+    fCol = mix(fCol, trim * 1.07, band * 0.85);
     fOcc = max(fOcc, orn * sunFace * fBox(fv, fH - 0.06 * sunUp - 0.02, fH, ah));
     // corniche sommitale et dalle de balcon de l'étage supérieur : ombre portée analytique (saillie 0,4 / 0,62 m)
     float proj = max(0.62 * balcUp, 0.42 * top * step(fStyle, 3.5));
@@ -307,12 +362,12 @@ if (fPart < 1.5 && vFD.x > 0.5) {
     float wy0 = (fStyle > 2.5 ? 0.95 : 0.26) - 0.1 * balc, wy1 = fH - (fStyle > 2.5 ? 0.5 : 0.62);
     float inW = fBox(bu, -ww, ww, aw) * fBox(fv, wy0, wy1, ah);
     float surround = fBox(bu, -ww - 0.17, ww + 0.17, aw) * fBox(fv, wy0 - 0.04, wy1 + 0.2, ah) * orn;
-    fCol = mix(fCol, stone * 1.09, surround * 0.75);
+    fCol = mix(fCol, trim * 1.09, surround * 0.75);
     // linteau saillant + clef, appui saillant : ombres portées
     fCol = mix(fCol, stone * 0.72, fBox(bu, -ww - 0.24, ww + 0.24, aw) * fBox(fv, wy1 + 0.2, wy1 + 0.27, ah) * 0.7 * orn);
     fCol = mix(fCol, stone * 1.12, fBox(abs(bu), -1.0, 0.11, aw) * fBox(fv, wy1 + 0.01, wy1 + 0.2, ah) * 0.6 * orn * step(fStyle, 0.5));
     float sill = fBox(bu, -ww - 0.1, ww + 0.1, aw) * fBox(fv, wy0 - 0.09, wy0 - 0.01, ah) * (1.0 - balc);
-    fCol = mix(fCol, stone * 1.1, sill * 0.8);
+    fCol = mix(fCol, trim * 1.1, sill * 0.8);
     fOcc = max(fOcc, sunFace * (1.0 - balc) * fBox(bu + 0.05 * st.x / max(st.z, 0.08), -ww - 0.1, ww + 0.1, aw) * fBox(fv, wy0 - 0.09 - 0.07 * sunUp, wy0 - 0.09, ah));
     // coulures sous l'appui
     fCol *= 1.0 - 0.2 * (1.0 - balc) * fBox(bu, -ww - 0.05, ww + 0.05, 0.08) * (1.0 - smoothstep(wy0 - 1.1, wy0 - 0.1, fv)) * step(0.0, wy0 - 0.1 - fv) * (1.0 - smoothstep(0.0, 1.2, wy0 - fv)) * (0.4 + 0.9 * fNoise(vec2(fuv.x * 9.0, fuv.y * 0.7)));
@@ -373,7 +428,12 @@ if (fPart < 1.5 && vFD.x > 0.5) {
     if (wSide > 0.5 && inW > 0.5) { fNt = wnt; fUseNt = 1.0; }
     // ---------- garde-corps peint (s'efface quand le vrai volume prend le relais) / appuis de fenêtre en fonte
     float rTop = wy0 + 0.92;
-    float gz = fBox(bu, -ww - 0.04, ww + 0.04, aw) * (1.0 - balc) * step(fStyle, 2.5);
+    if (fHouse > 0.5) { // volets battants ouverts de part et d'autre de la baie
+      float sht = fBox(abs(bu), ww + 0.04, ww * 1.9, aw) * fBox(fv, wy0 - 0.02, wy1 + 0.02, ah);
+      vec3 shC = fS(t2 < 0.3 ? vec3(0.42, 0.55, 0.66) : (t2 < 0.5 ? vec3(0.45, 0.56, 0.47) : (t2 < 0.75 ? vec3(0.80, 0.78, 0.72) : vec3(0.45, 0.30, 0.22))));
+      fCol = mix(fCol, shC * (0.82 + 0.18 * step(0.5, fract(fv / 0.09))), sht); fGlass *= 1.0 - sht; fEmis *= 1.0 - sht;
+    }
+    float gz = fBox(bu, -ww - 0.04, ww + 0.04, aw) * (1.0 - balc) * step(fStyle, 2.5) * (1.0 - fHouse);
     float ironW = gz * fIron(fuv.x, fv - wy0 + 0.03, aw, ah) * fBox(fv, wy0, rTop + 0.06, ah);
     float ironB = balc * (1.0 - fLod) * fIron(fuv.x, fv - 0.03, aw, ah) * fBox(fv, 0.03, 1.03, ah);
     float iron = max(ironW, ironB);
@@ -387,15 +447,18 @@ if (fPart < 1.5 && vFD.x > 0.5) {
     float y = fuv.y;
     float sw = fL / nS, si = floor(fuv.x / sw), sx = fuv.x - (si + 0.5) * sw;
     vec3 shp = mzShop(si, fSeed, fL); float sh = shp.x, sh2 = shp.y, sh3 = shp.z;
+    // maisons, barres : pas de boutique ; une porte (d'entrée ou de garage) au milieu d'une façade sur deux
+    if (fStyleRaw > 5.5) sh = (si == floor(nS * 0.5) && fract(fSeed * 13.7 + fL * 0.37) < 0.5) ? 0.7 : 0.9;
     // refends + soubassement (qui descend jusqu'au sol sur les pentes)
-    float rfm = fBox(fract(y / 0.46), 0.0, 0.085, ah / 0.46) * (1.0 - smoothstep(0.05, 0.2, ah)) * step(fStyle, 2.5);
+    float rfm = fBox(fract(y / 0.46), 0.0, 0.085, ah / 0.46) * (1.0 - smoothstep(0.05, 0.2, ah)) * step(fStyle, 2.5) * step(fStyleRaw, 5.5);
     fCol *= 1.0 - 0.22 * rfm;
     fCol = mix(fCol, stone * 0.6, fBox(y, -9.0, 0.5, ah) * 0.7);
     fCol *= 1.0 - 0.12 * fBox(y, 0.5, 0.56, ah);
     // entablement sous le 1er étage
-    fCol = mix(fCol, stone * 1.05, fBox(y, rdc - 0.3, rdc + 0.1, ah) * 0.8);
-    fCol *= 1.0 - 0.3 * fBox(y, rdc - 0.42, rdc - 0.3, ah);
-    fOcc = max(fOcc, sunFace * fBox(y, rdc - 0.3 - 0.08 * sunUp, rdc - 0.3, ah));
+    float entab = 1.0 - fHouse;
+    fCol = mix(fCol, trim * 1.05, fBox(y, rdc - 0.3, rdc + 0.1, ah) * 0.8 * entab);
+    fCol *= 1.0 - 0.3 * fBox(y, rdc - 0.42, rdc - 0.3, ah) * entab;
+    fOcc = max(fOcc, sunFace * fBox(y, rdc - 0.3 - 0.08 * sunUp, rdc - 0.3, ah) * entab);
     float pil = 0.34;
     float inShop = fBox(sx, -sw * 0.5 + pil, sw * 0.5 - pil, aw) * fBox(y, 0.0, rdc - 0.5, ah);
     if (fL < 3.4) inShop = 0.0;
@@ -473,7 +536,9 @@ if (fPart < 1.5 && vFD.x > 0.5) {
       // ---- porte cochère en retrait de 45 cm sous son arc
       vec3 dc = fPal(sh2 * 2.99 + 0.02) * 0.9;
       float dh = min(rdc - 0.95, 3.5), dwid = min(1.35, sw * 0.5 - 0.6);
+      if (fStyleRaw > 5.5) { dh = min(rdc - 0.3, 2.15); dwid = min(sh2 < 0.5 ? 0.48 : 1.2, sw * 0.5 - 0.3); } // porte d'entrée ou de garage
       float arch = y - (dh - dwid) > 0.0 ? length(vec2(sx, y - (dh - dwid))) : abs(sx);
+      if (fStyleRaw > 5.5) arch = abs(sx);
       float din = (1.0 - smoothstep(dwid - aw, dwid + aw, arch)) * fBox(y, 0.0, dh + 0.1, ah);
       float dsur = (1.0 - smoothstep(dwid + 0.22 - aw, dwid + 0.22 + aw, arch)) * fBox(y, 0.0, dh + 0.4, ah);
       fCol = mix(fCol, stone * 1.08, dsur * 0.8);
@@ -501,9 +566,15 @@ if (fPart < 1.5 && vFD.x > 0.5) {
     } else {
       // ---- mur à fenêtres (logements / bureaux au rez-de-chaussée), barreaudées
       float y0 = 1.15, y1 = rdc - 1.0;
+      if (fStyleRaw > 5.5) { y0 = 0.95; y1 = min(2.15, rdc - 0.42); }
       float inW = fBox(bu, -ww, ww, aw) * fBox(y, y0, y1, ah);
-      float surround = fBox(bu, -ww - 0.15, ww + 0.15, aw) * fBox(y, 1.05, rdc - 0.82, ah);
-      fCol = mix(fCol, stone * 1.08, surround * 0.7);
+      float surround = fBox(bu, -ww - 0.15, ww + 0.15, aw) * fBox(y, y0 - 0.1, y1 + 0.18, ah);
+      fCol = mix(fCol, trim * 1.08, surround * 0.7);
+      if (fHouse > 0.5) { // volets battants ouverts
+        float sht = fBox(abs(bu), ww + 0.04, ww * 1.9, aw) * fBox(y, y0 - 0.02, y1 + 0.02, ah);
+        vec3 shC = fS(t2 < 0.3 ? vec3(0.42, 0.55, 0.66) : (t2 < 0.5 ? vec3(0.45, 0.56, 0.47) : (t2 < 0.75 ? vec3(0.80, 0.78, 0.72) : vec3(0.45, 0.30, 0.22))));
+        fCol = mix(fCol, shC * (0.82 + 0.18 * step(0.5, fract(y / 0.09))), sht);
+      }
       vec2 wq = vec2(bu, y); float wSide = 0.0, wz = 0.0; vec3 wnt = vec3(0.0, 0.0, 1.0); float wLit = 1.0;
 #ifdef MZ_RELIEF
       float D = 0.24 * relief;
@@ -513,7 +584,7 @@ if (fPart < 1.5 && vFD.x > 0.5) {
       float frame = fFrame(wq.x, wq.y, ww, y0, y1, aw, ah);
       vec3 wc = wSide > 0.5 ? stone * 0.9 : mix(vec3(0.02, 0.025, 0.03), vec3(0.7, 0.69, 0.66), frame);
       wc *= 1.0 - 0.4 * (1.0 - relief) * smoothstep(rdc - 1.3, rdc - 1.0, y);
-      float bars = fBox(fract(fuv.x * 9.0), 0.0, 0.2, aw * 9.0) * (1.0 - smoothstep(0.03, 0.1, aw));
+      float bars = fBox(fract(fuv.x * 9.0), 0.0, 0.2, aw * 9.0) * (1.0 - smoothstep(0.03, 0.1, aw)) * step(fStyleRaw, 5.5);
       wc = mix(wc, vec3(0.015), bars * 0.8);
       float em = inW * (1.0 - frame) * step(0.7, wid) * uNight * (1.0 - step(0.5, wSide));
       fEmis += em * vec3(1.0, 0.75, 0.42) * 0.6;
@@ -523,6 +594,16 @@ if (fPart < 1.5 && vFD.x > 0.5) {
       fOcc = mix(fOcc, 1.0 - wLit, inW);
       if (wSide > 0.5 && inW > 0.5) { fNt = wnt; fUseNt = 1.0; }
     }
+  }
+  // génoise : rangs de tuiles en encorbellement sous l'égout des toits de tuiles (Toulouse)
+  if (fStyleRaw > 4.5 && (fRt < 2.5 || fRt > 4.5) && (fStyleRaw < 7.5 || fStyleRaw > 8.5)) {
+    float gy = (fuv.y - (fHe - 0.27)) / 0.27;
+    if (gy > 0.0) {
+      float row = floor(gy * 3.0), sc = abs(sin((fuv.x / 0.21 + 0.5 * mod(row, 2.0)) * 3.14159));
+      vec3 gc = fS(vec3(0.76, 0.48, 0.33)) * mix(0.85, 0.5 + 0.65 * sc, 1.0 - smoothstep(0.02, 0.07, aw)) * (0.75 + 0.25 * fract(gy * 3.0));
+      fCol = gc; fGlass = 0.0; fEmis = vec3(0.0); fUseNt = 0.0;
+    }
+    fCol *= 1.0 - 0.3 * fBox(fuv.y, fHe - 0.5, fHe - 0.27, ah);
   }
   // descente d'eaux pluviales en zinc à l'angle
   float pipe = fBox(fuv.x, 0.14, 0.24, aw) * step(6.0, fL) * step(0.35, fuv.y) * step(fStyle, 2.5) * (1.0 - smoothstep(0.03, 0.1, aw));
@@ -537,7 +618,7 @@ if (fPart < 1.5 && vFD.x > 0.5) {
 } else if (fPart < 1.5) {
   // ================= brisis de mansarde (zinc / ardoise) + lucarnes peintes (au loin) — ou attique des toits-terrasses
   float mh = vFC.x, my = fuv.y - fHe;
-  if (fStyle > 2.5) {
+  if (fStyle > 2.5 || fStyleRaw > 4.5) {
     fCol = stone * (0.9 + 0.12 * fNoise(fuv * vec2(0.4, 1.3) + fSeed)) * (1.0 - 0.25 * fBox(my, mh - 0.14, mh + 0.1, ah));
     fCol = mix(fCol, stone * 1.1, fBox(my, mh - 0.3, mh - 0.14, ah));
   } else {
@@ -576,8 +657,38 @@ if (fPart < 1.5 && vFD.x > 0.5) {
     }
   }
 } else if (fPart < 2.5) {
-  // ================= terrasson (zinc à tasseaux) ou toit-terrasse gravillonné
-  if (fStyle > 2.5) {
+  // ================= terrasson (zinc à tasseaux) ou toit-terrasse gravillonné ; Toulouse : tuiles canal, bac acier, terrasse
+  if (fStyleRaw > 4.5) {
+    if (vFD.w > 9.5) { // pignon : le mur monte jusqu'au faîte
+      fCol = stone * (0.86 + 0.14 * fNoise(fuv * vec2(0.3, 0.12) + fSeed * 5.0));
+      if (fBrick > 0.5) fCol *= mix(1.0, 0.86 + 0.28 * fH21(vec2(floor(fuv.x / 0.23), floor(fuv.y / 0.075))), 1.0 - smoothstep(0.012, 0.05, max(aw, ah)));
+      fRough = 0.9;
+    } else if (fRt > 2.5 && fRt < 3.5) { // terrasse : étanchéité gravillonnée, lanterneaux
+      fCol = fS(vec3(0.55, 0.54, 0.51)) * (0.8 + 0.4 * fNoise(fuv * 0.5 + fSeed)) * (0.9 + 0.2 * fNoise(fuv * 9.0));
+      vec2 vf = fract(fuv / vec2(9.0, 7.0)); float vr = fH21(floor(fuv / vec2(9.0, 7.0)) + fSeed);
+      float lan = step(0.82, vr) * fBox(vf.x, 0.35, 0.6, fwidth(fuv.x) / 9.0) * fBox(vf.y, 0.3, 0.6, fwidth(fuv.y) / 7.0);
+      fCol = mix(fCol, fS(vec3(0.82, 0.84, 0.86)), lan);
+      fRough = 0.95;
+    } else {
+      float cu = vWP.x * vFT.x + vWP.z * vFT.y, cw = fwidth(cu) + 1e-4, ch = fwidth(vWP.y) + 1e-4;
+      float det = 1.0 - smoothstep(0.03, 0.14, cw);
+      if (fRt > 3.5 && fRt < 4.5) { // bac acier nervuré, plaques translucides
+        float rb = fBox(fract(cu / 0.33), 0.0, 0.14, cw / 0.33) * det;
+        fCol = fS(mix(vec3(0.58, 0.60, 0.62), vec3(0.70, 0.71, 0.70), t3)) * (0.86 + 0.22 * fNoise(fuv * 0.3 + fSeed)) * (1.0 - 0.28 * rb);
+        float tr = step(0.8, fH21(vec2(floor(cu / 6.0), fSeed))) * fBox(fract(cu / 6.0), 0.3, 0.5, cw / 6.0);
+        fCol = mix(fCol, fS(vec3(0.78, 0.82, 0.80)), tr * 0.8);
+        fRough = 0.5;
+      } else { // tuiles canal (ou ardoise) : rangs de couvert et de courant dans le sens de la pente
+        float fx = fract(cu / 0.2), row = floor(vWP.y / 0.1);
+        vec3 tile = fRt > 4.5 ? mix(vec3(0.25, 0.27, 0.31), vec3(0.33, 0.35, 0.39), t3) : mix(vec3(0.70, 0.41, 0.28), vec3(0.80, 0.54, 0.37), t3);
+        float var = fH21(vec2(floor(cu / 0.2), row + fSeed));
+        float chan = fBox(fx, 0.0, 0.3, cw / 0.2), lap = fBox(fract(vWP.y / 0.1), 0.0, 0.2, ch / 0.1) * (1.0 - smoothstep(0.02, 0.06, ch));
+        fCol = fS(tile) * (0.8 + 0.34 * fNoise(fuv * 0.35 + fSeed * 3.0)) * mix(1.0, 0.8 + 0.4 * var, det) * (1.0 - 0.4 * chan * det) * (1.0 - 0.22 * lap);
+        fCol = mix(fCol, fCol * vec3(0.78, 0.82, 0.68), 0.55 * smoothstep(0.5, 0.82, fNoise(fuv * 0.9 + fSeed * 11.0))); // patine, lichens
+        fRough = 0.86;
+      }
+    }
+  } else if (fStyle > 2.5) {
     fCol = fS(vec3(0.5, 0.5, 0.5)) * (0.8 + 0.4 * fNoise(fuv * 0.5 + fSeed)) * (0.9 + 0.2 * fNoise(fuv * 9.0));
     fRough = 0.95;
   } else {

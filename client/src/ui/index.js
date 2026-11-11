@@ -1,32 +1,21 @@
-// Interface « Mission Zéro » : chargement, accueil, HUD, minicarte, carte, téléphone, panneaux, chat.
+// Interface « Mission Zéro » : chargement, choix de la ville, accueil, HUD, minicarte, carte, téléphone, panneaux, chat.
 // Contrat : createUI(ctx) -> { update(dt), open(panel, data), close(), isOpen() }.
 // L'interface ne modifie jamais l'argent : elle émet des intent:* sur le bus.
-import { h, icon, zc, fmtInt, fmtDist, fmtClock, fmtHour, copyText, lsGet, lsSet, clamp } from './util.js';
+// Rien n'est propre à une ville ici : noms, styles et textes viennent de ctx.city (voir welcome.js, cityart.js, tiles.js).
+import { h, icon, zc, fmtInt, fmtDist, fmtClock, fmtHour, lsGet, clamp } from './util.js';
+import { shell } from './welcome.js';
 import { createMaps } from './maps.js';
-import { createPanels, controlsGrid } from './panels.js';
+import { createPanels } from './panels.js';
 import { VEHICLE_BY_ID } from '@shared/catalog.js';
-
-const STEP_LABEL = { env: 'Ciel de Paris', world: 'Rues et immeubles', monuments: 'Monuments', vehicles: 'Véhicules', player: 'Personnage', traffic: 'Circulation', gameplay: 'Missions et immobilier', net: 'Connexion', ui: 'Interface', audio: 'Ambiance sonore' };
-const STEPS = Object.keys(STEP_LABEL);
-const SKYLINE = `<svg class="mz-skyline" viewBox="0 0 1200 300" preserveAspectRatio="xMidYMax slice" aria-hidden="true">
-<g fill="none" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round" stroke-linecap="round">
-<path d="M0 262h70v-22h14v-10h8v10h40v-16h10v16h36v24h44v-30l22-14 22 14v30h30v-20h12v-12h8v12h46v-26h10v26h30v22h60"/>
-<path d="M462 262c18-4 40-22 58-62 22-48 34-104 38-176h4c4 72 16 128 38 176 18 40 40 58 58 62"/>
-<path d="M498 262c14-4 28-12 42-26h40c14 14 28 22 42 26M523 200h74M536 160h48M548 118h24M560 24v-18"/>
-<path d="M540 236c8-14 32-14 40 0"/>
-<path d="M658 262h54v-18h10v-12h8v12h44v-24h12v24h30v18h40v-34h8c0-20 12-34 26-36v-10h4v10c14 2 26 16 26 36h8v34h22v-52c0-10 6-16 12-16s12 6 12 16v52h36v-22h14v-10h8v10h42v-18h10v18h36v22h68"/>
-</g></svg>`;
 
 export function createUI(ctx) {
   const { bus, store, params } = ctx;
   const root = ctx.uiRoot || document.body;
-  const ui = h('div', { class: 'mz' });
-  root.appendChild(ui);
-  const autostart = !!params?.get('autostart');
-  const coarse = (window.matchMedia?.('(pointer: coarse)').matches) || 'ontouchstart' in window || params?.get('touch') === '1';
-  const isCompact = () => coarse || window.innerHeight < 520 || window.innerWidth < 720;
-  const applyCompact = () => { ui.classList.toggle('mz-compact', isCompact()); ui.classList.toggle('mz-touch', !!coarse); };
-  applyCompact();
+  const ui = shell.ui;
+  if (ui.parentNode !== root) root.appendChild(ui);
+  shell.attach(bus);
+  const city = ctx.city || shell.city;
+  const { autostart, coarse, isCompact } = shell;
 
   const S = { logged: false, panel: null, chat: false, welcome: !autostart, net: 'connecting', booted: false, toggleT: 0, togglePanel: null, selfUnlockT: 0 };
   const player = () => ctx.player || {};
@@ -39,71 +28,33 @@ export function createUI(ctx) {
   }
 
   // =====================================================================
-  // Chargement + accueil
+  // Chargement + accueil (l'écran lui-même vit dans welcome.js, créé dès l'import)
   // =====================================================================
-  const bootBar = h('i');
-  const bootStep = h('span', { class: 'mz-boot-step', text: 'Préparation…' });
-  const boot = h('div', { class: 'mz-boot' }, h('div', { class: 'mz-bar' }, bootBar), bootStep);
-  const nameIn = h('input', { class: 'mz-input', id: 'mz-name', type: 'text', maxlength: '16', autocomplete: 'off', spellcheck: 'false', placeholder: 'Votre pseudo', value: lsGet('mz.name', '') });
-  const cleanRoom = (v) => String(v || '').toLowerCase().normalize('NFD').replace(/[^a-z0-9-]/g, '').slice(0, 20);
-  const roomIn = h('input', { class: 'mz-input', id: 'mz-room', type: 'text', maxlength: '20', autocomplete: 'off', spellcheck: 'false', placeholder: 'paris', value: cleanRoom(params?.get('room')) || lsGet('mz.room', '') || 'paris' });
-  roomIn.addEventListener('input', () => { const c = cleanRoom(roomIn.value); if (c !== roomIn.value) roomIn.value = c; });
-  const playBtn = h('button', { class: 'mz-btn mz-btn--gold mz-btn--lg mz-play', type: 'submit' }, h('span', { text: 'Jouer' }));
-  const copyLbl = h('span', { text: 'Copier le lien d’invitation' });
-  const netPill = h('span', { class: 'mz-pill is-connecting' }, h('i'), h('span', { text: 'Connexion au serveur…' }));
-  const inviteUrl = () => `${location.origin}${location.pathname}?room=${encodeURIComponent(cleanRoom(roomIn.value) || 'paris')}`;
-  const form = h('form', { class: 'mz-login', hidden: true, onsubmit: (e) => { e.preventDefault(); login(); } },
-    h('label', { class: 'mz-field', for: 'mz-name' }, h('span', { text: 'Pseudo' }), nameIn),
-    h('label', { class: 'mz-field', for: 'mz-room' }, h('span', { text: 'Code de salle' }),
-      h('div', { class: 'mz-inputrow' }, roomIn,
-        h('button', { class: 'mz-iconbtn', type: 'button', title: 'Créer une salle privée', onclick: () => { const w = ['lutece', 'pigalle', 'bastille', 'odeon', 'rivoli', 'vendome', 'belleville', 'chatelet']; roomIn.value = `${w[Math.floor(Math.random() * w.length)]}-${100 + Math.floor(Math.random() * 900)}`; copyLbl.textContent = 'Copier le lien d’invitation'; } }, icon('dice')))),
-    h('p', { class: 'mz-hint', text: 'Même code = même partie. Partagez-le avec vos amis.' }),
-    playBtn,
-    h('button', { class: 'mz-btn mz-btn--ghost mz-copy', type: 'button', onclick: async () => { const ok = await copyText(inviteUrl()); copyLbl.textContent = ok ? 'Lien copié dans le presse-papiers' : inviteUrl(); } }, icon('copy', 15), copyLbl),
-    netPill);
-  const welcome = h('div', { class: 'mz-welcome' + (autostart ? ' is-auto' : '') },
-    h('div', { html: SKYLINE, class: 'mz-skywrap' }),
-    h('div', { class: 'mz-welcome-in' },
-      h('div', { class: 'mz-hero' },
-        h('span', { class: 'mz-eyebrow', text: 'Paris · monde ouvert · multijoueur' }),
-        h('h1', { class: 'mz-title' }, h('em', { text: 'Mission' }), h('b', { text: 'Zéro' })),
-        h('p', { class: 'mz-tagline', text: 'Partez de rien. Roulez, livrez, investissez — et offrez-vous Paris, de la Concorde à Montmartre.' }),
-        boot, form),
-      h('aside', { class: 'mz-howto', hidden: true }, h('span', { class: 'mz-eyebrow', text: 'Commandes' }), controlsGrid(),
-        h('p', { class: 'mz-hint', text: 'Sur mobile : joystick à gauche, boutons à droite, en mode paysage.' }))));
-  ui.appendChild(welcome);
+  // Données de la ville absentes : main.js s'est rabattu sur le petit jeu d'essai → on le dit clairement.
+  const wdMeta = ctx.worldData?.meta || {};
+  const sample = wdMeta.source === 'sample' || !(ctx.worldData?.roads?.length > 0);
+  if (sample) shell.notice(`Les données de ${city.name} ne sont pas disponibles pour le moment : un quartier d’essai est chargé à la place.${shell.otherCities().length ? ' Vous pouvez choisir une autre ville.' : ''}`);
 
-  let stepN = 0;
-  bus.on('boot:progress', (p) => {
-    const i = STEPS.indexOf(p?.step); stepN = i >= 0 ? i + 1 : stepN + 1;
-    bootBar.style.transform = `scaleX(${clamp(stepN / (STEPS.length + 1), 0.04, 1)})`;
-    bootStep.textContent = (STEP_LABEL[p?.step] || 'Chargement') + '…';
-  });
+  let welcomeGone = false;
   function hideWelcome() {
-    if (!S.welcome && welcome.hidden) return;
-    S.welcome = false; welcome.classList.add('is-out');
-    setTimeout(() => { welcome.hidden = true; }, 650);
+    if (welcomeGone) return;
+    welcomeGone = true; S.welcome = false; shell.hide();
     ui.classList.add('is-live'); capture();
   }
   bus.on('boot:done', () => {
     S.booted = true;
-    bootBar.style.transform = 'scaleX(1)';
+    shell.ready();
     bus.emit('audio:volume', { value: Number(lsGet('mz.volume', '0.7')) });
     maps.resizeMini();
-    if (autostart) { S.logged = true; setTimeout(hideWelcome, 150); return; }
-    boot.hidden = true; form.hidden = false; welcome.querySelector('.mz-howto').hidden = false;
-    welcome.classList.add('is-ready'); capture();
-    if (!coarse) setTimeout(() => (nameIn.value ? playBtn : nameIn).focus(), 50);
+    if (autostart) { S.logged = true; setTimeout(hideWelcome, 150); if (sample) setTimeout(() => toast(`Données de ${city.name} indisponibles : quartier d’essai chargé.`, 'error'), 600); return; }
+    capture();
   });
-  function login() {
+  shell.onPlay = (name, room) => {
     if (S.logged) return;
-    const name = nameIn.value.trim().slice(0, 16) || `Flâneur${100 + Math.floor(Math.random() * 900)}`;
-    const room = cleanRoom(roomIn.value) || 'paris';
-    lsSet('mz.name', name); lsSet('mz.room', room);
-    S.logged = true; playBtn.disabled = true; playBtn.firstChild.textContent = 'Connexion…';
+    S.logged = true;
     bus.emit('intent:login', { name, room });
     setTimeout(hideWelcome, 2500); // repli si net:welcome tarde
-  }
+  };
   bus.on('net:welcome', (p) => { setNet(p?.offline ? 'offline' : 'online'); S.logged = true; hideWelcome(); });
 
   // =====================================================================
@@ -117,7 +68,7 @@ export function createUI(ctx) {
   const netChip = h('span', { class: 'mz-chipstat mz-netchip', hidden: true }, icon('offline', 14), h('span', { text: 'Hors ligne' }));
   const tr = h('div', { class: 'mz-tr' },
     h('div', { class: 'mz-wallet' }, h('span', { class: 'mz-wallet-s', text: 'Ƶ' }), moneyV, floats),
-    h('div', { class: 'mz-meta' }, netChip, h('span', { class: 'mz-chipstat', title: 'Joueurs en ligne' }, icon('users', 14), onlineV), h('span', { class: 'mz-chipstat', title: 'Heure à Paris' }, hourIco, hourV)),
+    h('div', { class: 'mz-meta' }, netChip, h('span', { class: 'mz-chipstat', title: 'Joueurs en ligne' }, icon('users', 14), onlineV), h('span', { class: 'mz-chipstat mz-citychip', title: city.tagline || city.name }, icon('pin', 13), h('span', { text: city.name })), h('span', { class: 'mz-chipstat', title: `Heure à ${city.name}` }, hourIco, hourV)),
     h('div', { class: 'mz-tbtns' },
       h('button', { class: 'mz-iconbtn', type: 'button', 'aria-label': 'Téléphone', onclick: () => api.open('phone') }, icon('phone')),
       h('button', { class: 'mz-iconbtn', type: 'button', 'aria-label': 'Carte', onclick: () => api.open('map') }, icon('map')),
@@ -149,8 +100,8 @@ export function createUI(ctx) {
   });
 
   // Minicarte, plaque de rue, GPS
-  const plaqueT = h('span');
-  const plaque = h('div', { class: 'mz-plaque', hidden: true }, plaqueT);
+  const plaqueT = h('span'), plaqueR = h('b', { hidden: true });
+  const plaque = h('div', { class: 'mz-plaque', hidden: true }, h('div', { class: 'mz-plaque-in' }, plaqueR, plaqueT));
   const gpsT = h('span'), gpsD = h('b');
   const gpsChip = h('div', { class: 'mz-gps', hidden: true }, icon('pin', 14), gpsT, gpsD);
   const maps = createMaps(ctx, {
@@ -265,8 +216,7 @@ export function createUI(ctx) {
 
   function setNet(state) {
     S.net = state;
-    const txt = { online: 'Serveur en ligne', offline: 'Hors ligne — progression enregistrée sur cet appareil', connecting: 'Connexion au serveur…', reconnecting: 'Reconnexion…' }[state] || state;
-    netPill.className = 'mz-pill is-' + state; netPill.lastChild.textContent = txt;
+    shell.setNet(state);
     netChip.hidden = state === 'online' || (state === 'connecting' && !S.logged);
     netChip.className = 'mz-chipstat mz-netchip is-' + state;
     netChip.lastChild.textContent = state === 'offline' ? 'Hors ligne' : 'Reconnexion…';
@@ -276,7 +226,7 @@ export function createUI(ctx) {
   // =====================================================================
   // Panneaux
   // =====================================================================
-  const panels = createPanels(ctx, { maps, open: (p, d) => api.open(p, d), close: () => api.close(), netState: () => S.net });
+  const panels = createPanels(ctx, { maps, open: (p, d) => api.open(p, d), close: () => api.close(), netState: () => S.net, switchCity: (id) => shell.switchCity(id, store.room), inviteUrl: () => shell.inviteUrl(store.room), otherCities: shell.otherCities });
   ui.append(maps.bigEl, ...panels.els);
 
   const api = {
@@ -299,6 +249,11 @@ export function createUI(ctx) {
     },
     isOpen: () => S.welcome || S.panel != null || S.chat,
     toast,
+    /** Recharge la page dans une autre ville (ctx.cities) en gardant salle, qualité, etc. */
+    switchCity: (id) => shell.switchCity(id, store.room),
+    /** Mesures des cartes (préparation, tuiles, ms par image). */
+    mapStats: () => maps.stats(),
+    maps,
   };
   const recentKey = (p) => performance.now() - S.toggleT < 300 && S.togglePanel === p;
   bus.on('ui:open', (p) => { if (!p?.panel || recentKey(p.panel)) return; api.open(p.panel, p.data); });
@@ -336,7 +291,7 @@ export function createUI(ctx) {
   });
   // Les touches frappées dans nos champs ne remontent pas jusqu'aux écouteurs du jeu.
   ui.addEventListener('keydown', (e) => e.stopPropagation());
-  const onResize = () => { applyCompact(); maps.resizeMini(); };
+  const onResize = () => { shell.applyCompact(); maps.resizeMini(); };
   window.addEventListener('resize', onResize);
 
   // =====================================================================
@@ -389,9 +344,11 @@ export function createUI(ctx) {
       if (S.panel && S.panel !== 'map') panels.refresh();
       if (live) {
         const m = maps.me();
-        let name = maps.roadNameAt(m.x, m.z, 26);
-        if (!name) for (const l of ctx.LANDMARKS || []) if (Math.hypot(l.x - m.x, l.z - m.z) < (l.radius || 50) + 40) { name = l.name; break; }
-        if (name !== lastPlaque) { lastPlaque = name; plaque.hidden = !name; if (name) plaqueT.textContent = name; }
+        const road = maps.roadAt(m.x, m.z, 26);
+        let name = road ? road.name || road.ref : null, ref = road && road.name && road.ref ? String(road.ref).split(';')[0].trim() : '';
+        if (!name) for (const l of ctx.LANDMARKS || []) if (!l.hidden && Math.hypot(l.x - m.x, l.z - m.z) < (l.radius || 50) + 40) { name = l.name; break; }
+        const key = name ? ref + '|' + name : null;
+        if (key !== lastPlaque) { lastPlaque = key; plaque.hidden = !name; if (name) { plaqueT.textContent = name; plaqueR.hidden = !ref; plaqueR.textContent = ref; plaque.classList.toggle('is-fast', !!road && road.tier <= 1); } }
         const d = maps.gpsDistance(), ds = d == null ? '' : fmtDist(d);
         if (ds !== lastGps) { lastGps = ds; gpsD.textContent = ds; }
       }

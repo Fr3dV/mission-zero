@@ -2,7 +2,7 @@
 // Contrat : voir docs/ARCHITECTURE.md (ctx.vehicles / vehicle).
 import { VEHICLE_BY_ID } from '@shared/catalog.js';
 import { createMesh, getCarGeometry } from './models.js';
-import { initPhysics, stepVehicle, collideVehicles, applyImpulse } from './physics.js';
+import { initPhysics, stepVehicle, collideVehicles, applyImpulse, resetVertical, SAFE_DROP_V } from './physics.js';
 import { initDamage, applyDamage, repairDamage, disposeDamage, IMPACT_MIN } from './damage.js';
 import { createEffects } from './effects.js';
 import { updateEnvFallback, setFallbackEnvIntensity } from './materials.js';
@@ -31,7 +31,8 @@ export function createVehicles(ctx) {
     const cab = geo.def.cabin;
     const v = {
       id: opts.id || 'v' + nextId++, typeId: spec.id, spec, color, group,
-      pos: { x, y: heightAt(x, z), z }, yaw, speed: 0,
+      // opts.y : hauteur du niveau voulu (tablier, trémie…) ; absent = niveau de la rue
+      pos: { x, y: Number.isFinite(opts.y) ? (opts.remote ? opts.y : heightAt(x, z, opts.y)) : heightAt(x, z), z }, yaw, speed: 0,
       driver: null, remote: !!opts.remote,
       controls: { throttle: 0, brake: 0, steer: 0, handbrake: false },
       // champs étendus (audio, HUD, gameplay) : rpm 0..1, gear (-1 = R, 0 = N, 1..n), slip 0..1, damage 0..1
@@ -45,7 +46,8 @@ export function createVehicles(ctx) {
       seat: { ...geo.info.seat },   // {x, y (hauteur du bassin), z} dans le repère du véhicule
       wheelPos: { ...geo.info.wheelPos }, // centre et rayon du volant {x, y, z, r}
       setControls(c) { if (c) Object.assign(v.controls, c); },
-      setTransform(nx, nz, nyaw, speed = 0) { setTransform(v, nx, nz, nyaw, speed); },
+      /** y (optionnel) : hauteur de la chaussée au niveau voulu ; absent = on reste sur le niveau courant. */
+      setTransform(nx, nz, nyaw, speed = 0, y) { setTransform(v, nx, nz, nyaw, speed, y); },
       update(dt) { simulate(v, dt); },
     };
     initPhysics(v, geo.info, geo.def);
@@ -53,6 +55,7 @@ export function createVehicles(ctx) {
       info: geo.info, roll: 0, rollV: 0, pitch: 0, pitchV: 0, heave: 0, tPitch: 0, tRoll: 0, placed: false,
       born: ctx.time || 0, lightKey: -1, hazardT: 0, lastSpeed: 0, accel: 0, lod: false, net: null, lastSetT: -1, setDt: 1,
       wheelPrev: [null, null, null, null], smokeAcc: 0, dist: 0, yawRateVis: 0, lastYaw: yaw,
+      ry: 0, sim: false, yGiven: opts.remote && Number.isFinite(opts.y) ? opts.y : null, heave: 0, heaveV: 0,
     };
     initDamage(v);
     place(v, 0, true);
@@ -61,21 +64,28 @@ export function createVehicles(ctx) {
     return v;
   }
 
-  function setTransform(v, x, z, yaw, speed) {
+  function setTransform(v, x, z, yaw, speed, y) {
     if (!Number.isFinite(x + z + yaw)) return;
     const s = v.vis, p = v.phys;
     speed = Number.isFinite(speed) ? speed : 0;
+    const hasY = Number.isFinite(y);
     if (v.remote) {
       const gap = ctx.time - s.lastSetT;
       s.setDt = gap; s.lastSetT = ctx.time;
       const far = Math.hypot(x - v.pos.x, z - v.pos.z) > 12;
+      // hauteur : celle fournie par l'appelant (trafic, réseau) ; sinon on reste sur le niveau courant
+      // (heightAt avec le y précédent) ; après un grand saut de position, niveau de la rue
+      s.yGiven = hasY ? y : null;
+      const ny = hasY ? y : far ? heightAt(x, z) : heightAt(x, z, v.pos.y);
       // appelé à chaque frame (trafic, interpolation réseau déjà faite) : pose directe ; sinon lissage visuel
-      if (gap < 0.04 || far || !s.net) { v.pos.x = x; v.pos.z = z; v.yaw = yaw; s.net = s.net || { x, z, yaw }; s.net.x = x; s.net.z = z; s.net.yaw = yaw; s.net.direct = true; }
-      else { s.net.x = x; s.net.z = z; s.net.yaw = yaw; s.net.direct = false; }
+      if (gap < 0.04 || far || !s.net) { v.pos.x = x; v.pos.z = z; v.pos.y = ny; v.yaw = yaw; s.net = s.net || { x, z, yaw }; s.net.x = x; s.net.z = z; s.net.yaw = yaw; s.net.y = ny; s.net.direct = true; }
+      else { s.net.x = x; s.net.z = z; s.net.yaw = yaw; s.net.y = hasY ? y : null; s.net.direct = false; }
       v.speed = speed;
     } else {
-      // téléportation d'un véhicule local (réapparition, garage, mission…)
+      // téléportation d'un véhicule local (réapparition, garage, mission…) : au niveau demandé, sinon au niveau de la rue
       v.pos.x = x; v.pos.z = z; v.yaw = yaw; v.speed = speed;
+      v.pos.y = hasY ? heightAt(x, z, y) : heightAt(x, z);
+      resetVertical(v);
       v.yawRate = 0; p.steerN = 0; p.ax = p.ay = 0; p.sleeping = false;
       if (v.driver && v.driver !== 'local') p.kinT = ctx.time + 0.25; // piloté de l'extérieur : cinématique
       s.wheelPrev.fill(null);
@@ -134,52 +144,97 @@ export function createVehicles(ctx) {
     const p = v.phys, s = v.vis;
     if (p.crashT > 0) p.crashT -= dt;
     if (v.remote) {
+      s.sim = false;
       const n = s.net;
       if (n && !n.direct) {
         // extrapolation de la cible + rattrapage exponentiel
         n.x += -Math.sin(n.yaw) * v.speed * dt; n.z += -Math.cos(n.yaw) * v.speed * dt;
         const k = 1 - Math.exp(-12 * dt);
         v.pos.x += (n.x - v.pos.x) * k; v.pos.z += (n.z - v.pos.z) * k; v.yaw += wrapPi(n.yaw - v.yaw) * k;
+        if (n.y != null) { v.pos.y += (n.y - v.pos.y) * k; s.yGiven = v.pos.y; }
       }
       v.vel.x = -Math.sin(v.yaw) * v.speed; v.vel.z = -Math.cos(v.yaw) * v.speed;
       v.yawRate = 0; p.sleeping = false;
       v.rpm = clamp(Math.abs(v.speed) / v.spec.maxSpeed, 0, 1); v.gear = v.speed < -0.3 ? -1 : 1;
       return;
     }
-    if (p.kinT > ctx.time) return;
+    if (p.kinT > ctx.time) { s.sim = false; return; }
+    // passage cinématique → dynamique (voiture IA rendue au joueur, réveil) : l'état vertical repart de la hauteur courante
+    if (!s.sim) { s.yGiven = null; resetVertical(v); }
     // percuté alors qu'il était cinématique, puis rendu dynamique par le trafic : l'impulsion en attente s'applique
     if (p.pending) { const q = p.pending; p.pending = null; if (ctx.time - q.t < 0.6) applyImpulse(v, q.ix, q.iz, q.x, q.z); }
     const wasSleeping = p.sleeping;
     stepVehicle(v, dt, ctx);
+    s.sim = !p.sleeping;
     v.scrape = p.scrape;
     if (p.hit) { const h = p.hit; p.hit = null; registerHit(v, h, true); }
+    if (p.landV > 0) landing(v, p.landV);
     if (p.scrape > 0.3 && s.dist < 80 && Math.random() < dt * 30 * p.scrape) fx.sparks(p.scrapeX, v.pos.y + 0.4, p.scrapeZ, v.vel.x, v.vel.z, 2);
     if (!p.sleeping || !wasSleeping) s.placed = false;
   }
 
-  /** Pose le véhicule sur le terrain (hauteur, tangage et roulis de pente) et synchronise le groupe. */
+  /** Réception d'un saut ou d'une chute : suspension qui talonne, poussière ; dégâts au-delà d'une chute de 1,5 m. */
+  function landing(v, vImp) {
+    const s = v.vis;
+    s.heaveV -= Math.min(vImp, 9) * 0.45; s.pitchV += clamp(vImp * 0.04, 0, 0.5);
+    if (vImp > 2.2 && s.dist < 90) {
+      const sy = Math.sin(v.yaw), cy = Math.cos(v.yaw);
+      for (const w of v.group.userData.wheels) {
+        const u = w.userData, wx = v.pos.x + u.x * cy + u.z * sy, wz = v.pos.z - u.x * sy + u.z * cy;
+        fx.smoke(wx, v.pos.y + 0.1, wz, v.vel.x * 0.2 + (Math.random() - 0.5) * 2, 0.4 + Math.random(), v.vel.z * 0.2 + (Math.random() - 0.5) * 2, 0.6, 0.9, Math.min(0.4, 0.08 * vImp), 0.7);
+      }
+    }
+    if (vImp > SAFE_DROP_V) {
+      const fxx = -Math.sin(v.yaw), fzz = -Math.cos(v.yaw), hl = v.spec.length * 0.45;
+      registerHit(v, { impact: IMPACT_MIN + (vImp - SAFE_DROP_V) * 1.1, kind: 'static', tag: 'chute', other: null, x: v.pos.x + fxx * hl, z: v.pos.z + fzz * hl, nx: -fxx, nz: -fzz, broke: false }, true);
+    }
+  }
+
+  /**
+   * Pose de rendu : hauteur des roues et assiette (tangage, roulis) d'après la pente locale, échantillonnée sous les
+   * essieux et les flancs AU NIVEAU COURANT du véhicule (tablier, rue ou trémie).
+   */
   function place(v, dt, force) {
-    const s = v.vis, g = v.group;
+    const s = v.vis, g = v.group, p = v.phys;
     if (s.placed && !force) return;
-    // Pose de rendu. La caméra de poursuite (module joueur) est mise à jour AVANT la physique et lit la pose
-    // de début de frame : la voiture du joueur est donc dessinée à cette même pose (s.lag), sinon elle saute
-    // d'avant en arrière à l'écran dès que la durée des frames varie (vitesse × Δdt).
+    // La caméra de poursuite (module joueur) est mise à jour AVANT la physique et lit la pose de début de frame :
+    // la voiture du joueur est dessinée à cette même pose (s.lag), sinon elle saute à l'écran quand la durée des frames varie.
     const L = s.lag, px = L ? L.x : v.pos.x, pz = L ? L.z : v.pos.z, yaw = L ? L.yaw : v.yaw;
+    let py;
+    if (s.sim) py = L ? L.y : v.pos.y;                       // hauteur calculée par la physique (niveaux, sauts, chutes)
+    else {
+      // véhicule posé, cinématique ou distant : hauteur fournie par setTransform, sinon surface de son niveau
+      py = s.yGiven != null ? s.yGiven : heightAt(px, pz, v.pos.y);
+      if (!Number.isFinite(py)) py = Number.isFinite(v.pos.y) ? v.pos.y : 0;
+      v.pos.y = py; p.yb = py;
+    }
     const sy = Math.sin(yaw), cy = Math.cos(yaw);
-    const h0 = heightAt(px, pz);
-    let py = h0;
-    if (h0 > 0.005) {
-      const hl = s.info.wheelbase * 0.5, ht = s.info.track * 0.5;
-      // avant = (-sy, -cy), droite = (cy, -sy)
-      const hF = heightAt(px - sy * hl, pz - cy * hl), hR = heightAt(px + sy * hl, pz + cy * hl);
-      const hD = heightAt(px + cy * ht, pz - sy * ht), hG = heightAt(px - cy * ht, pz + sy * ht);
-      py = (hF + hR + hD + hG) / 4;
-      s.tPitch = Math.atan2(hF - hR, hl * 2); s.tRoll = Math.atan2(hD - hG, ht * 2);
-    } else { s.tPitch = 0; s.tRoll = 0; }
-    if (!L) v.pos.y = py; else v.pos.y = heightAt(v.pos.x, v.pos.z);
-    g.position.set(px, py, pz);
+    let tP, tR, ry = py;
+    if (s.sim && p.air) {
+      // en l'air : le nez suit la trajectoire, le roulis est conservé
+      tP = clamp(Math.atan2(p.vy, Math.max(6, Math.abs(v.speed))) * 0.7, -0.3, 0.3); tR = s.tRoll;
+    } else {
+      const hl = s.info.wheelbase * 0.5, ht = s.info.track * 0.5, lim = 0.3 + hl * 0.45;
+      // avant = (-sy, -cy), droite = (cy, -sy) ; un échantillon tombé sur un autre niveau (bord de tablier) est écarté
+      let hF = heightAt(px - sy * hl, pz - cy * hl, py), hR = heightAt(px + sy * hl, pz + cy * hl, py);
+      if (Math.abs(hF - py) > lim) hF = py; if (Math.abs(hR - py) > lim) hR = py;
+      tP = Math.atan2(hF - hR, hl * 2);
+      ry = (hF + hR) * 0.5;                                  // la caisse repose sur ses deux essieux
+      if (s.lod) tR = 0;
+      else {
+        let hD = heightAt(px + cy * ht, pz - sy * ht, py), hG = heightAt(px - cy * ht, pz + sy * ht, py);
+        if (Math.abs(hD - py) > lim) hD = py; if (Math.abs(hG - py) > lim) hG = py;
+        tR = Math.atan2(hD - hG, ht * 2);
+      }
+      if (s.sim && p.gap > 0) ry = py;                       // roues en détente : hauteur de la physique
+    }
+    // la suspension filtre les cassures de pente
+    const k = dt > 0 && (s.sim || v.remote) ? Math.min(1, dt * 16) : 1;
+    s.tPitch += (tP - s.tPitch) * k; s.tRoll += (tR - s.tRoll) * k;
+    s.ry += (ry - py - s.ry) * k;
+    g.position.set(px, py + s.ry, pz);
     g.rotation.set(s.tPitch, yaw, s.tRoll);
-    s.placed = v.phys.sleeping && !v.remote;
+    s.placed = p.sleeping && !v.remote;
   }
 
   function visual(v, dt, camX, camZ, localV) {
@@ -216,9 +271,13 @@ export function createVehicles(ctx) {
         s.rollV += (w0 * w0 * (tR - s.roll) - 2 * zeta * w0 * s.rollV) * h; s.roll += s.rollV * h;
         s.pitchV += (w0 * w0 * (tP - s.pitch) - 2 * zeta * w0 * s.pitchV) * h; s.pitch += s.pitchV * h;
       }
+      // pompage : détente quand le sol se dérobe (sommet de bosse), talonnage à la réception
+      const ext = s.sim ? Math.min(p.gap, 0.07) : 0, wh = 11;
+      for (let i = 0; i < sub; i++) { s.heaveV += (wh * wh * (ext - s.heave) - 2 * 0.5 * wh * s.heaveV) * h; s.heave += s.heaveV * h; }
+      s.heave = clamp(s.heave, -0.13, 0.09);
       s.roll = clamp(s.roll, -0.14, 0.14); s.pitch = clamp(s.pitch, -0.1, 0.1);
       ud.chassis.rotation.set(s.pitch, 0, s.roll);
-      ud.chassis.position.y = -Math.abs(s.roll) * 0.12 - Math.abs(s.pitch) * 0.1;
+      ud.chassis.position.y = -Math.abs(s.roll) * 0.12 - Math.abs(s.pitch) * 0.1 + s.heave;
       if (moving || Math.abs(steer - (s.steerVis || 0)) > 1e-3) {
         s.steerVis = steer; ud.setSteer(steer);
         const d = v.speed * dt;
@@ -231,7 +290,7 @@ export function createVehicles(ctx) {
           }
         } else ud.spinWheels(d);
       }
-    } else if (s.roll || s.pitch) { s.roll = s.pitch = s.rollV = s.pitchV = 0; ud.chassis.rotation.set(0, 0, 0); ud.chassis.position.y = 0; }
+    } else if (s.roll || s.pitch || s.heave) { s.roll = s.pitch = s.rollV = s.pitchV = s.heave = s.heaveV = 0; ud.chassis.rotation.set(0, 0, 0); ud.chassis.position.y = 0; }
 
     // feux
     if (s.hazardT > 0) s.hazardT -= dt;
@@ -249,11 +308,14 @@ export function createVehicles(ctx) {
     }
 
     if (dist > FX_DIST) return;
-    fx.addShadow(g.position.x, g.position.y, g.position.z, g.rotation.y, s.tPitch, s.tRoll, v.spec.width * 1.22, v.spec.length * 1.12);
-    if (head && v !== localV) fx.addBeam(v.pos.x, v.pos.y, v.pos.z, v.yaw, s.tPitch, v.spec.width);
+    // ombre de contact : sur le sol du niveau courant (sous la voiture quand elle est en l'air)
+    const airborne = s.sim && p.gap > 0.02;
+    const gy = airborne ? heightAt(g.position.x, g.position.z, g.position.y) : g.position.y;
+    if (g.position.y - gy < 3) fx.addShadow(g.position.x, gy, g.position.z, g.rotation.y, airborne ? 0 : s.tPitch, airborne ? 0 : s.tRoll, v.spec.width * 1.22, v.spec.length * 1.12);
+    if (head && v !== localV) fx.addBeam(v.pos.x, gy, v.pos.z, v.yaw, s.tPitch, v.spec.width);
 
     // fumée et traces de pneus
-    if (dyn && !p.sleeping && dist < 90) {
+    if (dyn && !p.sleeping && !p.air && dist < 90) {
       const sp = Math.abs(v.speed) + (p.slide || 0);
       const slip = v.slip;
       const on = slip > 0.3 && (sp > 2.5 || p.spin > 0);
@@ -264,7 +326,9 @@ export function createVehicles(ctx) {
         // roues concernées : arrière au frein à main / dérive, motrices au patinage, toutes en glissade franche
         const active = on && (!u.front ? true : (p.spin > 0 && p.rear < 1) || p.slipF > 0.2 || (p.brakeOn && slip > 0.2 && !p.lock));
         if (!active) { s.wheelPrev[i] = null; continue; }
-        const wx = v.pos.x + u.x * cy + u.z * sy, wz = v.pos.z - u.x * sy + u.z * cy, wy = v.pos.y;
+        const wx = v.pos.x + u.x * cy + u.z * sy, wz = v.pos.z - u.x * sy + u.z * cy;
+        let wy = heightAt(wx, wz, v.pos.y);                   // sol sous la roue, au niveau de la voiture
+        if (Math.abs(wy - v.pos.y) > 1) wy = v.pos.y;
         const prev = s.wheelPrev[i];
         const a = clamp((slip - 0.3) * 1.3, 0, 0.75);
         if (prev) fx.skid(prev.x, prev.y, prev.z, wx, wy, wz, v.spec.width * 0.13, prev.a, a);
@@ -328,7 +392,7 @@ export function createVehicles(ctx) {
     const pv0 = ctx.player?.vehicle, lv0 = pv0 && pv0.driver === 'local' && !pv0.remote && !debug.noLag ? pv0 : null;
     if (lagV && lagV !== lv0) { lagV.vis.lag = null; lagV.vis.placed = false; }
     lagV = lv0;
-    if (lv0) { const L = lv0.vis.lag || (lv0.vis.lag = { x: 0, z: 0, yaw: 0 }); L.x = lv0.pos.x; L.z = lv0.pos.z; L.yaw = lv0.yaw; }
+    if (lv0) { const L = lv0.vis.lag || (lv0.vis.lag = { x: 0, y: 0, z: 0, yaw: 0 }); L.x = lv0.pos.x; L.y = lv0.pos.y; L.z = lv0.pos.z; L.yaw = lv0.yaw; }
     for (let i = 0; i < list.length; i++) { const v = list[i]; if (v.group.visible) simulate(v, dt); }
     collideVehicles(list, isDynamic, crash);
     fx.beginFrame();

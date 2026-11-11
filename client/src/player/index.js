@@ -1,6 +1,7 @@
 // Module « joueur » : entrées, personnage animé, contrôleur à pied, montée/descente de véhicule, caméra 3e personne.
 // Contrat : voir docs/ARCHITECTURE.md (ctx.player + export createCharacter).
 import { STARTER_VEHICLE } from '@shared/catalog.js';
+import { STEP_UP } from '@shared/terrain.js';
 import { createCharacter, SIT_ROOT_Y, KNOCK_SPEED } from './character.js';
 import { createInput } from './input.js';
 import { createCameraRig, CAMERA_VIEWS } from './camera.js';
@@ -15,24 +16,38 @@ const WALK_SPEED = 2.5, RUN_SPEED = 6.4, RADIUS = 0.32;
 const JUMP_SPEED = 4.9, GRAVITY = 14;
 const STEAL_MAX_SPEED = 4.2; // m/s (~15 km/h)
 const ENTER_DIST = 4, EXIT_MAX_SPEED = 15 / 3.6;
+const LEVEL_GAP = 2.5;   // écart vertical au-delà duquel un véhicule est sur un autre niveau (pont, trémie) : ignoré
+const FALL_START = 0.4;  // le sol se dérobe de plus que ça : chute par gravité
+const STUMBLE_DROP = 3;  // hauteur de chute (m) au-delà de laquelle la réception fait tituber
 const VIEW_LABEL = { proche: 'Caméra proche', loin: 'Caméra éloignée', capot: 'Caméra capot' };
 
 export function createPlayer(ctx) {
   const { scene, heightAt, collision, bus, params } = ctx;
   const input = createInput(ctx);
 
-  // --- position de départ : sur une chaussée près de la Concorde
-  let start = { x: 30, z: 60, yaw: 0 };
-  try {
-    const rp = ctx.world?.nearestRoadPoint?.(30, 60);
-    if (rp && Number.isFinite(rp.x) && Number.isFinite(rp.z)) start = { x: rp.x, z: rp.z, yaw: rp.yaw || 0 };
-  } catch { /* monde pas prêt : position par défaut */ }
+  // --- position de départ (aucune coordonnée propre à une ville) : point fourni par le gameplay s'il existe déjà,
+  //     sinon la chaussée la plus proche de l'origine de la ville courante (sa place centrale), à la hauteur renvoyée.
+  function spawnPoint() {
+    let sp = ctx.gameplay?.spawn ?? ctx.gameplay?.SPAWN ?? ctx.city?.spawn;
+    if (typeof sp === 'function') { try { sp = sp(); } catch { sp = null; } }
+    return sp && Number.isFinite(sp.x) && Number.isFinite(sp.z) ? { x: sp.x, z: sp.z, yaw: sp.yaw || 0, y: sp.y } : null;
+  }
+  let start = spawnPoint(), startFromGameplay = !!start;
+  if (!start) {
+    start = { x: 0, z: 0, yaw: 0, y: undefined };
+    try {
+      const rp = ctx.world?.nearestRoadPoint?.(0, 0);
+      if (rp && Number.isFinite(rp.x) && Number.isFinite(rp.z)) start = { x: rp.x, z: rp.z, yaw: rp.yaw || 0, y: rp.y };
+    } catch { /* monde pas prêt : origine de la ville */ }
+  }
+  /** Hauteur du sol : avec y, la surface du niveau de l'appelant ; sans y, le niveau de la rue. */
+  const levelAt = (x, z, y) => { const h = Number.isFinite(y) ? heightAt(x, z, y) : heightAt(x, z); return Number.isFinite(h) ? h : 0; };
 
   let character = createCharacter(ctx, { name: params?.get?.('name') || 'Joueur', lod: false });
   scene.add(character.group);
 
   const p = {
-    pos: { x: start.x, y: heightAt(start.x, start.z), z: start.z },
+    pos: { x: start.x, y: levelAt(start.x, start.z, start.y), z: start.z },
     yaw: start.yaw, speed: 0, mode: 'foot', vehicle: null, character, enabled: true, input,
     anim: 'idle', grounded: true,
     /** true pendant qu'il est renversé (chute, au sol, relevé) : entrées ignorées */
@@ -50,7 +65,11 @@ export function createPlayer(ctx) {
   p.camera = cam;
   cam.snap(p.yaw);
 
-  let vx = 0, vz = 0, vy = 0;
+  let vx = 0, vz = 0, vy = 0, fallTop = 0;
+  let moved = false; // téléporté de l'extérieur ou entré en véhicule : on ne le replace plus au point de départ
+  /** Sol sous le joueur, pour son niveau courant (tablier, berge, trémie...). */
+  const groundAt = (x, z, y = p.pos.y) => levelAt(x, z, y);
+  const sameLevel = (v) => Math.abs((v.pos?.y ?? p.pos.y) - p.pos.y) <= LEVEL_GAP;
   // renversé par une voiture : K = état de la chute (null sinon)
   let J = null; // vol de voiture en cours
   let K = null, immuneUntil = 0, hitBy = null, hitClosing = 0, hitNx = 0, hitNz = 0, hitVx = 0, hitVz = 0, hitSide = 1, hitRx = 1, hitRz = 0;
@@ -87,13 +106,13 @@ export function createPlayer(ctx) {
   // ------------------------------------------------------------------ véhicules
   const vehicleName = (v) => v.spec?.name || 'le véhicule';
   function nearestFreeVehicle() {
-    return ctx.vehicles?.nearest?.(p.pos.x, p.pos.z, ENTER_DIST, (v) => !v.driver && !v.remote) || null;
+    return ctx.vehicles?.nearest?.(p.pos.x, p.pos.z, ENTER_DIST, (v) => !v.driver && !v.remote && sameLevel(v)) || null;
   }
   const dist2 = (v) => (v.pos.x - p.pos.x) ** 2 + (v.pos.z - p.pos.z) ** 2;
   /** Véhicule visé par F : une voiture libre, sinon une voiture conduite par l'IA à l'arrêt ou presque (vol). */
   function vehicleTarget() {
     const free = nearestFreeVehicle();
-    const ai = ctx.vehicles?.nearest?.(p.pos.x, p.pos.z, ENTER_DIST, (v) => v.driver === 'ai' && Math.abs(v.speed || 0) <= STEAL_MAX_SPEED) || null;
+    const ai = ctx.vehicles?.nearest?.(p.pos.x, p.pos.z, ENTER_DIST, (v) => v.driver === 'ai' && Math.abs(v.speed || 0) <= STEAL_MAX_SPEED && sameLevel(v)) || null;
     if (ai && (!free || Math.sqrt(dist2(ai)) + 0.5 < Math.sqrt(dist2(free)))) { tgt.v = ai; tgt.steal = true; }
     else { tgt.v = free; tgt.steal = false; }
     return tgt;
@@ -109,8 +128,9 @@ export function createPlayer(ctx) {
   }
   const door = { x: 0, z: 0 };
   function doorFree(v, side) {
-    const d = doorSpot(v, side);
-    return !collision?.test?.(d.x, d.z, RADIUS, heightAt(d.x, d.z) + 0.9) && !ctx.world?.isWater?.(d.x, d.z) && !hitsVehicle(d.x, d.z, v);
+    const d = doorSpot(v, side), vy0 = v.pos.y ?? p.pos.y, y = groundAt(d.x, d.z, vy0);
+    if (Math.abs(y - vy0) > STEP_UP) return false; // portière au-dessus du vide ou contre un mur de niveau
+    return !collision?.test?.(d.x, d.z, RADIUS, y + 0.9) && !ctx.world?.isWater?.(d.x, d.z) && !hitsVehicle(d.x, d.z, v, y);
   }
   function startCarjack(v) {
     const side = doorFree(v, 'left') || !doorFree(v, 'right') ? 'left' : 'right';
@@ -139,7 +159,11 @@ export function createPlayer(ctx) {
     const dx = d.x - p.pos.x, dz = d.z - p.pos.z, dd = Math.hypot(dx, dz);
     const sp = J.grab > 0 ? Math.min(dd / Math.max(dt, 1e-3), 3) : Math.min(5.2, dd / Math.max(dt, 1e-3));
     if (dd > 0.02) { p.pos.x += (dx / dd) * sp * dt; p.pos.z += (dz / dd) * sp * dt; }
-    p.pos.y = heightAt(p.pos.x, p.pos.z); p.grounded = true; vy = 0;
+    {
+      const g = groundAt(p.pos.x, p.pos.z);
+      if (p.pos.y - g > FALL_START + 0.2) { cancelCarjack(); p.grounded = false; vy = 0; fallTop = p.pos.y; return; } // plus de sol : on tombe
+      p.pos.y = g > p.pos.y ? Math.min(g, p.pos.y + 8 * dt) : Math.max(g, p.pos.y - 8 * dt); p.grounded = true; vy = 0;
+    }
     const face = Math.atan2(-(v.pos.x - p.pos.x), -(v.pos.z - p.pos.z)), move = dd > 0.25 ? Math.atan2(-dx, -dz) : face;
     p.yaw = wrap(p.yaw + wrap((J.grab > 0 ? face : move) - p.yaw) * (1 - Math.exp(-14 * dt)));
     cam.focus = d;
@@ -203,7 +227,7 @@ export function createPlayer(ctx) {
   function enterVehicle(v) {
     if (!v || p.vehicle === v) return false;
     if (p.vehicle) exitVehicle(true);
-    p.vehicle = v; v.driver = 'local'; p.mode = 'vehicle'; p.anim = 'sit';
+    p.vehicle = v; v.driver = 'local'; p.mode = 'vehicle'; p.anim = 'sit'; moved = true;
     vx = vz = vy = 0; p.grounded = true;
     if (v.group) seatCharacter(v); else character.group.visible = false;
     cam.transition();
@@ -218,21 +242,24 @@ export function createPlayer(ctx) {
     const side = (spec.width || 1.8) / 2 + 0.75, half = (spec.length || 4.2) / 2 + 0.8;
     const fx = -Math.sin(v.yaw), fz = -Math.cos(v.yaw); // avant
     const lx = -Math.cos(v.yaw), lz = Math.sin(v.yaw);  // gauche (côté conducteur)
+    const vy0 = v.pos.y ?? p.pos.y;
     const tries = [[side, 0.1], [side, -1.1], [side, 1.2], [-side, 0.1], [-side, -1.1], [-side, 1.2], [0, -half], [0, half], [side + 0.8, 0], [-side - 0.8, 0]];
     for (const [l, f] of tries) {
       const x = v.pos.x + lx * l + fx * f, z = v.pos.z + lz * l + fz * f;
-      const y = heightAt(x, z);
+      const y = groundAt(x, z, vy0);
+      if (Math.abs(y - vy0) > STEP_UP) continue; // vide (bord de tablier, quai) ou autre niveau
       if (collision?.test?.(x, z, RADIUS + 0.05, y + 0.9)) continue;
       if (ctx.world?.isWater?.(x, z)) continue;
-      if (hitsVehicle(x, z, v)) continue;
-      return { x, z };
+      if (hitsVehicle(x, z, v, y)) continue;
+      return { x, z, y };
     }
     return null;
   }
-  function hitsVehicle(x, z, except) {
+  function hitsVehicle(x, z, except, y = p.pos.y) {
     const list = ctx.vehicles?.list; if (!list) return false;
     for (const o of list) {
       if (o === except || !o.pos) continue;
+      if (Math.abs((o.pos.y ?? y) - y) > LEVEL_GAP) continue;
       const dx = x - o.pos.x, dz = z - o.pos.z;
       if (dx * dx + dz * dz > 36) continue;
       const c = Math.cos(o.yaw), s = Math.sin(o.yaw);
@@ -257,8 +284,12 @@ export function createPlayer(ctx) {
     if (v.driver === 'local') v.driver = null;
     v.setControls?.({ throttle: 0, brake: 0, steer: 0, handbrake: false });
     const s = spot || { x: v.pos.x - Math.cos(v.yaw) * 2, z: v.pos.z + Math.sin(v.yaw) * 2 };
-    p.pos.x = s.x; p.pos.z = s.z; p.pos.y = heightAt(s.x, s.z);
-    p.yaw = v.yaw; p.speed = 0; vx = vz = vy = 0; p.grounded = true;
+    {
+      // on sort au niveau du véhicule ; si le sol est plus bas à cet endroit (sortie forcée au bord du vide), on tombe
+      const vy0 = v.pos.y ?? p.pos.y, gy = s.y ?? groundAt(s.x, s.z, vy0);
+      p.pos.x = s.x; p.pos.z = s.z; p.pos.y = gy < vy0 - FALL_START ? vy0 : gy;
+      p.yaw = v.yaw; p.speed = 0; vx = vz = vy = 0; p.grounded = p.pos.y - gy <= FALL_START; fallTop = p.pos.y;
+    }
     p.vehicle = null; p.mode = 'foot'; p.anim = 'idle';
     unseatCharacter();
     character.group.position.set(p.pos.x, p.pos.y, p.pos.z);
@@ -279,11 +310,15 @@ export function createPlayer(ctx) {
   }
 
   // ------------------------------------------------------------------ API
-  function teleport(x, z, yaw = p.yaw) {
+  /** Téléporte le joueur (et son véhicule). y facultatif : niveau visé (tablier, berge, trémie) ; sans y : niveau de la rue. */
+  function teleport(x, z, yaw = p.yaw, y) {
     if (!Number.isFinite(x) || !Number.isFinite(z)) return;
-    if (p.vehicle) p.vehicle.setTransform?.(x, z, yaw, 0);
-    p.pos.x = x; p.pos.z = z; p.pos.y = heightAt(x, z); p.yaw = yaw; p.speed = 0;
-    vx = vz = vy = 0; p.grounded = true;
+    if (!Number.isFinite(yaw)) yaw = p.yaw;
+    const gy = levelAt(x, z, y);
+    moved = true;
+    if (p.vehicle) p.vehicle.setTransform?.(x, z, yaw, 0, gy);
+    p.pos.x = x; p.pos.z = z; p.pos.y = gy; p.yaw = yaw; p.speed = 0;
+    vx = vz = vy = 0; p.grounded = true; fallTop = gy;
     if (!p.vehicle) { character.group.position.set(x, p.pos.y, z); character.group.rotation.y = yaw; }
     cam.snap(yaw);
   }
@@ -324,7 +359,17 @@ export function createPlayer(ctx) {
     else cam.footDist = [3.2, 4.6, 6.5][cam.view];
   });
   bus.on('vehicle:crash', (e) => { if (e?.vehicle && e.vehicle === p.vehicle) cam.shake(clamp((e.impact || 5) / 25, 0.15, 0.9)); });
+  function placeAtSpawn() {
+    if (startFromGameplay || moved || p.vehicle || K || J) return;
+    if (Math.hypot(p.pos.x - start.x, p.pos.z - start.z) > 1.5) return; // le joueur a déjà bougé
+    const sp = spawnPoint();
+    if (!sp) return;
+    startFromGameplay = true; start = sp;
+    teleport(sp.x, sp.z, sp.yaw, sp.y); moved = false;
+  }
+  bus.on('boot:done', placeAtSpawn);
   bus.on('net:welcome', () => {
+    placeAtSpawn();
     const me = ctx.store?.me;
     if (me?.name && character.group.name !== 'personnage:' + me.name) setAppearance({ name: me.name, color: me.color, skin: me.skin, lod: false });
   });
@@ -350,7 +395,7 @@ export function createPlayer(ctx) {
       p.yaw = wrap(p.yaw + wrap(want - p.yaw) * (1 - Math.exp(-11 * dt)));
     }
     let nx = p.pos.x + vx * dt, nz = p.pos.z + vz * dt;
-    // pas dans la Seine
+    // pas dans l'eau
     const isWater = ctx.world?.isWater;
     if (isWater && sp > 0 && isWater.call(ctx.world, nx, nz)) {
       if (!isWater.call(ctx.world, nx, p.pos.z)) { nz = p.pos.z; vz = 0; }
@@ -363,7 +408,8 @@ export function createPlayer(ctx) {
       if (!o.pos) continue;
       const dx = nx - o.pos.x, dzz = nz - o.pos.z;
       if (dx * dx + dzz * dzz > 25) continue;
-      if (p.pos.y > o.pos.y + (o.spec?.height || 1.4)) continue;
+      const oy = o.pos.y ?? p.pos.y;
+      if (Math.abs(oy - p.pos.y) > LEVEL_GAP || p.pos.y > oy + (o.spec?.height || 1.4)) continue; // autre niveau (pont, trémie) ou au-dessus du toit
       const c = Math.cos(o.yaw), s = Math.sin(o.yaw);
       const lx = dx * c - dzz * s, lz = dx * s + dzz * c;
       const sp = o.speed || 0, sweep = Math.abs(sp) * dt * 0.5; // balayage : la boîte est allongée du trajet de la frame
@@ -398,16 +444,29 @@ export function createPlayer(ctx) {
       nx = r.x; nz = r.z;
     }
     if (Number.isFinite(nx) && Number.isFinite(nz)) { p.pos.x = nx; p.pos.z = nz; }
-    // vertical : saut, gravité, suivi du relief
-    const g = heightAt(p.pos.x, p.pos.z);
+    // vertical : saut, gravité, suivi du relief et des niveaux superposés (jamais de téléportation verticale)
     if (p.grounded) {
-      if (input.pressed('jump')) { vy = JUMP_SPEED; p.grounded = false; }
-      else if (p.pos.y - g > 0.35) { p.grounded = false; vy = 0; }
-      else p.pos.y = g;
+      const g = groundAt(p.pos.x, p.pos.z); // surface du niveau courant : la plus haute à moins de STEP_UP au-dessus des pieds
+      if (input.pressed('jump')) { vy = JUMP_SPEED; p.grounded = false; fallTop = p.pos.y; }
+      else if (p.pos.y - g > FALL_START) { p.grounded = false; vy = 0; fallTop = p.pos.y; }          // le sol se dérobe (bord de tablier, quai) : chute
+      else if (g > p.pos.y) p.pos.y = Math.min(g, p.pos.y + (3.5 + 1.3 * sp) * dt);                    // marche, rampe : montée lissée
+      else p.pos.y = Math.max(g, p.pos.y - (4 + 1.5 * sp) * dt);                                        // petite descente lissée
     }
     if (!p.grounded) {
       vy -= GRAVITY * dt; p.pos.y += vy * dt;
-      if (p.pos.y <= g) { p.pos.y = g; vy = 0; p.grounded = true; }
+      if (p.pos.y > fallTop) fallTop = p.pos.y;
+      // en l'air on ne « monte » sur rien : seule compte la surface située sous les pieds
+      const g = groundAt(p.pos.x, p.pos.z, p.pos.y - STEP_UP + 0.02);
+      if (p.pos.y <= g && vy <= 0) {
+        const drop = fallTop - g;
+        p.pos.y = g; vy = 0; p.grounded = true;
+        if (drop > STUMBLE_DROP) { // réception d'une grande hauteur : pas de dégât, on titube
+          const l = Math.hypot(vx, vz);
+          character.knock({ dirX: l > 0.2 ? vx : -Math.sin(p.yaw), dirZ: l > 0.2 ? vz : -Math.cos(p.yaw), speed: 1.4 });
+          vx *= 0.3; vz *= 0.3;
+          bus.emit('player:landed', { drop });
+        }
+      }
     }
     p.speed = Math.hypot(vx, vz);
     p.anim = !p.grounded ? (vy > 0.5 ? 'jump' : 'fall') : p.speed > 3.9 ? 'run' : p.speed > 0.25 ? 'walk' : 'idle';
@@ -422,7 +481,7 @@ export function createPlayer(ctx) {
     // projeté dans le sens de la voiture (un peu écarté selon la normale de contact)
     // (vitesse de la voiture, plus une déviation vers le côté du contact : le corps est rejeté hors de sa trajectoire)
     const k = Math.min(1.08, 0.7 + closing / 30), lat = hitSide * (1.6 + 0.12 * closing);
-    K = { by, speed: closing, vx: hitVx * k + hitNx * closing * 0.25 + hitRx * lat, vz: hitVz * k + hitNz * closing * 0.25 + hitRz * lat, lie: 0, up: false, t: 0 };
+    K = { by, speed: closing, vx: hitVx * k + hitNx * closing * 0.25 + hitRx * lat, vz: hitVz * k + hitNz * closing * 0.25 + hitRz * lat, vy: 0, falling: false, lie: 0, up: false, t: 0 };
     vx = vz = vy = 0; p.grounded = true; p.knocked = true; p.anim = 'lying';
     character.group.position.set(p.pos.x, p.pos.y, p.pos.z);
     character.knock({ dirX: K.vx, dirZ: K.vz, speed: closing });
@@ -437,7 +496,7 @@ export function createPlayer(ctx) {
     // trajectoire : balistique en l'air, frottement une fois au sol
     const sp = Math.hypot(K.vx, K.vz);
     if (sp > 0.01) {
-      const dec = rg.air ? 0.6 * sp : 6.5 + 1.2 * sp, ns = Math.max(0, sp - dec * dt);
+      const dec = rg.air || K.falling ? 0.6 * sp : 6.5 + 1.2 * sp, ns = Math.max(0, sp - dec * dt);
       K.vx *= ns / sp; K.vz *= ns / sp;
       let nx = p.pos.x + K.vx * dt, nz = p.pos.z + K.vz * dt;
       if (ctx.world?.isWater?.(nx, nz)) { nx = p.pos.x; nz = p.pos.z; K.vx = K.vz = 0; }
@@ -453,18 +512,27 @@ export function createPlayer(ctx) {
     if (list) for (const o of list) {
       if (!o.pos) continue;
       const dx = p.pos.x - o.pos.x, dz = p.pos.z - o.pos.z;
-      if (dx * dx + dz * dz > 25) continue;
+      if (dx * dx + dz * dz > 25 || Math.abs((o.pos.y ?? p.pos.y) - p.pos.y) > LEVEL_GAP) continue;
       const c = Math.cos(o.yaw), s = Math.sin(o.yaw), lx = dx * c - dz * s, lz = dx * s + dz * c;
       const ex = (o.spec?.width || 1.8) / 2 + 0.25 - Math.abs(lx), ez = (o.spec?.length || 4.2) / 2 + 0.2 - Math.abs(lz);
       if (ex <= 0 || ez <= 0) continue;
       const push = Math.min(ex, (3 + Math.abs(o.speed || 0) * 0.5) * dt) * Math.sign(lx || hitSide);
       p.pos.x += push * c; p.pos.z += -push * s;
     }
-    p.pos.y = heightAt(p.pos.x, p.pos.z); p.speed = Math.hypot(K.vx, K.vz);
+    {
+      // hauteur : le corps suit son niveau ; projeté au-delà d'un bord, il tombe par gravité jusqu'à la surface du dessous
+      const g = K.falling ? groundAt(p.pos.x, p.pos.z, p.pos.y - STEP_UP + 0.02) : groundAt(p.pos.x, p.pos.z);
+      if (!K.falling && p.pos.y - g > FALL_START) { K.falling = true; K.vy = 0; }
+      if (K.falling) {
+        K.vy -= GRAVITY * dt; p.pos.y += K.vy * dt;
+        if (p.pos.y <= g) { p.pos.y = g; K.vy = 0; K.falling = false; }
+      } else p.pos.y = g > p.pos.y ? Math.min(g, p.pos.y + 6 * dt) : Math.max(g, p.pos.y - 6 * dt);
+    }
+    p.speed = Math.hypot(K.vx, K.vz);
     character.group.position.set(p.pos.x, p.pos.y, p.pos.z);
     if (!K.up) {
       p.anim = 'lying';
-      if (rg.settled && p.speed < 0.3) { K.lie += dt; if (K.lie > 0.9 + Math.min(1.8, K.speed / 9)) { K.up = true; character.setState({ anim: 'getup' }); } }
+      if (rg.settled && p.speed < 0.3 && !K.falling) { K.lie += dt; if (K.lie > 0.9 + Math.min(1.8, K.speed / 9)) { K.up = true; character.setState({ anim: 'getup' }); } }
       else if (K.t > 9) { K.up = true; character.snap(); character.setState({ anim: 'getup' }); } // garde-fou
     } else {
       p.anim = 'getup';
@@ -482,7 +550,7 @@ export function createPlayer(ctx) {
     if (ctx.vehicles?.list && !ctx.vehicles.list.includes(v)) { exitVehicle(true); return updateFoot(dt); }
     if (v.driver !== 'local') v.driver = 'local';
     v.setControls?.({ throttle: st.throttle, brake: st.brake, steer: st.steer, handbrake: !!st.handbrake });
-    p.pos.x = v.pos.x; p.pos.y = v.pos.y ?? heightAt(v.pos.x, v.pos.z); p.pos.z = v.pos.z;
+    p.pos.x = v.pos.x; p.pos.y = v.pos.y ?? groundAt(v.pos.x, v.pos.z); p.pos.z = v.pos.z;
     p.yaw = v.yaw; p.speed = v.speed || 0; p.anim = 'sit';
     character.setState({ steer: v.controls?.steer ?? st.steer });
   }
@@ -515,7 +583,7 @@ export function createPlayer(ctx) {
   if (params?.get?.('debugcar') === '1' && ctx.vehicles?.spawn) {
     try {
       const type = params.get('debugcartype') || STARTER_VEHICLE;
-      ctx.vehicles.spawn(type, start.x + Math.cos(start.yaw) * 3, start.z - Math.sin(start.yaw) * 3, start.yaw);
+      ctx.vehicles.spawn(type, start.x + Math.cos(start.yaw) * 3, start.z - Math.sin(start.yaw) * 3, start.yaw, { y: p.pos.y });
     } catch (e) { console.warn('[player] debugcar', e); }
   }
 

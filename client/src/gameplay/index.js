@@ -1,67 +1,143 @@
 // Module gameplay : missions, GPS, immobilier, concessions, garages, voiture personnelle, à-côtés.
 // PROPRIÉTAIRE : agent "gameplay". Voir docs/ARCHITECTURE.md pour les contrats.
 // Règle d'or : l'argent n'est JAMAIS modifié ici — on émet des intent:*, le module net tranche.
+// Multi-villes : tout le contenu vient de la ville courante (shared/missions.js, shared/properties.js,
+// ./places.js) ; aucune coordonnée ni aucun nom de lieu en dur ici.
+// Niveaux superposés : chaque point recalé sur une chaussée garde son élévation (`ele`, relative au relief)
+// et sa hauteur (`y`) pour que marqueurs, voitures et personnages apparaissent sur le pont et non dessous.
 import { MISSIONS, MISSION_BY_ID, LEVELS } from '@shared/missions.js';
 import { PROPERTIES } from '@shared/properties.js';
 import { LANDMARKS } from '@shared/landmarks.js';
+import { baseHeightAt } from '@shared/terrain.js';
 import { createMarkers, ICON } from './markers.js';
-import { createRoadIndex, createRouter, projectOnPath } from './gps.js';
+import { createRoadIndex, createRouter, projectOnPath, isDrivable, isStreet, isWalkable } from './gps.js';
 import { createMissionRunner } from './missionRunner.js';
 import { createEstate } from './estate.js';
-import { COLLECTIBLES } from './places.js';
+import { COLLECTIBLES, COLLECTIBLE, SPAWN, PLACE } from './places.js';
 
 export function createGameplay(ctx) {
   const { bus, store } = ctx;
-  const markers = createMarkers(ctx);
   const roads = createRoadIndex(ctx.worldData);
   const router = createRouter(ctx.worldData);
-  const drivable = (r) => r.kind !== 'pedestrian';
+  const drivable = isDrivable;
 
   // ---------------------------------------------------------------- utilitaires partagés
   const playerPos = () => ctx.player?.pos || { x: 0, y: 0, z: 0 };
   const toast = (text, kind = 'info') => bus.emit('toast', { text, kind });
+  const fin = Number.isFinite;
+
+  /**
+   * Hauteur du sol en (x, z) pour une chaussée d'élévation relative `ele` (pont, trémie).
+   * Sans élévation : le niveau de la rue. Avec : la surface du module ville à cette hauteur, ou à défaut relief + ele.
+   */
+  function groundY(x, z, ele) {
+    let h;
+    try {
+      if (!fin(ele) || Math.abs(ele) < 0.3) h = ctx.heightAt(x, z);
+      else {
+        const yRoad = baseHeightAt(x, z) + ele;
+        h = ctx.heightAt(x, z, yRoad + 0.6);
+        if (!(Math.abs(h - yRoad) < 2.5)) h = yRoad;
+      }
+    } catch { h = 0; }
+    return fin(h) ? h : 0;
+  }
+  /** Élévation relative au relief d'un objet situé à la hauteur y (indice pour choisir le bon niveau). */
+  const eleOf = (x, z, y) => { if (!fin(y)) return undefined; try { return y - baseHeightAt(x, z); } catch { return undefined; } };
+  /** Hauteur de la chaussée en (x, z) : celle que renvoie le module ville quand il la connaît, sinon groundY. */
+  function roadY(x, z, ele) {
+    const guess = groundY(x, z, ele);
+    try {
+      const w = ctx.world?.nearestRoadPoint?.(x, z, guess);
+      if (w && fin(w.y) && Math.hypot(w.x - x, w.z - z) < 8 && Math.abs(w.y - guess) < 3) return w.y;
+    } catch { /* module ville indisponible */ }
+    return guess;
+  }
+  /**
+   * Le joueur (hauteur y1) est-il au même niveau qu'un point (hauteur y2) ? Inconnu = oui.
+   * Si (x, z) est fourni et que le sol n'a qu'UNE surface à cet endroit (pas de pont au-dessus d'une autre voie,
+   * ou tablier pas encore construit par le module ville), il n'y a pas d'ambiguïté : oui.
+   */
+  function sameLevel(y1, y2, tol = 5, x, z) {
+    if (!fin(y1) || !fin(y2) || Math.abs(y1 - y2) <= tol) return true;
+    if (!fin(x) || !fin(z)) return false;
+    try { return Math.abs(ctx.heightAt(x, z, Math.max(y1, y2) + 0.6) - ctx.heightAt(x, z, Math.min(y1, y2) - 50)) < 1.5; } catch { return true; }
+  }
 
   /** Point au bord de la chaussée la plus proche, du côté de (x,z). outside > 0 = sur le trottoir. */
-  function curbPoint(x, z, outside = -1.6, filter = null) {
-    let n = filter ? roads.nearest(x, z, 260, filter) : null;
-    if (!n) n = roads.nearest(x, z, 260);
-    if (!n) return { x, z, yaw: 0, dirX: 1, dirZ: 0, perpX: 0, perpZ: 1, road: null, half: 4, ax: x, az: z };
+  function curbPoint(x, z, outside = -1.6, filter = isWalkable) {
+    // eleHint = 0 : à distance comparable, on préfère une rue au niveau du sol à une trémie ou à un tablier
+    let n = filter ? roads.nearest(x, z, 400, filter, 0) : null;
+    if (!n && filter !== isWalkable) n = roads.nearest(x, z, 400, isWalkable, 0);
+    if (!n) n = roads.nearest(x, z, 400, null, 0);
+    if (!n) return { x, z, y: groundY(x, z), ele: undefined, yaw: 0, dirX: 1, dirZ: 0, perpX: 0, perpZ: 1, road: null, half: 4, ax: x, az: z };
     const half = (n.road?.width || 8) / 2;
     const px = -n.dirZ * n.side, pz = n.dirX * n.side; // perpendiculaire, vers le point d'origine
     const off = Math.max(0, half + outside);
-    return { x: n.x + px * off, z: n.z + pz * off, yaw: n.yaw, dirX: n.dirX, dirZ: n.dirZ, perpX: px, perpZ: pz, road: n.road, half, ax: n.x, az: n.z };
+    const cx = n.x + px * off, cz = n.z + pz * off;
+    return { x: cx, z: cz, y: groundY(cx, cz, n.ele), ele: n.ele, yaw: n.yaw, dirX: n.dirX, dirZ: n.dirZ, perpX: px, perpZ: pz, road: n.road, half, ax: n.x, az: n.z };
   }
-  /** true si un disque de rayon r est libre de tout obstacle statique (immeubles, mobilier). */
-  function freeSpot(x, z, r = 0.6) {
-    try { return !ctx.collision?.test?.(x, z, r, 1); } catch { return true; }
+  /** true si un disque de rayon r est libre de tout obstacle statique (immeubles, mobilier) à la hauteur y. */
+  function freeSpot(x, z, r = 0.6, y) {
+    try { return !ctx.collision?.test?.(x, z, r, (fin(y) ? y : groundY(x, z)) + 1); } catch { return true; }
   }
   /** Point d'accès piéton près d'une adresse : sur le trottoir si possible, sinon de plus en plus près de la chaussée. */
-  function accessPoint(x, z, filter = null) {
+  function accessPoint(x, z, filter = isWalkable) {
     let c = null;
     for (const outside of [2.2, 1.2, 0.3, -1.2]) {
       c = curbPoint(x, z, outside, filter);
-      if (!c.road || freeSpot(c.x, c.z, 0.7)) return c;
+      if (!c.road || freeSpot(c.x, c.z, 0.7, c.y)) return c;
     }
     return c;
   }
-  /** Recale un point sur l'axe de la chaussée carrossable la plus proche s'il est hors chaussée. */
+  /** Recale un point sur l'axe de la rue carrossable la plus proche s'il est hors chaussée. */
   function roadPoint(x, z, maxSnap = 160) {
-    const n = roads.nearest(x, z, maxSnap, drivable);
-    if (!n) return { x, z };
+    const n = roads.nearest(x, z, maxSnap, isStreet, 0) || roads.nearest(x, z, maxSnap, drivable, 0);
+    if (!n) return { x, z, y: groundY(x, z) };
     const half = (n.road?.width || 8) / 2;
-    return n.dist > half - 1.5 ? { x: n.x, z: n.z } : { x, z };
+    const q = n.dist > half - 1.5 ? { x: n.x, z: n.z } : { x, z };
+    return { ...q, ele: n.ele, y: groundY(q.x, q.z, n.ele) };
   }
-  /** Emplacement pour poser une voiture : voie de droite de la rue la plus proche, `ahead` mètres plus loin. */
-  function lanePoint(x, z, ahead = 6) {
-    const n = roads.nearest(x, z, 600, drivable);
+  /**
+   * Emplacement pour poser une voiture : voie de droite de la rue la plus proche, `ahead` mètres plus loin.
+   * eleHint = élévation relative souhaitée (niveau du joueur ou du marqueur) ; retourne aussi y.
+   */
+  function lanePoint(x, z, ahead = 6, eleHint) {
+    const hint = fin(eleHint) ? eleHint : 0; // sans indication : le niveau de la rue
+    // avec indication : d'abord la chaussée où l'on se trouve, quelle qu'elle soit (un tablier de rocade compris)
+    let n = fin(eleHint) ? roads.nearest(x, z, 30, drivable, hint) : null;
+    if (n && Math.abs(n.ele - hint) > 2.5) n = null;
+    n = n || roads.nearest(x, z, 600, isStreet, hint) || roads.nearest(x, z, 1500, drivable, hint);
     if (n) {
       const half = (n.road?.width || 8) / 2;
       const lat = n.road?.oneway ? 0 : Math.min(half * 0.5, 3.2);
-      return { x: n.x - n.dirZ * lat + n.dirX * ahead, z: n.z + n.dirX * lat + n.dirZ * ahead, yaw: n.yaw, road: n.road };
+      const lx = n.x - n.dirZ * lat + n.dirX * ahead, lz = n.z + n.dirX * lat + n.dirZ * ahead;
+      return { x: lx, z: lz, y: roadY(lx, lz, n.ele), ele: n.ele, yaw: n.yaw, road: n.road };
     }
-    try { const w = ctx.world?.nearestRoadPoint?.(x, z); if (w) return { x: w.x, z: w.z, yaw: w.yaw ?? 0, road: w.road }; } catch { /* module ville indisponible */ }
-    return { x: x + 3, z, yaw: ctx.player?.yaw ?? 0, road: null };
+    try { const w = ctx.world?.nearestRoadPoint?.(x, z); if (w) return { x: w.x, z: w.z, y: fin(w.y) ? w.y : groundY(w.x, w.z), yaw: w.yaw ?? 0, road: w.road }; } catch { /* module ville indisponible */ }
+    return { x: x + 3, z, y: groundY(x + 3, z), yaw: ctx.player?.yaw ?? 0, road: null };
   }
+  const markers = createMarkers(ctx, { yAt: groundY });
+
+  /** Point d'apparition d'un nouveau joueur dans la ville courante, recalé sur la chaussée (lu par le module joueur). */
+  function computeSpawn() {
+    if (!SPAWN || !fin(SPAWN.x) || !fin(SPAWN.z)) return null;
+    let x = SPAWN.x, z = SPAWN.z, y, yaw = SPAWN.yaw;
+    try {
+      const w = ctx.world?.nearestRoadPoint?.(x, z);
+      if (w && fin(w.x) && fin(w.z) && Math.hypot(w.x - x, w.z - z) < 200) { x = w.x; z = w.z; if (fin(w.y)) y = w.y; if (!fin(yaw)) yaw = w.yaw; }
+    } catch { /* module ville indisponible */ }
+    if (!fin(y)) {
+      const n = roads.nearest(x, z, 200, isStreet) || roads.nearest(x, z, 200);
+      if (n && (x === SPAWN.x && z === SPAWN.z)) { x = n.x; z = n.z; if (!fin(yaw)) yaw = n.yaw; }
+      y = groundY(x, z, n && Math.hypot(n.x - x, n.z - z) < 4 ? n.ele : undefined);
+    }
+    // on apparaît tourné vers le monument de la place (yaw = 0 regarde vers -Z ; avant = (-sin yaw, -cos yaw))
+    const l = SPAWN.lookAt ? LANDMARKS.find((m) => m.id === SPAWN.lookAt) : null;
+    if (l && !fin(SPAWN.yaw)) yaw = Math.atan2(-(l.x - x), -(l.z - z));
+    return { x, z, y, yaw: fin(yaw) ? yaw : 0, label: SPAWN.label || ctx.city?.name || '' };
+  }
+  const spawn = computeSpawn();
 
   // sauvegarde locale (statistiques sans argent : progression de secours, cooldowns, collection)
   const save = {
@@ -91,12 +167,13 @@ export function createGameplay(ctx) {
   const PRIO = { manual: 0, track: 1, mission: 2 };
   let emitting = false;
   const nav = {
-    dest: null, path: null, length: 0, routedAt: 0, routedFrom: null,
-    set(x, z, label = '', source = 'manual') {
+    dest: null, path: null, length: 0, time: 0, routedAt: 0, lastMs: 0,
+    /** ele = élévation relative de la destination si elle est connue (pont, trémie). */
+    set(x, z, label = '', source = 'manual', ele) {
       const d = nav.dest;
       if (d && PRIO[d.source] > PRIO[source]) return;
       if (d && d.source === source && Math.hypot(d.x - x, d.z - z) < 2 && d.label === label) return;
-      nav.dest = { x, z, label, source };
+      nav.dest = { x, z, label, source, ele };
       reroute();
     },
     clear(source) {
@@ -110,11 +187,15 @@ export function createGameplay(ctx) {
     const d = nav.dest;
     if (!d) return;
     const p = playerPos();
-    const r = router.route(p.x, p.z, d.x, d.z);
-    nav.path = r.path; nav.length = r.length; nav.routedAt = ctx.time; nav.routedFrom = { x: p.x, z: p.z };
+    // en voiture (ou de loin) : l'itinéraire le plus rapide, qui préfère les voies rapides ; à pied et tout près : le plus court
+    const onFoot = ctx.player?.mode !== 'vehicle';
+    const metric = onFoot && Math.hypot(d.x - p.x, d.z - p.z) < 700 ? 'distance' : 'time';
+    const r = router.route(p.x, p.z, d.x, d.z, { metric, fromEle: eleOf(p.x, p.z, p.y), toEle: d.ele });
+    nav.path = r.path; nav.length = r.length; nav.time = r.time; nav.routedAt = ctx.time; nav.lastMs = r.ms;
     markers.setRibbonColor(d.source === 'mission' ? 0xffd60a : 0x35d0ff);
     emitting = true;
-    bus.emit('gps:set', { x: d.x, z: d.z, label: d.label, path: r.path, distance: r.length, source: 'gameplay' });
+    // path : [[x, z, ele?], ...] — la 3e composante (élévation relative de la chaussée) est facultative
+    bus.emit('gps:set', { x: d.x, z: d.z, label: d.label, path: r.path, distance: r.length, time: r.time, source: 'gameplay' });
     emitting = false;
   }
   // l'UI (carte) peut poser une destination sans itinéraire : on calcule le trajet et on réémet avec `path`
@@ -133,21 +214,27 @@ export function createGameplay(ctx) {
     if (d.source === 'manual' && direct < 12) { nav.clear('manual'); toast('Vous êtes arrivé à destination.', 'info'); return; }
     const proj = projectOnPath(nav.path, p.x, p.z);
     const since = ctx.time - nav.routedAt;
-    if (since > 1.5 && (proj.dist > 45 || (since > 8 && proj.dist > 18))) { reroute(); return; }
+    // hors de l'itinéraire : on recalcule (au plus toutes les 1,5 s ; les longs calculs sont espacés davantage)
+    const wait = Math.max(1.5, nav.lastMs / 10);
+    if (since > wait && (proj.dist > 45 || (since > 8 && proj.dist > 18))) { reroute(); return; }
     markers.setRibbon(nav.path, proj.index, proj.t, 340, ctx.player?.mode === 'vehicle' ? 3 : 1.6);
   }
 
   // ---------------------------------------------------------------- sous-modules
-  const g = { ctx, bus, store, markers, roads, router, nav, save, playerPos, toast, flash, curbPoint, accessPoint, freeSpot, drivable, roadPoint, lanePoint, missions: null, estate: null };
+  const g = { ctx, bus, store, markers, roads, router, nav, save, playerPos, toast, flash, curbPoint, accessPoint, freeSpot, drivable, isStreet, isWalkable, roadPoint, lanePoint, groundY, roadY, eleOf, sameLevel, missions: null, estate: null };
   const missions = (g.missions = createMissionRunner(g));
   const estate = (g.estate = createEstate(g));
 
-  // ---------------------------------------------------------------- à-côtés : macarons dorés et découverte des monuments
-  const collectibles = COLLECTIBLES.map((c) => (c.snap === false ? { ...c } : { ...c, ...roadPointOrSelf(c) }));
-  function roadPointOrSelf(c) { const p = accessPoint(c.x, c.z); return { x: p.x, z: p.z }; }
+  // ---------------------------------------------------------------- à-côtés : objets à collectionner et découverte des monuments
+  const CK = COLLECTIBLE || { name: 'Objet', found: 'Objet trouvé', color: '#ffd166', allFound: 'Collection complète !' };
+  const collectibles = (COLLECTIBLES || []).map((c) => {
+    if (c.snap === false) return { ...c, y: groundY(c.x, c.z) };
+    const p = accessPoint(c.x, c.z);
+    return { ...c, x: p.x, z: p.z, y: p.y };
+  });
   function refreshExtras() {
     const found = save.data.found || [];
-    markers.set('extras', collectibles.filter((c) => !found.includes(c.id)).map((c) => ({ x: c.x, z: c.z, color: '#ffd166', icon: ICON.star, radius: 1.1, beamH: 7, beamR: 0.25, range: 170, iconSize: 1.1, iconY: 1.7 })));
+    markers.set('extras', collectibles.filter((c) => !found.includes(c.id)).map((c) => ({ x: c.x, z: c.z, y: c.y, color: CK.color || '#ffd166', icon: ICON.star, radius: 1.1, beamH: 7, beamR: 0.25, range: 170, iconSize: 1.1, iconY: 1.7 })));
   }
   let extraT = 0;
   function updateExtras(dt) {
@@ -158,27 +245,29 @@ export function createGameplay(ctx) {
     const d = save.data;
     for (const c of collectibles) {
       if (d.found?.includes(c.id)) continue;
-      if (Math.hypot(c.x - p.x, c.z - p.z) < 3.2) {
+      if (Math.hypot(c.x - p.x, c.z - p.z) < 3.2 && sameLevel(p.y, c.y, 4, c.x, c.z)) {
         d.found = [...(d.found || []), c.id];
         save.write();
         refreshExtras();
         ctx.audio?.play?.('pickup');
-        toast(`Macaron doré trouvé (${c.label}) — ${d.found.length}/${collectibles.length}`, 'success');
-        bus.emit('gameplay:collect', { id: c.id, count: d.found.length, total: collectibles.length });
-        if (d.found.length === collectibles.length) toast('Tous les macarons dorés de Paris sont à vous. Chapeau !', 'success');
+        const mine = collectibles.filter((k) => d.found.includes(k.id)).length; // la sauvegarde est commune à toutes les villes
+        toast(`${CK.found} (${c.label}) — ${mine}/${collectibles.length}`, 'success');
+        bus.emit('gameplay:collect', { id: c.id, name: CK.name, count: mine, total: collectibles.length });
+        if (mine === collectibles.length) toast(CK.allFound, 'success');
       }
     }
-    for (const l of LANDMARKS) {
-      if (l.hidden) continue;
+    for (const l of sights) {
       if (d.seen?.includes(l.id)) continue;
       if (Math.hypot(l.x - p.x, l.z - p.z) < l.radius + 70) {
         d.seen = [...(d.seen || []), l.id];
         save.write();
-        toast(`Monument découvert : ${l.name} (${d.seen.length}/${LANDMARKS.filter((m) => !m.hidden).length})`, 'success');
-        bus.emit('gameplay:discover', { id: l.id, name: l.name, count: d.seen.length, total: LANDMARKS.filter((m) => !m.hidden).length });
+        const seen = sights.filter((m) => d.seen.includes(m.id)).length;
+        toast(`Monument découvert : ${l.name} (${seen}/${sights.length})`, 'success');
+        bus.emit('gameplay:discover', { id: l.id, name: l.name, count: seen, total: sights.length });
       }
     }
   }
+  const sights = LANDMARKS.filter((l) => !l.hidden);
   refreshExtras();
 
   // ---------------------------------------------------------------- interaction (E) et invite à l'écran
@@ -186,9 +275,10 @@ export function createGameplay(ctx) {
   function nearestInteractable() {
     const p = playerPos();
     const out = [];
-    missions.collect(p.x, p.z, out);
-    estate.collect(p.x, p.z, out);
-    out.sort((a, b) => a.d - b.d);
+    missions.collect(p.x, p.z, out, p.y);
+    estate.collect(p.x, p.z, out, p.y);
+    // ce qui est utilisable passe avant ce qui est verrouillé ou en attente, puis le plus proche
+    out.sort((a, b) => (a.key ? 0 : 1) - (b.key ? 0 : 1) || a.d - b.d);
     return out[0] || null;
   }
   function showHint(it) {
@@ -259,18 +349,25 @@ export function createGameplay(ctx) {
     /** État détaillé de toutes les missions : [{ mission, available, locked, cooldownLeft, start:{x,z}, done }] */
     getMissionStates: () => missions.getMissionStates(),
     getMission: (id) => MISSION_BY_ID[id] || null,
+    /** Ville courante et ses repères nommés ({ nom: {x, z} }). */
+    city: ctx.city?.id || null,
+    places: PLACE,
+    /** Point d'apparition d'un nouveau joueur : { x, z, yaw, y, label } (recalé sur la chaussée). */
+    spawn,
+    SPAWN: spawn,
     get activeMission() { return store.mission; },
     get level() { return missions.level(); },
     get missionsDone() { return missions.missionsDone(); },
     /** Lance le guidage GPS vers (x,z). Retourne { path, length }. */
     routeTo(x, z, label = 'Destination') { nav.set(x, z, label, 'manual'); return { path: nav.path, length: nav.length }; },
     clearRoute() { nav.clear('manual'); },
-    /** Calcule un itinéraire sans l'afficher : { path: [[x,z],...], length, routed } */
-    computeRoute: (ax, az, bx, bz) => router.route(ax, az, bx, bz),
-    nearestRoadPoint: (x, z) => roads.nearest(x, z, 600),
+    /** Calcule un itinéraire sans l'afficher : { path: [[x,z,ele?],...], length, time, routed, partial, ms } ; opts = { metric, fromEle, toEle, budgetMs } */
+    computeRoute: (ax, az, bx, bz, opts) => router.route(ax, az, bx, bz, opts),
+    /** Point de chaussée le plus proche : { x, z, yaw, road, dist, ele, y } */
+    nearestRoadPoint: (x, z, y) => { const n = roads.nearest(x, z, 600, null, eleOf(x, z, y)); return n ? { ...n, y: groundY(n.x, n.z, n.ele) } : null; },
     spawnPersonalCar: (typeId) => estate.spawnPersonalCar(typeId),
     get personalCar() { return estate.personalCar; },
-    get stats() { return { missionsDone: missions.missionsDone(), level: missions.level(), collectibles: (save.data.found || []).length, collectiblesTotal: collectibles.length, landmarksSeen: (save.data.seen || []).length }; },
+    get stats() { return { missionsDone: missions.missionsDone(), level: missions.level(), collectibles: collectibles.filter((c) => (save.data.found || []).includes(c.id)).length, collectiblesTotal: collectibles.length, collectibleName: CK.name, landmarksSeen: sights.filter((l) => (save.data.seen || []).includes(l.id)).length, landmarksTotal: sights.length }; },
     update(dt) {
       missions.update(dt);
       estate.update(dt);

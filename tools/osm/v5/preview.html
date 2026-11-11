@@ -1,0 +1,85 @@
+<!doctype html>
+<html lang="fr"><head><meta charset="utf-8"><title>Aperçu des données (v5)</title>
+<style>html,body{margin:0;background:#ece8df}canvas{display:block}</style></head>
+<body><canvas id="c"></canvas>
+<script type="module">
+// Rendu 2D de contrôle d'une ville du contrat v5. Paramètres : ?city=toulouse&cx=&cz=&span= (mètres) ; &ele=1 colore
+// les routes par élévation ; &nodes=1 montre les nœuds du graphe ; &terrain=1 affiche le relief en fond.
+import { geoFor, CITIES } from '/shared/cities.js';
+const q = new URLSearchParams(location.search);
+const city = q.get('city') || 'toulouse', { BOUNDS } = geoFor(city), files = CITIES[city].files;
+const W = innerWidth, H = innerHeight, cv = document.getElementById('c'); cv.width = W; cv.height = H;
+const g = cv.getContext('2d');
+const get = async (u, bin) => { if (!u) return null; const r = await fetch(u); if (!r.ok) return null; return bin ? r.arrayBuffer() : r.json(); };
+const [data, bbuf, po, terrain, lm, bmeta, bmbuf] = await Promise.all([get(files.roads), get(files.buildings, true), get(files.pois), get(files.terrain), import(`/shared/cities/${city}/landmarks.js`).catch(() => null), get(files.buildingsMeta), get(files.buildingsMetaBin, true)]);
+const bld = bbuf ? new Float32Array(bbuf) : null, bm = bmbuf ? new Uint8Array(bmbuf) : null;
+const zoom = q.has('span');
+let x0 = BOUNDS.minX - 150, x1 = BOUNDS.maxX + 150, z0 = BOUNDS.minZ - 150, z1 = BOUNDS.maxZ + 150;
+if (zoom) { const cx = +q.get('cx') || 0, cz = +q.get('cz') || 0, s = +q.get('span'); x0 = cx - s / 2; x1 = cx + s / 2; z0 = cz - (s * H / W) / 2; z1 = cz + (s * H / W) / 2; }
+const k = Math.min(W / (x1 - x0), H / (z1 - z0));
+const X = (x) => (x - x0) * k, Z = (z) => (z - z0) * k;
+const vis = (p) => p.some(([x, z]) => x >= x0 && x <= x1 && z >= z0 && z <= z1) || p.length > 200;
+const path = (p, close) => { g.beginPath(); for (let i = 0; i < p.length; i++) i ? g.lineTo(X(p[i][0]), Z(p[i][1])) : g.moveTo(X(p[0][0]), Z(p[0][1])); if (close) g.closePath(); };
+const poly = (p, fill, stroke) => { if (!vis(p)) return; path(p, true); if (fill) { g.fillStyle = fill; g.fill(); } if (stroke) { g.strokeStyle = stroke; g.lineWidth = 1; g.stroke(); } };
+const line = (p, w, col) => { if (!vis(p)) return; path(p); g.lineWidth = w; g.strokeStyle = col; g.stroke(); };
+const TER = terrain && q.has('terrain'); // mode relief : teintes hypsométriques + ombrage, sans surfaces ni bâtiments
+if (TER) {
+  const { x0: tx, z0: tz, cell, nx, nz, scale, data: d } = terrain; const s = Math.max(1, cell * k);
+  const ramp = [[0, [233, 240, 226]], [3, [214, 232, 190]], [10, [240, 232, 170]], [25, [226, 190, 120]], [50, [196, 140, 90]], [80, [150, 100, 80]], [115, [110, 80, 80]]];
+  const colour = (h) => { for (let i = 1; i < ramp.length; i++) if (h <= ramp[i][0]) { const t = (h - ramp[i - 1][0]) / (ramp[i][0] - ramp[i - 1][0]); return ramp[i - 1][1].map((c, j) => c + (ramp[i][1][j] - c) * t); } return ramp[ramp.length - 1][1]; };
+  for (let iz = 0; iz < nz; iz++) for (let ix = 0; ix < nx; ix++) { const px = X(tx + ix * cell), pz = Z(tz + iz * cell); if (px < -s || pz < -s || px > W || pz > H) continue; const h = d[iz * nx + ix] * scale; const hx = d[iz * nx + Math.min(nx - 1, ix + 1)] * scale, hz = d[Math.min(nz - 1, iz + 1) * nx + ix] * scale; const shade = Math.max(0.55, Math.min(1.25, 1 + ((h - hx) + (h - hz)) / cell * 2.2)); const c = colour(h); g.fillStyle = `rgb(${Math.min(255, c[0] * shade) | 0},${Math.min(255, c[1] * shade) | 0},${Math.min(255, c[2] * shade) | 0})`; g.fillRect(px - s / 2, pz - s / 2, s + 0.6, s + 0.6); }
+}
+const AREA = { residential: '#e6e0d6', commercial: '#ecd9d5', industrial: '#ddd6e3', farmland: '#eef0c9', forest: '#9cc487', grass: '#c3e0a3', parking: '#d3d6da', pitch: '#8fd0a8', cemetery: '#bcd0b5', railway: '#d9d2cf', construction: '#d8cfa9', apron: '#cfd2d8', taxiway: '#b9bcc6', runway: '#8f93a0', pedestrian: '#e2d8c4', cobble: '#d6ccba', gravel: '#eadfbf' };
+if (po && !TER) for (const pass of [['residential', 'commercial', 'industrial', 'farmland', 'railway', 'construction'], ['forest', 'grass', 'cemetery', 'pedestrian', 'cobble', 'gravel'], ['parking', 'pitch', 'apron'], ['taxiway', 'runway']]) for (const a of po.areas) if (pass.includes(a.kind)) poly(a.polygon, AREA[a.kind]);
+if (!TER) { for (const p of data.plazas) poly(p.polygon, '#e2d8c4'); for (const p of data.parks) poly(p.polygon, '#aad590'); }
+for (const p of data.river.polygons) poly(p, '#7fb2e5', '#4a86c8');
+for (const i of data.river.islands || []) poly(i.polygon, '#cfe3b4', '#9aa86a');
+for (const w of data.waterways || []) line(w.points, Math.max(zoom ? 1 : 0.6, w.width * k), w.kind === 'canal' ? '#5d9fdc' : '#8fbde8');
+if (po) { for (const w of po.water) poly(w.polygon, '#6aa9e8'); if (zoom) for (const p of po.paths) line(p.points, Math.max(0.5, p.width * k), p.kind === 'steps' ? '#b0563a' : '#f6efd9'); }
+if (bld && !TER) {
+  const KC = bmeta ? Object.fromEntries(bmeta.kinds.map((n, i) => [i, { house: '#b98b6e', toulousaine: '#c8765a', apartment: '#a8887c', tower: '#7d6f8f', slab: '#8f8296', commercial: '#c59a9a', retail: '#c59a9a', industrial: '#9a9fb0', office: '#8ea3b8', school: '#c9a85f', hospital: '#c97f8f', church: '#6f5f55', civic: '#9b7fb5', sport: '#7fb59b', station: '#555', parking: '#a9adb3', greenhouse: '#a8cdb6', annex: '#c9b9a8', hangar_aero: '#6f7f99' }[n] || '#a59a92'])) : null;
+  for (let i = 0; i < bld.length; i += 6) {
+    const cx = bld[i], cz = bld[i + 1]; if (cx < x0 - 200 || cx > x1 + 200 || cz < z0 - 200 || cz > z1 + 200) continue;
+    const w = bld[i + 2], d = bld[i + 3], rot = bld[i + 4];
+    g.fillStyle = KC && bm ? KC[bm[(i / 6) * bmeta.stride]] : 'rgba(120,100,90,0.6)';
+    g.save(); g.translate(X(cx), Z(cz)); g.rotate(-rot * Math.PI / 180); g.globalAlpha = 0.8; g.fillRect(-w * k / 2, -d * k / 2, w * k, d * k); g.restore();
+  }
+  g.globalAlpha = 1;
+}
+if (zoom) for (const r of data.roads) { if (r.sidewalk === undefined || !vis(r.points)) continue; path(r.points); g.lineWidth = (r.width + 2 * r.sidewalk) * k; g.strokeStyle = 'rgba(255,255,255,0.7)'; g.stroke(); }
+const inGraph = new Set(data.graph.edges.map((e) => e[2]));
+const col = { motorway: '#c2185b', trunk: '#e0457b', ramp: '#e9839f', avenue: '#d9534f', boulevard: '#e08a1e', street: '#666', quay: '#1f6fb5', pedestrian: '#2aa198' };
+const eleCol = (e) => (e > 0.3 ? `rgb(${200 + Math.min(55, e * 5) | 0},${150 - Math.min(150, e * 12) | 0},0)` : e < -0.3 ? `rgb(0,${120 - Math.min(110, -e * 10) | 0},${200 + Math.min(55, -e * 5) | 0})` : null);
+const order = ['pedestrian', 'street', 'quay', 'avenue', 'boulevard', 'ramp', 'trunk', 'motorway'];
+for (const kind of order) for (const r of data.roads) {
+  if (r.kind !== kind || !vis(r.points)) continue;
+  const w = Math.max(r.service ? 0.3 : kind === 'street' ? 0.5 : 0.9, r.width * k * (zoom ? 1 : 0.5));
+  let c = r.service ? '#aaa' : col[kind] || '#000';
+  if (r.kind !== 'pedestrian' && !r.service && !r.busway && !inGraph.has(r.id)) c = '#ff00ff';
+  if (r.tunnel) g.setLineDash([4, 3]);
+  line(r.points, w, c); g.setLineDash([]);
+}
+if (q.has('ele') || zoom) { // surcouche : segments dénivelés
+  const lay = [];
+  for (const r of data.roads) if (r.ele && vis(r.points)) for (let i = 1; i < r.points.length; i++) { const e = (r.ele[i - 1] + r.ele[i]) / 2, c = eleCol(e); if (c) lay.push([e, r.points[i - 1], r.points[i], Math.max(1.5, r.width * k * (zoom ? 1 : 0.6)), c, r.tunnel]); }
+  for (const r of data.rails || []) if (r.ele && vis(r.points)) for (let i = 1; i < r.points.length; i++) { const e = (r.ele[i - 1] + r.ele[i]) / 2, c = eleCol(e); if (c) lay.push([e, r.points[i - 1], r.points[i], Math.max(1, 3 * k), c, false, true]); }
+  lay.sort((a, b) => a[0] - b[0]);
+  for (const [, a, b, w, c, tun, rail] of lay) { g.beginPath(); g.moveTo(X(a[0]), Z(a[1])); g.lineTo(X(b[0]), Z(b[1])); g.lineWidth = w; g.strokeStyle = c; g.setLineDash(tun ? [4, 3] : rail ? [2, 2] : []); g.stroke(); }
+  g.setLineDash([]);
+}
+const RC = { tram: '#0a8f4f', train: '#222', metro: '#b100b1', cable: '#ff6f00' };
+for (const r of data.rails || []) { if (!vis(r.points)) continue; path(r.points); g.lineWidth = r.yard ? 0.5 : zoom ? 1.6 : 1; g.strokeStyle = RC[r.kind]; if (r.kind !== 'cable' && !zoom) g.globalAlpha = 0.8; g.stroke(); g.globalAlpha = 1; }
+if (zoom && q.has('nodes')) { g.fillStyle = '#000'; for (const [x, z] of data.graph.nodes) g.fillRect(X(x) - 1, Z(z) - 1, 2, 2); }
+if (po && !TER) {
+  g.fillStyle = zoom ? '#1e7d32' : 'rgba(30,125,50,0.55)'; const tr = zoom ? Math.max(1.2, 2.5 * k) : 0.6;
+  for (let i = 0; i < po.trees.length; i += 2) { const px = X(po.trees[i]), pz = Z(po.trees[i + 1]); if (px < 0 || pz < 0 || px > W || pz > H) continue; g.beginPath(); g.arc(px, pz, tr, 0, 7); g.fill(); }
+  const pc = { metro: '#0033cc', tram: '#0a8f4f', station: '#000', cafe: '#e67e22', restaurant: '#c0392b', bakery: '#b7950b', pharmacy: '#16a085', fountain: '#2980b9', statue: '#6c3483', church: '#7f8c8d', theatre: '#d81b60', museum: '#8e44ad', hotel: '#34495e', school: '#f39c12', market: '#d35400', lock: '#004d80', pylon: '#ff6f00', velo: '#00bcd4', busstop: '#607d8b' };
+  const major = ['metro', 'tram', 'station', 'lock', 'pylon', 'market'];
+  for (const p of po.pois) { if (!zoom && !major.includes(p.kind)) continue; const px = X(p.x), pz = Z(p.z); if (px < 0 || pz < 0 || px > W || pz > H) continue; g.fillStyle = pc[p.kind] || '#444'; const s = zoom ? 6 : 3; g.fillRect(px - s / 2, pz - s / 2, s, s); if (zoom && k > 0.6 && major.concat(['museum', 'church', 'theatre']).includes(p.kind) && p.name) { g.font = '10px sans-serif'; g.fillText(p.kind[0].toUpperCase() + ' ' + p.name.slice(0, 26), px + 5, pz + 3); } }
+}
+g.strokeStyle = '#000'; g.lineWidth = 1; g.setLineDash([6, 4]); g.strokeRect(X(BOUNDS.minX), Z(BOUNDS.minZ), (BOUNDS.maxX - BOUNDS.minX) * k, (BOUNDS.maxZ - BOUNDS.minZ) * k); g.setLineDash([]);
+g.font = 'bold 12px sans-serif';
+for (const l of lm?.LANDMARKS || []) { g.beginPath(); g.arc(X(l.x), Z(l.z), Math.max(2, l.radius * k), 0, 7); g.strokeStyle = '#7b1fa2'; g.lineWidth = 1.5; g.stroke(); g.fillStyle = '#4a0072'; g.fillText(l.name, X(l.x) + l.radius * k + 3, Z(l.z) + 4); }
+if (zoom) { g.fillStyle = '#000'; g.fillRect(20, H - 26, 100 * k, 4); g.font = '11px sans-serif'; g.fillText('100 m', 20, H - 30); }
+document.title = 'ok';
+</script></body></html>

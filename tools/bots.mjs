@@ -1,6 +1,12 @@
 // Robots de test multijoueur : N clients qui rejoignent une salle et tournent en rond (voiture ou à pied).
-// Usage : node tools/bots.mjs --url ws://localhost:8080/ws --room test --n 5
-//   [--x 0 --z 0]      centre des trajectoires (défaut : 40 m au sud de la Concorde)
+// Usage : node tools/bots.mjs --url ws://localhost:8080/ws --room test --n 5 [--city toulouse]
+//   [--city paris]     ville des robots (shared/cities.js) : ils rejoignent la salle de CETTE ville et ne sont vus
+//                      que par les joueurs de la même ville. Leurs pseudos portent l'initiale de la ville hors Paris
+//                      (Robot-T1…) : une flotte par ville peut tourner en même temps sans partager ses comptes.
+//   [--x 0 --z 0]      centre des trajectoires, dans le repère de la ville (défaut : un espace dégagé près de son
+//                      origine — 40 m au sud de l'obélisque de la Concorde à Paris, milieu de la place du Capitole
+//                      à Toulouse, l'origine elle-même ailleurs)
+//   [--name Robot]     préfixe des pseudos
 //   [--radius 25]      rayon du premier cercle (chaque robot ajoute 6 m)
 //   [--foot 1]         nombre de robots à pied (défaut : 1 robot sur 4)
 //   [--points "x,z;x,z;…"]  parcours fermé à suivre à la place des cercles
@@ -13,12 +19,20 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { C, S, PROTOCOL_VERSION, CLIENT_SEND_HZ, encode, decode, encodeState } from '../shared/protocol.js';
 import { VEHICLES } from '../shared/catalog.js';
+import { CITIES, DEFAULT_CITY } from '../shared/cities.js';
 
 const args = process.argv.slice(2);
 const opt = (n, d) => { const i = args.indexOf('--' + n); return i >= 0 ? args[i + 1] : d; };
 const url = opt('url', 'ws://localhost:8080/ws'), room = opt('room', 'test');
 const n = Math.max(1, Math.min(31, +opt('n', 5)));
-const cx = +opt('x', 0), cz = +opt('z', 40), radius0 = +opt('radius', 25);
+const city = opt('city', DEFAULT_CITY);
+if (!CITIES[city]) { console.error(`Ville inconnue : ${city} (villes : ${Object.keys(CITIES).join(', ')})`); process.exit(2); }
+const prefix = opt('name', 'Robot') + '-' + (city === DEFAULT_CITY ? '' : city[0].toUpperCase());
+// Autour de l'origine de la ville, décalé vers l'espace dégagé le plus proche : l'origine de Paris est l'obélisque de
+// la Concorde, celle de Toulouse tombe dans le bâtiment du Capitole (la place est juste à l'ouest de la façade).
+const CENTERS = { paris: [0, 40], toulouse: [-85, 20] };
+const [dcx, dcz] = CENTERS[city] || [0, 0];
+const cx = +opt('x', dcx), cz = +opt('z', dcz), radius0 = +opt('radius', 25);
 const footCount = opt('foot') != null ? +opt('foot') : Math.floor(n / 4);
 const chatEvery = +opt('chat', 0), secs = +opt('secs', 0);
 const points = opt('points', '').split(';').filter(Boolean).map((p) => p.split(',').map(Number)).filter((p) => p.length === 2 && p.every(Number.isFinite));
@@ -56,7 +70,7 @@ function makePath(i, foot) {
 }
 
 function startBot(i) {
-  const name = `Robot-${i + 1}`, key = `${url}|${name}`;
+  const name = `${prefix}${i + 1}`, key = `${url}|${name}`;
   const foot = i < footCount;
   const car = VEHICLES[(i * 3 + 1) % VEHICLES.length];
   const color = car.colors[i % car.colors.length];
@@ -66,14 +80,15 @@ function startBot(i) {
 
   function connect() {
     ws = new WebSocket(url);
-    ws.on('open', () => ws.send(encode(C.HELLO, { v: PROTOCOL_VERSION, name, room, token: tokens[key] })));
+    ws.on('open', () => ws.send(encode(C.HELLO, { v: PROTOCOL_VERSION, name, room, city, token: tokens[key] })));
     ws.on('message', (raw) => {
       const m = decode(raw);
       if (!m) return;
       if (m.t === S.WELCOME) {
         retry = 500;
         if (m.token) { tokens[key] = m.token; saveTokens(); }
-        console.log(`${m.me.name} connecté dans « ${m.room} » (${foot ? 'à pied' : car.name}) — ${m.players.length} autre(s) joueur(s)`);
+        if ((m.city || DEFAULT_CITY) !== city) console.warn(`${name} : le serveur a répondu pour « ${m.city || DEFAULT_CITY} » au lieu de « ${city} » (serveur d'avant le multi-villes ?)`);
+        console.log(`${m.me.name} connecté dans « ${m.room} » à ${CITIES[m.city || DEFAULT_CITY]?.name} (${foot ? 'à pied' : car.name}) — ${m.players.length} autre(s) joueur(s)`);
         clearInterval(timer);
         timer = setInterval(() => {
           if (ws.readyState !== 1) return;

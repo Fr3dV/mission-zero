@@ -85,7 +85,7 @@ export function createEffects(ctx) {
       if (d.rest && d.life > 1) continue;
       if (!d.rest) {
         d.vy -= 9.81 * dt; d.x += d.vx * dt; d.y += d.vy * dt; d.z += d.vz * dt; d.rx += d.w * dt; d.rz += d.w * 0.7 * dt;
-        const g = ctx.heightAt(d.x, d.z) + d.s * d.sy * 0.5 + 0.01;
+        const g = ctx.heightAt(d.x, d.z, d.y + 0.3) + d.s * d.sy * 0.5 + 0.01;   // sol du niveau où tombe le débris
         if (d.y < g) { d.y = g; if (Math.abs(d.vy) < 1.2) { d.rest = true; d.rx = 0; d.rz = 0; } d.vy = -d.vy * 0.3; d.vx *= 0.55; d.vz *= 0.55; d.w *= 0.5; }
       }
       const k = Math.min(1, d.life);

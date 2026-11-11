@@ -12,6 +12,17 @@ import {
 } from './geom.mjs';
 import { enrichRoads, buildingsMeta, BUILDING_KINDS, ROOF_SHAPES } from './enrich.mjs';
 
+// Option --city <id> (défaut : paris, comportement inchangé). Pour une ville du contrat v5 (toulouse) :
+//   node tools/osm/build.mjs --city toulouse [--only roads,buildings,terrain,pois]
+// enchaîne tools/osm/v5/roads.mjs, buildings.mjs, terrain.mjs, pois.mjs (dans cet ordre : les trois derniers lisent roads.json).
+{ const i = process.argv.indexOf('--city'), city = i >= 0 ? process.argv[i + 1] : 'paris';
+  if (city !== 'paris') {
+    const j = process.argv.indexOf('--only'), only = j >= 0 ? process.argv[j + 1].split(',') : ['roads', 'buildings', 'terrain', 'pois'];
+    for (const step of ['roads', 'buildings', 'terrain', 'pois']) if (only.includes(step)) { console.log(`\n── ${city} : ${step} ──`); await import(`./v5/${step}.mjs`); }
+    process.exit(0);
+  } }
+
+
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
 const CACHE = join(ROOT, '.data', 'osm');
 const OUT = join(ROOT, 'shared', 'world');

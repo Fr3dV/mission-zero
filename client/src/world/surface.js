@@ -3,17 +3,30 @@
 // aSurf = (couche, biais de profondeur, mode, -)
 //   mode 0 : texture plaquée en coordonnées monde (xz) ; 1 : coordonnées uv (murs, en mètres)
 //   mode 2 : pointillés de peinture le long de uv.y (période 1) ; 3 : bandes de passage piéton le long de uv.x
-// couche 8 = sol générique : le masque (Seine / pelouse / allée / place) choisit la matière, la Seine est découpée.
+//   mode 4 : peinture pleine ; 5 : peinture pleine émissive (éclairage de tunnel, balisage)
+// couche 8 = sol générique : le masque choisit la matière et découpe le sol (fleuve, tranchées). Deux formats de
+// masque (voir masks.js) : 'legacy' (poids V/B lissés) et 'classes' (indice de classe par texel, mélange bilinéaire).
 import { LAYER_SIZE } from './textures.js';
+import { CLASSES } from './masks.js';
 
-export function createSurfaceMaterial(THREE, tex, masks, uniforms) {
+/**
+ * @param mask { texture, rect (Vector4 x0, z0, 1/tailleX, 1/tailleZ), size (texels) }
+ * @param opts { classes: bool } format du masque
+ */
+export function createSurfaceMaterial(THREE, tex, mask, uniforms, opts = {}) {
   const mat = new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.9, metalness: 0 });
   const inv = LAYER_SIZE.map((s) => (1 / s).toFixed(5)).join(', ');
+  const classes = !!opts.classes;
+  const f = (v) => (+v).toFixed(3);
+  const clLayer = CLASSES.map((c) => c[0]).join(', '), clTint = CLASSES.map((c) => `vec3(${f(c[1])}, ${f(c[2])}, ${f(c[3])})`).join(', '), clRough = CLASSES.map((c) => f(c[4])).join(', ');
+  const uMask = { value: mask.texture }, uMaskRect = { value: mask.rect }, uMaskSize = { value: mask.size || 1 };
+  mat.userData.mask = { uMask, uMaskRect, uMaskSize };
   mat.onBeforeCompile = (sh) => {
     sh.uniforms.uSurfAlb = { value: tex.albedo };
     sh.uniforms.uSurfNrm = { value: tex.normal };
-    sh.uniforms.uMask = { value: masks.texture };
-    sh.uniforms.uMaskRect = { value: masks.rect };
+    sh.uniforms.uMask = uMask;
+    sh.uniforms.uMaskRect = uMaskRect;
+    sh.uniforms.uMaskSize = uMaskSize;
     sh.uniforms.uNight = uniforms.uNight;
     sh.vertexShader = sh.vertexShader
       .replace('#include <common>', `#include <common>
@@ -27,10 +40,12 @@ vSurf = aSurf.xyz; vSUv = uv;
 vWPos = (modelMatrix * vec4(transformed, 1.0)).xyz;`);
     sh.fragmentShader = sh.fragmentShader
       .replace('#include <common>', `#include <common>
+${classes ? '#define MZ_MASK_CLASSES' : ''}
 uniform sampler2DArray uSurfAlb;
 uniform sampler2DArray uSurfNrm;
 uniform sampler2D uMask;
 uniform vec4 uMaskRect;
+uniform float uMaskSize;
 uniform float uNight;
 varying vec3 vSurf;
 varying vec2 vSUv;
@@ -41,7 +56,21 @@ float sStripe(float x, float duty) {
   float w = fwidth(x), f = fract(x);
   float c = smoothstep(0.0, w, f) * (1.0 - smoothstep(duty, duty + w, f));
   return mix(c, duty, clamp(w * 2.5 - 0.5, 0.0, 1.0));
-}`)
+}
+#ifdef MZ_MASK_CLASSES
+const int S_CL_LAYER[16] = int[16](${clLayer});
+const vec3 S_CL_TINT[16] = vec3[16](${clTint});
+const float S_CL_ROUGH[16] = float[16](${clRough});
+void sClass(int c, float w, vec2 uv, vec2 gx, vec2 gy, inout vec3 alb, inout vec3 nrm, inout float rough) {
+  if (w < 0.004) return;
+  int li = S_CL_LAYER[c]; float k = S_INV[li];
+  vec3 tc = vec3(uv * k, float(li));
+  alb += w * textureGrad(uSurfAlb, tc, gx * k, gy * k).rgb * S_CL_TINT[c];
+  nrm += w * textureGrad(uSurfNrm, tc, gx * k, gy * k).xyz;
+  rough += w * S_CL_ROUGH[c];
+}
+int sClassAt(ivec2 p, ivec2 mx) { return int(texelFetch(uMask, clamp(p, ivec2(0), mx), 0).g * 255.0 + 0.5); }
+#endif`)
       .replace('#include <map_fragment>', `
 float sLayer = floor(vSurf.x + 0.5);
 float sMode = floor(vSurf.z + 0.5);
@@ -50,7 +79,25 @@ vec3 sAlb; vec3 sN; float sRough;
 float sMacro = texture(uSurfAlb, vec3(vWPos.xz * 0.0041, 7.0)).g * texture(uSurfAlb, vec3(vWPos.zx * 0.019, 7.0)).g;
 sMacro = clamp(0.62 + sMacro * 0.6, 0.75, 1.15);
 if (sLayer > 7.5) {
-  vec4 m = textureLod(uMask, (vWPos.xz - uMaskRect.xy) * uMaskRect.zw, 0.0);
+  vec2 mUv = (vWPos.xz - uMaskRect.xy) * uMaskRect.zw;
+#ifdef MZ_MASK_CLASSES
+  if (textureLod(uMask, mUv, 0.0).r > 0.42) discard;
+  vec2 mp = mUv * uMaskSize - 0.5, mf = smoothstep(0.18, 0.82, fract(mp));
+  ivec2 mi = ivec2(floor(mp)), mx = ivec2(int(uMaskSize) - 1);
+  int c00 = sClassAt(mi, mx), c10 = sClassAt(mi + ivec2(1, 0), mx), c01 = sClassAt(mi + ivec2(0, 1), mx), c11 = sClassAt(mi + ivec2(1, 1), mx);
+  vec2 gx = dFdx(sUv), gy = dFdy(sUv);
+  sAlb = vec3(0.0); sN = vec3(0.0); sRough = 0.0;
+  if (c00 == c10 && c00 == c01 && c00 == c11) sClass(c00, 1.0, sUv, gx, gy, sAlb, sN, sRough);
+  else {
+    sClass(c00, (1.0 - mf.x) * (1.0 - mf.y), sUv, gx, gy, sAlb, sN, sRough); sClass(c10, mf.x * (1.0 - mf.y), sUv, gx, gy, sAlb, sN, sRough);
+    sClass(c01, (1.0 - mf.x) * mf.y, sUv, gx, gy, sAlb, sN, sRough); sClass(c11, mf.x * mf.y, sUv, gx, gy, sAlb, sN, sRough);
+    float ws = max(sRough, 0.05); // les poids ignorés (< 0,004) sont renormalisés via la rugosité cumulée ≈ somme des poids
+    if (sN.z < 0.2) sN = vec3(0.5, 0.5, 1.0);
+  }
+  // végétation et champs : variation à grande échelle supplémentaire
+  sAlb *= 0.84 + 0.32 * texture(uSurfAlb, vec3(vWPos.xz * 0.011, 7.0)).g;
+#else
+  vec4 m = textureLod(uMask, mUv, 0.0);
   if (m.r > 0.42) discard;
   float mg = smoothstep(0.38, 0.62, m.g), mb = smoothstep(0.38, 0.62, m.b);
   float wGrass = mg * (1.0 - mb), wGrav = mg * mb, wPlaza = mb * (1.0 - mg), wBase = (1.0 - mg) * (1.0 - mb);
@@ -62,6 +109,7 @@ if (sLayer > 7.5) {
   sRough = 0.86 * wBase + 0.72 * wPlaza + 1.0 * (wGrass + wGrav);
   // herbe : variation large échelle supplémentaire
   sAlb *= mix(1.0, 0.8 + 0.4 * texture(uSurfAlb, vec3(vWPos.xz * 0.011, 7.0)).g, wGrass);
+#endif
 } else {
   int li = int(sLayer);
   vec3 tc = vec3(sUv * S_INV[li], sLayer);
@@ -86,7 +134,8 @@ if (sMode > 1.5) {
       .replace('#include <roughnessmap_fragment>', `#include <roughnessmap_fragment>
 roughnessFactor = sRough;`)
       .replace('#include <emissivemap_fragment>', `#include <emissivemap_fragment>
-totalEmissiveRadiance += diffuseColor.rgb * vec3(1.0, 0.72, 0.45) * (0.075 * uNight);`)
+totalEmissiveRadiance += diffuseColor.rgb * vec3(1.0, 0.72, 0.45) * (0.075 * uNight);
+if (sMode > 4.5) totalEmissiveRadiance += vColor.rgb * 2.2;`)
       .replace('#include <normal_fragment_maps>', `#include <normal_fragment_maps>
 {
   vec3 q0 = dFdx(-vViewPosition), q1 = dFdy(-vViewPosition);
@@ -98,6 +147,6 @@ totalEmissiveRadiance += diffuseColor.rgb * vec3(1.0, 0.72, 0.45) * (0.075 * uNi
   normal = normalize(mat3(sT * sc, sB * sc, normal) * sN);
 }`);
   };
-  mat.customProgramCacheKey = () => 'mz-surface';
+  mat.customProgramCacheKey = () => 'mz-surface' + (classes ? '-c' : '');
   return mat;
 }

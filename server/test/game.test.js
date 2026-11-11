@@ -8,13 +8,14 @@ import { MemoryStore } from '../store/memory.js';
 import { FileStore } from '../store/file.js';
 import { FirestoreStore } from '../store/firestore.js';
 import { STARTING_MONEY, STARTER_VEHICLE, VEHICLES } from '../../shared/catalog.js';
-import { MISSIONS } from '../../shared/missions.js';
-import { PROPERTIES, SELL_BACK_RATIO } from '../../shared/properties.js';
+import { MISSIONS_BY_CITY } from '../../shared/missions.js';
+import { PROPERTIES_BY_CITY, SELL_BACK_RATIO } from '../../shared/properties.js';
 import { PROTOCOL_VERSION, MAX_PLAYERS_PER_ROOM, CLOSE, encodeState, decodeState } from '../../shared/protocol.js';
-import { BOUNDS } from '../../shared/geo.js';
+import { geoFor } from '../../shared/cities.js';
+const { BOUNDS } = geoFor('paris'); // les tests de ce fichier jouent à Paris (ville par défaut du protocole)
 
-const M = [...MISSIONS].sort((a, b) => b.minDurationSec - a.minDurationSec)[0]; // la plus longue : marge nette pour le test « trop rapide »
-const PROP = [...PROPERTIES].sort((a, b) => a.price - b.price)[0];
+const M = [...MISSIONS_BY_CITY.paris].sort((a, b) => b.minDurationSec - a.minDurationSec)[0]; // la plus longue : marge nette pour le test « trop rapide »
+const PROP = [...PROPERTIES_BY_CITY.paris].sort((a, b) => a.price - b.price)[0];
 const CAR = VEHICLES.filter((v) => v.price > STARTING_MONEY).sort((a, b) => a.price - b.price)[0];
 
 test('statique : /healthz, index.html, modules partagés et three', async () => {

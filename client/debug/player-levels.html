@@ -1,0 +1,155 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8" />
+  <title>Mission Zéro — test niveaux superposés (joueur)</title>
+  <style>html,body{margin:0;height:100%;overflow:hidden;background:#1b2330;font-family:system-ui,sans-serif;color:#fff}canvas{display:block}
+  #info{position:fixed;left:12px;top:8px;font-size:13px;opacity:.9;text-shadow:0 1px 2px #000;white-space:pre}#ui-root{position:fixed;inset:0;pointer-events:none}</style>
+  <script type="importmap">
+  { "imports": { "three": "/vendor/three/build/three.module.js", "three/addons/": "/vendor/three/examples/jsm/", "@shared/": "/shared/" } }
+  </script>
+</head>
+<body>
+<canvas id="game"></canvas><div id="ui-root"></div><div id="info"></div>
+<script type="module">
+// Banc d'essai du contrôleur à pied et de la caméra sur des NIVEAUX SUPERPOSÉS (contrat v5), sans le module ville :
+//   - tablier à +6,5 m (x ∈ [−5, 5], z ∈ [−40, −14]) au-dessus d'un sol à 0, avec rampe (x ∈ [−5, −1]) et escalier (x ∈ [1, 5]) ;
+//   - berge à −3 m (x ∈ [14, 26]) passant SOUS un pont à 0 (z ∈ [−4, 4]), accessible par une rampe (x ∈ [10, 14], z ∈ [10, 30]) ;
+//   - quai sans parapet : bord x = 14 (chute de 3 m) ; bord est du tablier x = 5 (chute de 6,5 m).
+// La couche de relief est enregistrée avec setHeightLayer en respectant la règle du contrat.
+// Pilotage : clavier/souris comme en jeu, ou window.__lv (tests scriptés, pas à pas fixe) — voir en bas.
+//   ?overview=1 : vue d'ensemble fixe au lieu de la caméra du joueur.
+import * as THREE from 'three';
+import { bus } from '/src/core/bus.js';
+import { store } from '/src/core/store.js';
+import { collision } from '/src/core/collision.js';
+import { heightAt, setHeightLayer, STEP_UP } from '@shared/terrain.js';
+import { createPlayer } from '/src/player/index.js';
+
+const params = new URLSearchParams(location.search);
+const canvas = document.getElementById('game');
+const renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2)); renderer.setSize(innerWidth, innerHeight);
+renderer.shadowMap.enabled = true; renderer.shadowMap.type = THREE.PCFSoftShadowMap; renderer.toneMapping = THREE.ACESFilmicToneMapping;
+const scene = new THREE.Scene(); scene.background = new THREE.Color(0x9fb9d4); scene.fog = new THREE.Fog(0x9fb9d4, 60, 220);
+const camera = new THREE.PerspectiveCamera(60, innerWidth / innerHeight, 0.3, 600);
+scene.add(new THREE.HemisphereLight(0xcfe3ff, 0x6b6257, 1.0));
+const sun = new THREE.DirectionalLight(0xfff1dd, 2.4); sun.position.set(-30, 50, 35); sun.castShadow = true; sun.shadow.mapSize.set(4096, 4096); sun.shadow.bias = -0.0004;
+Object.assign(sun.shadow.camera, { left: -70, right: 70, top: 70, bottom: -70, near: 1, far: 160 }); scene.add(sun);
+
+// ------------------------------------------------------------------ couche de relief (règle du contrat v5)
+const S = [0, 0, 0];
+function surfaces(x, z) {
+  let n = 0;
+  if (x >= 14 && x <= 26) S[n++] = -3;                                                        // berge
+  else if (x >= 10 && x < 14 && z >= 10) S[n++] = z <= 30 ? (-3 * (z - 10)) / 20 : -3;         // rampe de la berge + palier
+  else S[n++] = 0;                                                                              // sol
+  if (x >= 14 && x <= 26 && z >= -4 && z <= 4) S[n++] = 0;                                     // pont au-dessus de la berge
+  if (x >= -5 && x <= 5 && z >= -40 && z <= -14) S[n++] = 6.5;                                 // tablier
+  else if (x >= -5 && x <= -1 && z > -14 && z <= 18) S[n++] = (6.5 * (18 - z)) / 32;           // rampe du tablier
+  else if (x >= 1 && x <= 5 && z > -14 && z < -1) { const h = 6.5 - 0.25 * (Math.floor((z + 14) / 0.5) + 1); if (h > 0) S[n++] = h; } // escalier
+  return n;
+}
+setHeightLayer((x, z, base, y) => {
+  const n = surfaces(x, z);
+  if (n === 1) return S[0];
+  let best;
+  if (y === undefined) { best = S[0]; for (let i = 1; i < n; i++) if (Math.abs(S[i] - base) < Math.abs(best - base)) best = S[i]; return best; } // niveau de la rue
+  best = -Infinity; let low = Infinity;
+  for (let i = 0; i < n; i++) { const s = S[i]; if (s < low) low = s; if (s - y < STEP_UP && s > best) best = s; }
+  return best === -Infinity ? low : best;
+});
+
+// ------------------------------------------------------------------ décor (visuel) + collisions par niveau
+const mat = (c) => new THREE.MeshStandardMaterial({ color: c, roughness: 0.9 });
+function box(x0, x1, z0, z1, yTop, th, color) {
+  const m = new THREE.Mesh(new THREE.BoxGeometry(x1 - x0, th, z1 - z0), mat(color));
+  m.position.set((x0 + x1) / 2, yTop - th / 2, (z0 + z1) / 2); m.castShadow = m.receiveShadow = true; scene.add(m); return m;
+}
+function slope(x0, x1, z0, y0, z1, y1, th, color) { // plan incliné le long de z
+  const len = Math.hypot(z1 - z0, y1 - y0), m = new THREE.Mesh(new THREE.BoxGeometry(x1 - x0, th, len), mat(color));
+  m.position.set((x0 + x1) / 2, (y0 + y1) / 2 - th / 2, (z0 + z1) / 2); m.rotation.x = -Math.atan2(y1 - y0, z1 - z0); m.castShadow = m.receiveShadow = true; scene.add(m);
+}
+box(-70, 10, -70, 70, 0, 4, 0x8a867e); box(26, 70, -70, 70, 0, 4, 0x8a867e); box(10, 14, -70, 10, 0, 4, 0x8a867e);   // sol
+box(14, 26, -70, 70, -3, 1, 0xb9a57c); box(10, 14, 30, 70, -3, 1, 0xb9a57c); slope(10, 14, 10, 0, 30, -3, 0.4, 0x9c9486); // berge, palier, rampe
+box(14, 26, -4, 4, 0, 0.6, 0x6f747c);                                                                                    // pont
+box(-5, 5, -40, -14, 6.5, 0.6, 0x6f747c); slope(-5, -1, -14, 6.5, 18, 0, 0.4, 0x7d828a);                               // tablier + rampe
+for (let k = 0; k < 26; k++) { const h = 6.5 - 0.25 * (k + 1); if (h > 0) box(1, 5, -14 + k * 0.5, -13.5 + k * 0.5, h, 0.25, 0x9a9388); } // escalier
+for (const [px, pz] of [[-4.4, -38], [4.4, -38], [-4.4, -16], [4.4, -26]]) { // piles du tablier
+  const m = new THREE.Mesh(new THREE.CylinderGeometry(0.4, 0.4, 5.9, 12), mat(0x5d6168)); m.position.set(px, 2.95, pz); m.castShadow = true; scene.add(m);
+  collision.addCircle({ x: px, z: pz, r: 0.4, bottom: -1, top: 6.4, tag: 'pile' });
+}
+for (const z of [-4, 4]) { // parapets du pont : n'existent qu'au niveau du pont (on passe dessous sur la berge)
+  box(14, 26, z - 0.12, z + 0.12, 1.05, 1.05, 0x5d6168);
+  collision.addBox({ x: 20, z, hw: 6, hd: 0.14, bottom: -0.2, top: 1.3, tag: 'parapet' });
+}
+box(-5.12, -4.88, -40, -14, 7.55, 1.05, 0x5d6168); collision.addBox({ x: -5, z: -27, hw: 0.14, hd: 13, bottom: 6.3, top: 7.8, tag: 'parapet' }); // parapet ouest du tablier
+
+// ------------------------------------------------------------------ contexte minimal + joueur réel
+const ctx = {
+  THREE, renderer, scene, camera, canvas, uiRoot: document.getElementById('ui-root'), bus, store, collision, params,
+  heightAt, time: 0, fps: 60, quality: 'high',
+  world: { nearestRoadPoint: (x, z) => ({ x: 0, z: 30, yaw: 0, y: 0, road: null }) },
+  vehicles: { list: [], nearest: () => null },
+};
+window.__game = ctx;
+const player = ctx.player = createPlayer(ctx);
+bus.emit('boot:done');
+const overview = new THREE.PerspectiveCamera(42, innerWidth / innerHeight, 0.5, 600);
+overview.position.set(-34, 30, 46); overview.lookAt(6, 0, -8);
+
+// ------------------------------------------------------------------ pilotage scripté (pas fixe 1/60 s)
+const goal = { on: false, x: 0, z: 0, run: false };
+const baseUpdate = player.input.update.bind(player.input);
+player.input.update = (dt) => {
+  baseUpdate(dt);
+  if (!goal.on) return;
+  const st = player.input.state, dx = goal.x - player.pos.x, dz = goal.z - player.pos.z, l = Math.hypot(dx, dz) || 1, cy = player.camera.yaw;
+  st.moveY = -Math.sin(cy) * (dx / l) - Math.cos(cy) * (dz / l); st.moveX = Math.cos(cy) * (dx / l) - Math.sin(cy) * (dz / l); st.sprint = goal.run;
+};
+const trace = [];
+function step(dt = 1 / 60) {
+  ctx.time += dt; player.update(dt);
+  trace.push([+ctx.time.toFixed(3), +player.pos.x.toFixed(2), +player.pos.z.toFixed(2), +player.pos.y.toFixed(3), player.character.anim, player.grounded ? 1 : 0, +camera.position.y.toFixed(2)]);
+}
+const lv = window.__lv = {
+  manual: false, trace, step,
+  place(x, z, yaw = 0, y) { lv.manual = true; trace.length = 0; player.teleport(x, z, yaw, y); for (let i = 0; i < 20; i++) step(); return +player.pos.y.toFixed(3); },
+  /** Marche de point en point (pas fixe) ; renvoie un résumé de la hauteur suivie. */
+  walk(points, { run = false, timeout = 40 } = {}) {
+    lv.manual = true;
+    const i0 = trace.length;
+    for (const [x, z] of points) {
+      goal.on = true; goal.x = x; goal.z = z; goal.run = run;
+      let t = 0;
+      while (Math.hypot(x - player.pos.x, z - player.pos.z) > 0.35 && t < timeout) { step(); t += 1 / 60; }
+    }
+    goal.on = false;
+    for (let i = 0; i < 90; i++) step(); // laisse retomber / se stabiliser
+    return lv.summary(i0);
+  },
+  summary(i0 = 0) {
+    let yMin = Infinity, yMax = -Infinity, maxUp = 0, maxDown = 0, camMax = -Infinity, camMin = Infinity; const anims = new Set();
+    for (let i = i0; i < trace.length; i++) {
+      const r = trace[i], y = r[3]; if (y < yMin) yMin = y; if (y > yMax) yMax = y; anims.add(r[4]); if (r[6] > camMax) camMax = r[6]; if (r[6] < camMin) camMin = r[6];
+      if (i > i0) { const d = y - trace[i - 1][3]; if (d > maxUp) maxUp = d; if (-d > maxDown) maxDown = -d; }
+    }
+    const e = trace[trace.length - 1];
+    return { fin: [e[1], e[2], e[3]], yMin, yMax, sautMaxHaut: +maxUp.toFixed(3), sautMaxBas: +maxDown.toFixed(3), anims: [...anims].join(','), camY: [camMin, camMax] };
+  },
+  /** Hauteurs échantillonnées le long de la dernière marche (tous les n pas). */
+  samples(n = 30, i0 = 0) { const out = []; for (let i = i0; i < trace.length; i += n) out.push([trace[i][1], trace[i][2], trace[i][3]]); return out; },
+  heightAt, STEP_UP,
+};
+
+const clock = new THREE.Clock(), info = document.getElementById('info');
+renderer.setAnimationLoop(() => {
+  const dt = Math.min(clock.getDelta(), 0.05);
+  if (!lv.manual) { ctx.time += dt; player.update(dt); }
+  renderer.render(scene, params.get('overview') ? overview : camera);
+  info.textContent = `x ${player.pos.x.toFixed(1)}  z ${player.pos.z.toFixed(1)}  y ${player.pos.y.toFixed(2)}  ${player.character.anim}${player.grounded ? '' : " (en l'air)"}\ncaméra y ${camera.position.y.toFixed(2)}`;
+});
+addEventListener('resize', () => { renderer.setSize(innerWidth, innerHeight); for (const c of [camera, overview]) { c.aspect = innerWidth / innerHeight; c.updateProjectionMatrix(); } });
+</script>
+</body>
+</html>

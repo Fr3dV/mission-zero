@@ -1,4 +1,4 @@
-# Données géographiques de Paris (OpenStreetMap)
+# Données géographiques (OpenStreetMap, IGN, open data) — Paris et Toulouse
 
 Ces scripts produisent les données réelles du monde à partir d'OpenStreetMap (© les contributeurs d'OpenStreetMap, licence ODbL) :
 
@@ -119,6 +119,138 @@ nature, une forme de toit ou une couleur renseignée sont listés. Les deux fich
 `build.mjs` : ne jamais en régénérer un sans l'autre. `buildings.json` dépend de `shared/landmarks.js` (disques
 dégagés) et des largeurs de chaussée (dégagement) : son contenu et ses index bougent si l'un des deux change.
 
+## Multi-villes (contrat v5) : Toulouse
+
+Les scripts acceptent `--city <id>` (défaut `paris`, comportement inchangé). Une ville du contrat v5 a sa propre
+chaîne dans `tools/osm/v5/`, son cache dans `.data/osm-<ville>/` et ses fichiers dans `shared/world/<ville>/`.
+La projection est `geoFor('<ville>')` de `shared/cities.js` ; tout est découpé à `BOUNDS`.
+
+```bash
+export PATH="$PWD/.tools/node/bin:$PATH"
+node tools/osm/fetch.mjs --city toulouse          # OSM + IGN + Toulouse Métropole → .data/osm-toulouse/ (≈ 175 Mo, reprise possible)
+node tools/osm/build.mjs --city toulouse          # roads.json, buildings.bin (+ meta), terrain.json, pois.json
+node tools/osm/build.mjs --city toulouse --only buildings   # une étape : roads | buildings | terrain | pois
+node tools/osm/check.mjs --city toulouse          # contrôles + statistiques
+node tools/osm/preview.mjs --city toulouse        # tools/out/tls-preview.png
+node tools/osm/preview.mjs --city toulouse tools/out/zoom.png 100 0 1500 [--terrain] [--nodes]   # zoom : centre x, z, largeur (m)
+```
+
+Le contrôle « un nœud du graphe à moins de 300 m de chaque monument » devient une simple information pour un
+repère posé côté pistes (tarmac Airbus) : aucune voie publique n'y mène.
+
+`buildings`, `terrain` et `pois` lisent `roads.json` : relancer `roads` d'abord. `buildings` relit la liste des
+monuments (`shared/cities/<ville>/landmarks.js`) à chaque construction : **à relancer quand elle change**.
+
+### Sources et licences (à créditer dans le jeu)
+
+| Couche | Source | Licence |
+| --- | --- | --- |
+| Routes, rails, eau, parcs, occupation du sol, points d'intérêt, chemins | OpenStreetMap (API Overpass) | ODbL — « © les contributeurs d'OpenStreetMap » |
+| Bâtiments (emprises, hauteur, étages, usage, nature, matériaux) | IGN — BD TOPO®, couche `BDTOPO_V3:batiment` (WFS de la Géoplateforme) | Licence Ouverte 2.0 (Etalab) — « IGN » |
+| Relief et décisions de niveaux | IGN — RGE ALTI® (WMS raster `ELEVATION.ELEVATIONGRIDCOVERAGE.HIGHRES`, pas de 10 m) | Licence Ouverte 2.0 (Etalab) |
+| Arbres | Toulouse Métropole — « Arbres urbains » (data.toulouse-metropole.fr), complété par OSM | Licence Ouverte 2.0 (Etalab) — « Toulouse Métropole » |
+
+### `roads.json`
+
+Même format et mêmes conventions de graphe que `paris.json` (graphe orienté, deux arêtes pour une voie à double
+sens, nœuds = tous les sommets), plus :
+
+- **`kind`** : `motorway` (A620, A61, A62, A64, A68, A621, A624 : chaussées séparées), `trunk`, `ramp` (bretelles),
+  en plus de `avenue | boulevard | street | quay | pedestrian`. Champs : `ref`, `maxspeed` (tag ou défaut du type),
+  `roundabout` (sens OSM = antihoraire), `tunnel`, `layer`, `ele`, `busLane`, `cycleway` (`lane|track`), `surface`
+  (`asphalt|sett|paving_stones|unpaved`), `sidewalk`, `facadeWidth`, `median`, `treeLined`, `bridgeName`, `covered`.
+- **Largeur** : tag `width` ; sinon autoroute = voies × 3,5 m + 3 m d'accotements, voie rapide + 2 m, bretelle
+  + 1,5 m ; sinon voies × 3,1 m + bandes cyclables + stationnement ; table manuelle des grands axes toulousains
+  (`MANUAL` dans `v5/enrich.mjs`, de mémoire, ± 2 à 3 m) ; une rue étroite est bornée par l'espace entre façades.
+  `facadeWidth` / `sidewalk` / `median` / `treeLined` comme à Paris, mesurés sur les emprises de la BD TOPO ;
+  le trottoir est plafonné par type de voie car en banlieue les maisons sont en retrait de la rue.
+- **`service: true`** : voies de desserte (parkings, zones d'activité, aéroport) ; rendues mais hors graphe, sauf
+  celles qui ont un nom ou sont dans l'emprise de l'aéroport. Les rampes de parkings souterrains sont écartées.
+  `busway: true` : sites propres bus (hors graphe).
+- **Bord de carte** : une chaussée à sens unique coupée par le bord est raccordée à la chaussée opposée par une
+  courte boucle (`uturn: true`) ; les tronçons urbains à sens unique restés hors de la composante fortement
+  connexe passent à double sens ; autoroutes et bretelles ne sont jamais inversées.
+- **`rails`** : `[{ kind: tram|train|metro|cable, name, points, ele?, bridge?, tunnel?, yard? }]`. Le métro n'est
+  gardé que là où il est à l'air libre ; `cable` = téléphérique Téléo (pylônes et gares dans `pois.json`).
+- **Eau** : `river.polygons` (Garonne et ses bras, lacs, bassins de 400 m² et plus), `river.islands`
+  (Ramier, Pecette, Banlève…), `waterways` = axes + largeur des cours d'eau étroits (`canal | river | stream`) :
+  canal du Midi, de Brienne, latéral, Touch, Hers, ruisseaux à l'air libre (tronçons busés écartés). La largeur
+  vient du tag, sinon du polygone d'eau OSM traversé (aire / demi-périmètre), sinon d'une table par nom.
+
+### Niveaux superposés (`ele`, `v5/ele.mjs`)
+
+1. **Sources.** Seul un croisement dénivelé avéré crée de l'élévation : deux segments (routes, rails) qui se
+   coupent sans sommet commun, de niveaux différents (tag `layer`, sinon pont = +1, tunnel = −1). Deux routes de
+   même niveau et mêmes tags qui se coupent sans nœud commun sont raccordées (carrefour mal saisi). Un tunnel qui
+   ne croise rien reste à 0. Les rampes de parkings souterrains (dessertes en tunnel ou de niveau négatif) sont
+   écartées ; un tunnel en impasse (accès de parking) est traité comme une desserte.
+2. **Hiérarchie.** Une voie **publique** n'est jamais déplacée par une voie **suiveuse** (desserte, rue
+   piétonne, rail) : c'est la suiveuse qui monte ou descend, et sa rampe ne se propage pas aux sommets des voies
+   publiques (ni à un carrefour, ni à un passage à niveau).
+3. **Qui bouge entre deux voies publiques ?** Le pont monte, sauf si le croisement établit que c'est la voie du
+   dessous qui descend : déblai confirmé par le MNT (≥ 2,5 m, lu par rapport au terrain naturel pris sur les
+   diagonales, hors plans d'eau), vraie trémie (tunnel de niveau négatif ≥ 25 m), voie cartographiée sous le niveau
+   du sol (`layer` < 0), ou voie sur berge sous un pont qui franchit l'eau. Un remblai confirmé par le MNT
+   (≥ 2,5 m) fait au contraire monter le pont, même au-dessus d'un « tunnel » (simple passage inférieur). Un rail
+   sous un pont routier descend (tranchée), sauf remblai routier confirmé.
+4. **Ponts sur l'eau.** Un pont (hors viaduc d'autoroute) au-dessus d'un plan d'eau d'au moins 1 ha ou de l'axe
+   d'un canal ou d'une rivière d'au moins 10 m de large, travées d'approche comprises, reste au niveau des quais
+   tant que rien ne l'oblige à monter ; il ne porte pas la rampe d'un ouvrage voisin.
+5. **Gabarits** : +6,5 m au-dessus d'une route, +7,5 m au-dessus d'un rail, +5,5 m au-dessus d'une rue piétonne,
+   −6 m pour une trémie, −8,5 m sous un pont-canal, −9 m pour un tunnel sous un canal.
+6. **Résolution** : bornes basses et hautes propagées en rampes le long du réseau (Dijkstra), pente maximale 3 %
+   autoroute, 4 % voie rapide, 6 % bretelle, 6,5 % autres routes, 10 % rues piétonnes, 15 % dessertes, 3 / 5 / 6 %
+   train / métro / tram. Une rampe a donc exactement la longueur que la pente impose (100 m pour 6,5 m). Tabliers
+   et tubes plats, palier plat sur la largeur franchie. La voie du dessus dépasse toujours d'un gabarit le
+   plancher de celle du dessous : les échangeurs à trois niveaux s'empilent d'eux-mêmes. Des tags contradictoires
+   (divergence) sont neutralisés. Un sommet tous les 12 m au plus là où `ele ≠ 0` ; `ele` au centimètre.
+7. `graph.nodeEle` reprend `ele` nœud par nœud ; deux routes de niveaux différents n'ont pas de nœud commun.
+   `MZ_ELE_DEBUG="x,z[,rayon]"` détaille les décisions autour d'un point.
+
+Contrôles associés (`check.mjs --city toulouse`) : pente ≤ 8 % sur les voies publiques ; aucun croisement à moins
+de 5 m d'écart ; aucune voie publique dénivelée de plus de 2 m sur plus de 60 m à plus de 150 m (le long des
+voies) d'un croisement dénivelé ; aucune place traversée par une voie à plus de 1 m du sol ; liste des valeurs
+extrêmes (< −7 m ou > +12 m) et des carrefours de 4 branches ou plus déplacés. `MZ_ROADS_FILE=<fichier>` contrôle
+une autre version de `roads.json` (comparaison avant / après).
+
+### `buildings.bin`, `buildings-meta.bin`, `buildings-meta.json`
+
+Emprises de la **BD TOPO** (242 000 objets), décomposées comme à Paris en rectangles orientés d'aire minimale
+(les plans en L, en U ou à cour sont découpés), rognées pour dégager les chaussées, sans les disques des
+monuments. `buildings.bin` = `Float32Array` little-endian `[cx, cz, w, d, rotDeg, h]` ; `h` est la hauteur BD
+TOPO (du sol à l'égout du toit) quand elle existe (99 %), sinon étages × 3 m, sinon défaut par type et par
+quartier. Emprises de moins de 8 m² écartées. Ordre : dalles de 500 m.
+`buildings-meta.bin` = 4 octets par rectangle `[kind, wall, roof, levels]`, légende dans `buildings-meta.json`
+(`kinds`, `walls`, `roofs`, et `meta.rules` qui détaille les règles) :
+
+- `kind` : nature BD TOPO (église, serre, tribune, château…), puis contexte OSM (hôpital, école, complexe sportif,
+  parking en ouvrage, hangar d'aérodrome, gare, équipement public), puis usage BD TOPO : logements → `tower`
+  (≥ 30 m ou ≥ 10 niveaux), `slab` (barre ≥ 4 niveaux, ≥ 45 m, élancement ≥ 3), `apartment` (≥ 3 logements ou
+  ≥ 3 niveaux ou ≥ 10 m), `toulousaine` (plain-pied d'avant 1949, brique, 45–260 m²), `house` ; « commercial et
+  services » → `retail`, `office`, `commercial` ; industriel / agricole → `industrial` ; constructions légères,
+  annexes et moins de 20 m² → `annex`.
+- `wall` / `roof` : matériaux des fichiers fonciers portés par la BD TOPO (≈ la moitié des bâtiments) ;
+  « briques » = `brick` avant 1949, `render` ensuite (brique creuse enduite) ; sinon défaut par type et époque.
+
+### `terrain.json`
+
+Format de `shared/terrain.js` : grille de 30 m, marge de 300 m, entiers × 0,1 m. Les hauteurs sont **relatives
+au niveau des quais**, pas des altitudes NGF : on retranche une surface de référence qui passe par toutes les
+surfaces d'eau réelles (Garonne en pente d'une vingtaine de mètres, biefs du canal du Midi perché 14 m plus haut,
+lacs, rivières), interpolée de façon harmonique entre elles, plus 4 m (quai) ; puis on force 0 à moins de 60 m
+des grands plans d'eau et des canaux avec un fondu jusqu'à 300 m. Les remblais et tranchées des autoroutes,
+bretelles, voies ferrées et tronçons dénivelés sont gommés (les niveaux viennent de `ele`). Lissage léger.
+Les coteaux sont conservés : Pech-David ≈ +110 m, Jolimont ≈ +48 m, Côte Pavée ≈ +38 m.
+
+### `pois.json`
+
+Comme à Paris, plus : `treeGenera` / `treeGenus` (genre de chaque arbre : platane…), alignements `synthetic:true`
+le long des canaux là où les sources ne recensent pas les platanes, pois `tram`, `market`, `lock`, `aqueduct`,
+`pylon`, `cable_station`, `fuel`, `supermarket`, `hospital`, `townhall`, `water_tower`, et `areas` étendu :
+`residential`, `commercial`, `industrial`, `railway`, `construction`, `farmland`, `forest`, `grass`, `cemetery`,
+`parking`, `pitch`, `runway`, `taxiway`, `apron` (pistes et voies de circulation de l'aéroport converties d'axes
+en polygones), `pedestrian`, `cobble`, `gravel`.
+
 ## Fichiers
 
 | Fichier | Rôle |
@@ -130,3 +262,8 @@ dégagés) et des largeurs de chaussée (dégagement) : son contenu et ses index
 | `geom.mjs` | géométrie 2D (simplification, découpe, rectangle d'aire minimale…) |
 | `check.mjs` | vérifications et statistiques |
 | `preview.html`, `preview.mjs` | rendu 2D de contrôle |
+| `v5/common.mjs`, `v5/shapes.mjs`, `v5/merge.mjs` | ville courante, cache, géométrie OSM, chargeurs (MNT, emprises IGN, arbres) |
+| `v5/fetch.mjs` | téléchargements OSM, IGN (BD TOPO, RGE ALTI), Toulouse Métropole |
+| `v5/roads.mjs`, `v5/ele.mjs`, `v5/water.mjs`, `v5/enrich.mjs` | `roads.json` : réseau, graphe, niveaux, rails, eau, champs de fidélité |
+| `v5/buildings.mjs`, `v5/terrain.mjs`, `v5/pois.mjs` | `buildings.bin` + meta, `terrain.json`, `pois.json` |
+| `v5/check.mjs`, `v5/preview.html` | contrôles et rendu 2D d'une ville v5 |

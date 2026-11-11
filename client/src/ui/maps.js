@@ -1,105 +1,43 @@
 // Minicarte + grande carte + itinéraire GPS — module interface.
-// Le fond (routes, Seine, parcs) est pré-rendu une fois dans un canvas hors écran ;
-// la minicarte n'en recopie qu'une fenêtre tournée (≤ 30 Hz).
+// Le fond vient de tuiles multi-niveaux (tiles.js) générées à la demande à partir des index de mapdata.js ;
+// rien n'est pré-rendu pour la ville entière. Libellés (noms de voies, pastilles A620…) : calque recalculé
+// par petits pas quand la vue se stabilise. Marqueurs regroupés quand ils se chevauchent.
 import { h, icon, clamp, fmtDist, zc } from './util.js';
+import { buildMapData, TIER, AK } from './mapdata.js';
+import { createTiles, PALETTES } from './tiles.js';
+import { CITY_SOURCES } from './cityart.js';
 import { MISSIONS } from '@shared/missions.js';
 import { PROPERTIES } from '@shared/properties.js';
 
-const COL = {
-  bg: '#0c101b', block: '#111625', park: '#14291f', parkEdge: '#1f4030', river: '#143049', riverEdge: '#1f4a6e',
-  plaza: '#1b2134', street: '#363f5c', quay: '#46507199', ped: '#2c3450', major: '#b8975c', majorCase: '#0c101b',
-  gold: '#f0c170', rouge: '#ef5a5a', vert: '#5fd39a', ciel: '#6fd0ff', txt: '#eef0f6', mute: '#9aa3b8',
+const SANS = '"Avenir Next", Avenir, "Segoe UI", system-ui, sans-serif';
+const COND = '"Avenir Next Condensed", "DIN Condensed", "Arial Narrow", "Avenir Next", system-ui, sans-serif';
+const SERIF = 'Didot, "Bodoni 72", Georgia, serif';
+const norm = (s) => String(s || '').toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '').replace(/[^a-z0-9]+/g, ' ').trim();
+const DISTRICT = /^(quarter|suburb|neighbou?rhood|district|quartier|borough|locality|town|village|hamlet|commune|arrondissement)$/;
+const PLACE_KIND = {
+  metro: ['Station de métro', 2.5], subway: ['Station de métro', 2.5], tram: ['Station de tramway', 2.5], tramstop: ['Station de tramway', 2.5],
+  station: ['Gare', 2.5], train: ['Gare', 2.5], museum: ['Musée', 4], theatre: ['Théâtre', 4], stadium: ['Stade', 4], hospital: ['Hôpital', 4],
+  university: ['Université', 4], airport: ['Aéroport', 1], mall: ['Centre commercial', 4], townhall: ['Mairie', 4.5], market: ['Marché', 4.5],
+  cable_station: ['Station du téléphérique', 2.5],
 };
-const MAJOR = { avenue: 1, boulevard: 1 };
+const TOWNHALL = /^(?:Mairie de quartier|Hôtel de ville de|Château-Mairie de|Mairie d['’]|Mairie de|Mairie du)\s*(.+)$/i;
 
 export function createMaps(ctx, api) {
   const { bus, store } = ctx;
   const wd = ctx.worldData || {};
-  const roads = Array.isArray(wd.roads) ? wd.roads.filter((r) => r && Array.isArray(r.points) && r.points.length > 1) : [];
-  const B0 = ctx.BOUNDS || { minX: -3000, maxX: 3000, minZ: -2700, maxZ: 2700 };
-  const B = { minX: B0.minX - 200, maxX: B0.maxX + 200, minZ: B0.minZ - 200, maxZ: B0.maxZ + 200 };
-  const BW = B.maxX - B.minX, BH = B.maxZ - B.minZ;
+  const cityName = ctx.city?.name || 'Paris';
+  const pal = PALETTES[ctx.city?.style] || PALETTES[ctx.city?.id] || PALETTES.paris;
+  const low = ctx.quality === 'low';
+  const data = buildMapData(wd, ctx.BOUNDS);
+  const tiles = createTiles(data, pal, { cap: low ? 110 : 240 });
+  const B = data.ext;
+  const perf = { mini: { n: 0, ms: 0, max: 0 }, big: { n: 0, ms: 0, max: 0 }, labels: { n: 0, ms: 0 }, frame: { n: 0, ms: 0, max: 0 } };
+  const tick = (o, t0) => { const d = performance.now() - t0; o.n++; o.ms += d; if (d > o.max) o.max = d; return d; };
 
-  // Boîtes englobantes des routes (culling + recherche du nom de rue).
-  const rb = new Float32Array(roads.length * 4);
-  roads.forEach((r, i) => {
-    let a = Infinity, b = Infinity, c = -Infinity, d = -Infinity;
-    for (const p of r.points) { if (p[0] < a) a = p[0]; if (p[0] > c) c = p[0]; if (p[1] < b) b = p[1]; if (p[1] > d) d = p[1]; }
-    rb.set([a, b, c, d], i * 4);
-  });
+  const roadAt = (x, z, maxD) => data.roadAt(x, z, maxD);
+  const roadNameAt = (x, z, maxD) => { const r = data.roadAt(x, z, maxD); return r ? r.name || r.ref : null; };
 
-  function poly(g, pts) {
-    if (!pts || pts.length < 3) return;
-    g.moveTo(pts[0][0], pts[0][1]);
-    for (let i = 1; i < pts.length; i++) g.lineTo(pts[i][0], pts[i][1]);
-    g.closePath();
-  }
-  /** Dessine le monde dans g. s = px/m ; (x0,z0) = coin haut-gauche monde ; w,h = taille px. */
-  function paintWorld(g, s, x0, z0, w, hgt) {
-    g.save();
-    g.setTransform(s, 0, 0, s, -x0 * s, -z0 * s);
-    const vx1 = x0 + w / s, vz1 = z0 + hgt / s, px = 1 / s;
-    g.fillStyle = COL.bg; g.fillRect(x0, z0, w / s, hgt / s);
-    g.fillStyle = COL.block; g.fillRect(B0.minX, B0.minZ, B0.maxX - B0.minX, B0.maxZ - B0.minZ);
-    g.lineJoin = 'round'; g.lineCap = 'round';
-    g.beginPath(); for (const p of wd.plazas || []) poly(g, p.polygon); g.fillStyle = COL.plaza; g.fill();
-    g.beginPath(); for (const p of wd.parks || []) poly(g, p.polygon);
-    g.fillStyle = COL.park; g.fill(); g.strokeStyle = COL.parkEdge; g.lineWidth = Math.max(2, 1 * px); g.stroke();
-    g.beginPath(); for (const p of wd.river?.polygons || []) poly(g, p);
-    g.fillStyle = COL.river; g.fill('evenodd'); g.strokeStyle = COL.riverEdge; g.lineWidth = Math.max(3, 1 * px); g.stroke();
-    // Routes regroupées par (catégorie, largeur) pour limiter les stroke().
-    const buckets = new Map();
-    for (let i = 0; i < roads.length; i++) {
-      const o = i * 4;
-      if (rb[o] > vx1 || rb[o + 2] < x0 || rb[o + 1] > vz1 || rb[o + 3] < z0) continue;
-      const r = roads[i];
-      const cat = MAJOR[r.kind] ? 2 : r.kind === 'pedestrian' ? 0 : 1;
-      const wq = Math.max(4, Math.round((r.width || 10) / 4) * 4);
-      const key = cat * 1000 + wq + (r.kind === 'quay' ? 500 : 0);
-      let b = buckets.get(key);
-      if (!b) buckets.set(key, (b = { cat, w: wq, quay: r.kind === 'quay', list: [] }));
-      b.list.push(r.points);
-    }
-    const order = [...buckets.values()].sort((a, b) => a.cat - b.cat || a.w - b.w);
-    const trace = (b) => { g.beginPath(); for (const pts of b.list) { g.moveTo(pts[0][0], pts[0][1]); for (let i = 1; i < pts.length; i++) g.lineTo(pts[i][0], pts[i][1]); } };
-    for (const b of order) {
-      if (b.cat === 2) continue;
-      trace(b);
-      g.strokeStyle = b.cat === 0 ? COL.ped : b.quay ? '#465071' : COL.street;
-      g.lineWidth = Math.max(b.w * (b.cat === 0 ? 0.5 : 0.8), 1.1 * px); g.stroke();
-    }
-    for (const b of order) { if (b.cat !== 2) continue; trace(b); g.strokeStyle = COL.majorCase; g.lineWidth = Math.max(b.w * 0.8, 2 * px) + 2.5 * px; g.stroke(); }
-    for (const b of order) { if (b.cat !== 2) continue; trace(b); g.strokeStyle = COL.major; g.lineWidth = Math.max(b.w * 0.8, 2 * px); g.stroke(); }
-    g.restore();
-  }
-
-  // ---------- Fond pré-rendu ----------
-  let S = ctx.quality === 'low' ? 0.3 : 0.5;
-  S = Math.min(S, 3000 / BW, 3000 / BH);
-  const base = document.createElement('canvas');
-  base.width = Math.ceil(BW * S); base.height = Math.ceil(BH * S);
-  try { paintWorld(base.getContext('2d'), S, B.minX, B.minZ, base.width, base.height); } catch (e) { console.warn('[ui] fond de carte', e); }
-
-  // ---------- Nom de la rue la plus proche ----------
-  function roadNameAt(x, z, maxD = 28) {
-    let best = null, bd = maxD * maxD;
-    for (let i = 0; i < roads.length; i++) {
-      const o = i * 4;
-      if (x < rb[o] - maxD || x > rb[o + 2] + maxD || z < rb[o + 1] - maxD || z > rb[o + 3] + maxD) continue;
-      const r = roads[i]; if (!r.name) continue;
-      const pts = r.points;
-      for (let k = 0; k < pts.length - 1; k++) {
-        const ax = pts[k][0], az = pts[k][1], dx = pts[k + 1][0] - ax, dz = pts[k + 1][1] - az;
-        const l2 = dx * dx + dz * dz || 1;
-        const t = clamp(((x - ax) * dx + (z - az) * dz) / l2, 0, 1);
-        const ex = ax + dx * t - x, ez = az + dz * t - z, d = ex * ex + ez * ez;
-        if (d < bd) { bd = d; best = r.name; }
-      }
-    }
-    return best;
-  }
-
-  // ---------- Itinéraire (A* sur worldData.graph) ----------
+  // ---------- Itinéraire de repli (A* sur worldData.graph) : utilisé seulement si personne ne fournit de tracé ----------
   let adj = null;
   const nodes = wd.graph?.nodes || [];
   function buildAdj() {
@@ -120,12 +58,13 @@ export function createMaps(ctx, api) {
     return bi;
   }
   function route(x0, z0, x1, z1) {
-    if (!nodes.length) return [[x0, z0], [x1, z1]];
+    // au-delà de 30 000 nœuds (Toulouse), un A* synchrone dépasserait le budget d'une image : trait direct
+    if (!nodes.length || nodes.length > 30000) return [[x0, z0], [x1, z1]];
     if (!adj) buildAdj();
     const s = nearestNode(x0, z0), t = nearestNode(x1, z1);
     if (s < 0 || t < 0) return [[x0, z0], [x1, z1]];
     const n = nodes.length, gs = new Float32Array(n).fill(Infinity), prev = new Int32Array(n).fill(-1), done = new Uint8Array(n);
-    const heap = []; // tas binaire [f, noeud]
+    const heap = [];
     const push = (f, v) => { let i = heap.length; heap.push([f, v]); while (i > 0) { const p = (i - 1) >> 1; if (heap[p][0] <= f) break; [heap[p], heap[i]] = [heap[i], heap[p]]; i = p; } };
     const pop = () => {
       const top = heap[0], last = heap.pop();
@@ -164,20 +103,24 @@ export function createMaps(ctx, api) {
     const has = Array.isArray(p.path) && p.path.length > 1;
     // un autre module (gameplay) a déjà répondu à cette même demande avec un tracé : on le garde
     if (!has && gps && !gps.own && gps.x === p.x && gps.z === p.z) return;
-    gps = { x: p.x, z: p.z, label: p.label || 'Destination', path: has ? p.path : route(m.x, m.z, p.x, p.z), own: !has, mine: nextGpsMine, cx: m.x, cz: m.z };
+    gps = { x: p.x, z: p.z, label: p.label || 'Destination', path: has ? p.path : route(m.x, m.z, p.x, p.z), own: !has, mine: nextGpsMine, cx: m.x, cz: m.z, hint: 0 };
     api.onGps?.(gps);
-    if (big.open) big.draw();
+    big.dirty = true;
   });
-  bus.on('gps:clear', () => { gps = null; api.onGps?.(null); if (big.open) big.draw(); });
+  bus.on('gps:clear', () => { gps = null; api.onGps?.(null); big.dirty = true; });
   function setGps(x, z, label) { nextGpsMine = true; bus.emit('gps:set', { x, z, label }); nextGpsMine = false; }
 
-  /** Tracé à afficher : coupe la partie déjà parcourue et repart de la position du joueur. */
+  /** Tracé à afficher (tel que reçu) : coupe la partie déjà parcourue et repart de la position du joueur. */
   function livePath(m) {
     if (!gps?.path) return null;
-    const p = gps.path; let bi = 0, bd = Infinity;
-    for (let i = 0; i < p.length; i++) { const d = (p[i][0] - m.x) ** 2 + (p[i][1] - m.z) ** 2; if (d < bd) { bd = d; bi = i; } }
-    if (bi < p.length - 1) {
-      // si le joueur a dépassé le sommet le plus proche, on saute au suivant
+    const p = gps.path, n = p.length;
+    // recherche locale autour du dernier sommet connu (les tracés de Toulouse comptent des milliers de points)
+    let bi = clamp(gps.hint || 0, 0, n - 1), bd = Infinity;
+    const lo = n > 400 ? Math.max(0, bi - 60) : 0, hi = n > 400 ? Math.min(n, bi + 240) : n;
+    for (let i = lo; i < hi; i++) { const d = (p[i][0] - m.x) ** 2 + (p[i][1] - m.z) ** 2; if (d < bd) { bd = d; bi = i; } }
+    if (n > 400 && bd > 400 * 400) { bd = Infinity; for (let i = 0; i < n; i++) { const d = (p[i][0] - m.x) ** 2 + (p[i][1] - m.z) ** 2; if (d < bd) { bd = d; bi = i; } } }
+    gps.hint = bi;
+    if (bi < n - 1) {
       const a = p[bi], b = p[bi + 1];
       if ((m.x - a[0]) * (b[0] - a[0]) + (m.z - a[1]) * (b[1] - a[1]) > 0) bi++;
     }
@@ -199,7 +142,7 @@ export function createMaps(ctx, api) {
   }
   function refreshMarkers() {
     const out = [];
-    for (const l of ctx.LANDMARKS || []) if (!l.hidden) out.push({ t: 'landmark', x: l.x, z: l.z, label: l.name });
+    for (const l of ctx.LANDMARKS || []) if (!l.hidden) out.push({ t: 'landmark', x: l.x, z: l.z, label: l.name, sub: 'Monument' });
     for (const d of dealerList()) if (isFinite(d?.x) && isFinite(d?.z)) out.push({ t: 'dealer', x: d.x, z: d.z, label: d.name || (d.brand ? `Concession ${d.brand}` : 'Concession'), brand: d.brand, sub: 'Concession automobile' });
     const owners = store.propertyOwners || {}, mine = store.me?.properties || [];
     for (const p of propertyList()) {
@@ -220,7 +163,7 @@ export function createMaps(ctx, api) {
     const out = [];
     const players = store.players;
     if (!players || typeof players.forEach !== 'function') return out;
-    players.forEach((p, id) => { if (p && (p.id ?? id) !== store.me?.id && isFinite(p.x) && isFinite(p.z)) out.push({ t: 'player', x: p.x, z: p.z, label: p.name || 'Joueur', id: p.id ?? id }); });
+    players.forEach((p, id) => { if (p && (p.id ?? id) !== store.me?.id && isFinite(p.x) && isFinite(p.z)) out.push({ t: 'player', x: p.x, z: p.z, label: p.name || 'Joueur', id: p.id ?? id, sub: 'Joueur' }); });
     return out;
   }
 
@@ -229,37 +172,43 @@ export function createMaps(ctx, api) {
     g.lineWidth = 1.5;
     if (m.t === 'landmark') {
       g.beginPath(); g.moveTo(x, y - r); g.lineTo(x + r * 0.78, y); g.lineTo(x, y + r); g.lineTo(x - r * 0.78, y); g.closePath();
-      g.fillStyle = COL.bg; g.fill(); g.strokeStyle = COL.gold; g.stroke();
-      g.beginPath(); g.arc(x, y, r * 0.22, 0, 6.3); g.fillStyle = COL.gold; g.fill();
+      g.fillStyle = pal.bg; g.fill(); g.strokeStyle = pal.accent; g.stroke();
+      g.beginPath(); g.arc(x, y, r * 0.22, 0, 6.3); g.fillStyle = pal.accent; g.fill();
     } else if (m.t === 'property') {
-      const c = m.st === 'mine' ? COL.vert : m.st === 'taken' ? '#8b93a8' : COL.txt;
+      const c = m.st === 'mine' ? '#5fd39a' : m.st === 'taken' ? '#8b93a8' : pal.txt;
       g.beginPath(); g.moveTo(x, y - r); g.lineTo(x + r, y - r * 0.1); g.lineTo(x + r * 0.7, y - r * 0.1); g.lineTo(x + r * 0.7, y + r * 0.85); g.lineTo(x - r * 0.7, y + r * 0.85); g.lineTo(x - r * 0.7, y - r * 0.1); g.lineTo(x - r, y - r * 0.1); g.closePath();
-      g.fillStyle = m.st === 'free' ? COL.bg : c; g.fill(); g.strokeStyle = c; g.stroke();
+      g.fillStyle = m.st === 'free' ? pal.bg : c; g.fill(); g.strokeStyle = c; g.stroke();
     } else if (m.t === 'mission') {
-      g.beginPath(); g.arc(x, y, r, 0, 6.3); g.fillStyle = COL.gold; g.fill(); g.strokeStyle = COL.bg; g.stroke();
-      g.fillStyle = COL.bg; g.fillRect(x - r * 0.14, y - r * 0.58, r * 0.28, r * 0.72);
+      g.beginPath(); g.arc(x, y, r, 0, 6.3); g.fillStyle = pal.accent; g.fill(); g.strokeStyle = pal.bg; g.stroke();
+      g.fillStyle = pal.bg; g.fillRect(x - r * 0.14, y - r * 0.58, r * 0.28, r * 0.72);
       g.beginPath(); g.arc(x, y + r * 0.48, r * 0.17, 0, 6.3); g.fill();
     } else if (m.t === 'dealer') {
       const q = r * 0.9;
-      g.beginPath(); g.rect(x - q, y - q, q * 2, q * 2); g.fillStyle = '#7aa8ff'; g.fill(); g.strokeStyle = COL.bg; g.stroke();
-      g.fillStyle = COL.bg; g.fillRect(x - q * 0.62, y - q * 0.1, q * 1.24, q * 0.42); g.fillRect(x - q * 0.36, y - q * 0.5, q * 0.72, q * 0.44);
+      g.beginPath(); g.rect(x - q, y - q, q * 2, q * 2); g.fillStyle = '#7aa8ff'; g.fill(); g.strokeStyle = pal.bg; g.stroke();
+      g.fillStyle = pal.bg; g.fillRect(x - q * 0.62, y - q * 0.1, q * 1.24, q * 0.42); g.fillRect(x - q * 0.36, y - q * 0.5, q * 0.72, q * 0.44);
     } else if (m.t === 'player') {
-      g.beginPath(); g.arc(x, y, r * 0.72, 0, 6.3); g.fillStyle = COL.ciel; g.fill(); g.strokeStyle = COL.bg; g.lineWidth = 2; g.stroke();
+      g.beginPath(); g.arc(x, y, r * 0.72, 0, 6.3); g.fillStyle = pal.player; g.fill(); g.strokeStyle = pal.bg; g.lineWidth = 2; g.stroke();
     } else if (m.t === 'gps') {
       g.beginPath(); g.arc(x, y - r * 0.5, r * 0.8, Math.PI * 0.85, Math.PI * 2.15); g.lineTo(x, y + r); g.closePath();
-      g.fillStyle = COL.rouge; g.fill(); g.strokeStyle = '#fff'; g.stroke();
+      g.fillStyle = pal.route; g.fill(); g.strokeStyle = '#fff'; g.stroke();
       g.beginPath(); g.arc(x, y - r * 0.5, r * 0.28, 0, 6.3); g.fillStyle = '#fff'; g.fill();
+    } else if (m.t === 'cluster') {
+      g.beginPath(); g.arc(x, y, r, 0, 6.3); g.fillStyle = pal.bg; g.fill(); g.strokeStyle = pal.accent; g.lineWidth = 1.5; g.stroke();
+    } else if (m.t === 'place') {
+      g.beginPath(); g.arc(x, y, r * 0.7, 0, 6.3); g.fillStyle = pal.txt; g.fill(); g.strokeStyle = pal.bg; g.lineWidth = 2; g.stroke();
     }
   }
   function arrow(g, x, y, r, rot) {
     g.save(); g.translate(x, y); g.rotate(rot);
     g.beginPath(); g.moveTo(0, -r); g.lineTo(r * 0.72, r * 0.8); g.lineTo(0, r * 0.42); g.lineTo(-r * 0.72, r * 0.8); g.closePath();
-    g.fillStyle = '#fff'; g.strokeStyle = COL.bg; g.lineWidth = 2; g.stroke(); g.fill();
+    g.fillStyle = '#fff'; g.strokeStyle = pal.bg; g.lineWidth = 2; g.stroke(); g.fill();
     g.restore();
   }
 
-  // ---------- Minicarte ----------
-  const mini = { el: null, cv: null, g: null, size: 0, dpr: 1, zoom: 0.62 };
+  // =====================================================================
+  // Minicarte
+  // =====================================================================
+  const mini = { el: null, cv: null, g: null, size: 0, dpr: 1, zoom: 0.62, look: 0 };
   mini.cv = h('canvas', { class: 'mz-mini-cv' });
   mini.north = h('span', { class: 'mz-mini-n', text: 'N' });
   mini.el = h('div', { class: 'mz-mini', title: 'Carte (M)', onclick: () => api.openMap?.() }, mini.cv, mini.north);
@@ -268,67 +217,102 @@ export function createMaps(ctx, api) {
     mini.dpr = Math.min(window.devicePixelRatio || 1, 2);
     mini.size = css;
     mini.cv.width = mini.cv.height = Math.round(css * mini.dpr);
-    mini.g = mini.cv.getContext('2d');
+    mini.g = mini.cv.getContext('2d', { alpha: false });
   }
+  const MINI_SHARP = low ? 0.62 : 0.88;
+  const speedOf = () => Math.abs((ctx.player?.mode === 'vehicle' ? ctx.player?.vehicle?.speed : ctx.player?.speed) || 0);
   function drawMini() {
     const g = mini.g; if (!g) return;
-    const m = me(), D = mini.cv.width, R = D / 2, dpr = mini.dpr;
-    const spd = Math.abs((ctx.player?.mode === 'vehicle' ? ctx.player?.vehicle?.speed : ctx.player?.speed) || 0);
-    const target = clamp(0.66 - spd * 0.011, 0.26, 0.66) * (mini.size / 184 * 0.25 + 0.75);
-    mini.zoom += (target - mini.zoom) * 0.08;
-    const k = mini.zoom * dpr;
+    const t0 = performance.now();
+    const m = me(), D = mini.cv.width, R = D / 2, dpr = mini.dpr, spd = speedOf();
+    // Dézoom doux avec la vitesse : ~125 m de rayon à pied, ~360 m à 130 km/h, 720 m au-delà de 330 km/h.
+    const radius = clamp(125 + spd * 6.5, 125, 720);
+    mini.zoom += (mini.size / 2 / radius - mini.zoom) * 0.07;
+    // À vive allure le joueur glisse vers le bas du cercle : plus de route visible devant.
+    mini.look += (clamp(spd / 38, 0, 1) * 0.3 - mini.look) * 0.06;
+    const k = mini.zoom * dpr, oy = R * mini.look;
+    const c = Math.cos(m.yaw), s = Math.sin(m.yaw);
     g.setTransform(1, 0, 0, 1, 0, 0);
-    g.fillStyle = COL.bg; g.fillRect(0, 0, D, D);
-    g.translate(R, R); g.rotate(m.yaw); g.scale(k, k); g.translate(-m.x, -m.z);
-    const half = (R / k) * 1.45;
-    const sx = clamp((m.x - half - B.minX) * S, 0, base.width), sy = clamp((m.z - half - B.minZ) * S, 0, base.height);
-    const ex = clamp((m.x + half - B.minX) * S, 0, base.width), ey = clamp((m.z + half - B.minZ) * S, 0, base.height);
-    if (ex - sx > 1 && ey - sy > 1) g.drawImage(base, sx, sy, ex - sx, ey - sy, sx / S + B.minX, sy / S + B.minZ, (ex - sx) / S, (ey - sy) / S);
+    g.fillStyle = pal.out; g.fillRect(0, 0, D, D);
+    g.setTransform(k * c, k * s, -k * s, k * c, R - k * (c * m.x - s * m.z), R + oy - k * (s * m.x + c * m.z));
+    const wcx = m.x - s * oy / k, wcz = m.z - c * oy / k, rad = R / k + 2;
+    // la minicarte ne couvre que quelques tuiles : on peut se permettre le niveau le plus net
+    tiles.draw(g, k, wcx - rad, wcz - rad, wcx + rad, wcz + rad, wcx, wcz, MINI_SHARP);
+    if (spd > 10) tiles.prefetch(k, wcx - s * rad * 1.6 - rad, wcz - c * rad * 1.6 - rad, wcx - s * rad * 1.6 + rad, wcz - c * rad * 1.6 + rad, wcx, wcz, MINI_SHARP);
     const lp = livePath(m);
     if (lp) {
       g.lineJoin = 'round'; g.lineCap = 'round';
-      strokePath(g, m, lp); g.strokeStyle = 'rgba(12,16,27,.85)'; g.lineWidth = 7.5 * dpr / k; g.stroke();
-      g.strokeStyle = COL.rouge; g.lineWidth = 4 * dpr / k; g.stroke();
+      strokePath(g, m, lp); g.strokeStyle = pal.halo; g.lineWidth = 7.5 * dpr / k; g.stroke();
+      g.strokeStyle = pal.route; g.lineWidth = 4 * dpr / k; g.stroke();
     }
     g.setTransform(1, 0, 0, 1, 0, 0);
-    const c = Math.cos(m.yaw), s = Math.sin(m.yaw), rMax = R - 9 * dpr;
+    const rMax = R - 9 * dpr, reach = (R + oy) / k + 30;
     const put = (mk, edge, r) => {
-      const dx = (mk.x - m.x) * k, dz = (mk.z - m.z) * k;
-      let x = dx * c - dz * s, y = dx * s + dz * c;
+      const wx = mk.x - m.x, wz = mk.z - m.z;
+      if (!edge && (wx > reach || wx < -reach || wz > reach || wz < -reach)) return;
+      let x = k * (wx * c - wz * s), y = oy + k * (wx * s + wz * c);
       const d = Math.hypot(x, y);
       if (d > rMax) { if (!edge) return; x *= rMax / d; y *= rMax / d; }
       glyph(g, mk, R + x, R + y, r * dpr);
     };
-    for (const mk of markers) put(mk, false, mk.t === 'landmark' ? 6 : 5.5);
+    for (let i = 0; i < markers.length; i++) put(markers[i], false, markers[i].t === 'landmark' ? 6 : 5.5);
     for (const mk of playerMarkers()) put(mk, true, 5.5);
     if (gps) put({ t: 'gps', x: gps.x, z: gps.z }, true, 7.5);
-    arrow(g, R, R, 8.5 * dpr, 0);
+    arrow(g, R, R + oy, 8.5 * dpr, 0);
     // « N » sur l'anneau (transform CSS : pas de reflow)
     const nr = mini.size / 2 - 1;
     mini.north.style.transform = `translate(${(s * nr).toFixed(1)}px, ${(-c * nr).toFixed(1)}px)`;
+    tick(perf.mini, t0);
   }
 
-  // ---------- Grande carte ----------
-  const big = { open: false, cx: 0, cz: 0, zoom: 0.5, el: null, cv: null, g: null, w: 0, h: 0, dpr: 1, sharpT: 0, sel: null };
+  // =====================================================================
+  // Grande carte
+  // =====================================================================
+  const ZMAX = 3;
+  const big = { open: false, dirty: false, cx: 0, cz: 0, zoom: 0.5, minZoom: 0.05, el: null, cv: null, g: null, w: 0, h: 0, dpr: 1, sel: null, seen: 0, clusters: [], moveT: 0 };
   big.cv = h('canvas', { class: 'mz-map-cv' });
   big.info = h('div', { class: 'mz-map-info' });
-  const zoomBy = (f) => { big.zoom = clamp(big.zoom * f, big.minZoom || 0.1, 2.6); clampView(); big.draw(); };
+  const view = () => { big.dirty = true; big.moveT = performance.now(); lab.stale = true; };
+  const zoomBy = (f) => { big.zoom = clamp(big.zoom * f, big.minZoom, ZMAX); clampView(); view(); };
+  const searchIn = h('input', { class: 'mz-input mz-map-search-in', type: 'search', placeholder: 'Rechercher un lieu, une station, une rue…', autocomplete: 'off', spellcheck: 'false', 'aria-label': 'Rechercher un lieu' });
+  const searchRes = h('div', { class: 'mz-map-results', hidden: true });
+  const st = data.stats.tiers;
+  const legendBase = [
+    st[TIER.MOTORWAY] + st[TIER.TRUNK] > 0 ? ['line', pal.road[0], 'Autoroute, rocade', 5] : null,
+    ['line', pal.road[2], 'Grand axe', 3], ['line', pal.road[5], 'Rue', 2],
+    data.rails.n ? ['dash', pal.rail, 'Voie ferrée', 2] : null,
+    data.rails.kind.includes?.(1) ? ['line', pal.tram, 'Tramway', 2] : null,
+    data.ww.n ? ['line', pal.ww, 'Canal', 4] : null,
+    data.polys.k.includes?.(AK.RUNWAY) ? ['line', pal.area[AK.RUNWAY], 'Aéroport', 6] : null,
+  ].filter(Boolean);
+  const sources = (() => {
+    const s = wd.meta?.sources;
+    if (Array.isArray(s) && s.length) return '© ' + s.map((x) => (typeof x === 'string' ? x : x?.name || x?.title || '')).filter(Boolean).map((x) => x.replace(/^©\s*/, '')).join(', ');
+    if (typeof s === 'string' && s) return s;
+    return CITY_SOURCES[ctx.city?.id] || CITY_SOURCES.paris;
+  })();
+  // mentions détaillées fournies avec les données (licences), affichées dans les réglages
+  const sourceDetails = [...new Set([wd.meta?.attribution, wd.pois?.meta?.attribution].filter((s) => typeof s === 'string' && s))];
   big.el = h('div', { class: 'mz-map', hidden: true },
     big.cv,
     h('div', { class: 'mz-map-head' },
-      h('div', { class: 'mz-map-title' }, h('span', { class: 'mz-eyebrow', text: 'Plan de Paris' }), h('strong', { text: 'Carte' })),
-      h('div', { class: 'mz-map-hint', text: 'Cliquez pour tracer un itinéraire · molette pour zoomer · glissez pour déplacer' }),
+      h('div', { class: 'mz-map-title' }, h('span', { class: 'mz-eyebrow', text: `Plan de ${cityName}` }), h('strong', { text: 'Carte' })),
+      h('div', { class: 'mz-map-search' }, icon('locate', 16), searchIn, searchRes),
+      h('div', { class: 'mz-map-hint', text: 'Cliquez pour tracer un itinéraire · molette pour zoomer' }),
       h('button', { class: 'mz-iconbtn', type: 'button', title: 'Fermer (M)', onclick: () => api.close?.() }, icon('close'))),
     h('div', { class: 'mz-map-tools' },
-      h('button', { class: 'mz-iconbtn', type: 'button', title: 'Zoom avant', onclick: () => zoomBy(1.4) }, icon('plus')),
-      h('button', { class: 'mz-iconbtn', type: 'button', title: 'Zoom arrière', onclick: () => zoomBy(1 / 1.4) }, icon('minus')),
-      h('button', { class: 'mz-iconbtn', type: 'button', title: 'Recentrer sur moi', onclick: () => { const m = me(); big.cx = m.x; big.cz = m.z; clampView(); big.draw(); } }, icon('locate'))),
-    h('div', { class: 'mz-map-legend' }, [
-      ['me', 'Vous'], ['player', 'Joueurs'], ['landmark', 'Monuments'], ['mission', 'Missions'],
-      ['free', 'Bien à vendre'], ['mine', 'Votre bien'], ['dealer', 'Concessions'], ['gps', 'Destination'],
-    ].map(([k, t]) => h('div', { class: 'mz-leg' }, h('canvas', { width: 36, height: 36, dataset: { k } }), t))),
+      h('button', { class: 'mz-iconbtn', type: 'button', title: 'Zoom avant', onclick: () => zoomBy(1.6) }, icon('plus')),
+      h('button', { class: 'mz-iconbtn', type: 'button', title: 'Zoom arrière', onclick: () => zoomBy(1 / 1.6) }, icon('minus')),
+      h('button', { class: 'mz-iconbtn', type: 'button', title: 'Recentrer sur moi', onclick: () => { const m = me(); big.cx = m.x; big.cz = m.z; clampView(); view(); } }, icon('locate')),
+      h('button', { class: 'mz-iconbtn', type: 'button', title: `Voir tout ${cityName}`, onclick: () => { big.cx = (B.minX + B.maxX) / 2; big.cz = (B.minZ + B.maxZ) / 2; big.zoom = big.minZoom; view(); } }, icon('map'))),
+    h('div', { class: 'mz-map-legend' },
+      h('div', { class: 'mz-leg-grid' }, [
+        ['me', 'Vous'], ['player', 'Joueurs'], ['landmark', 'Monuments'], ['mission', 'Missions'],
+        ['free', 'Bien à vendre'], ['mine', 'Votre bien'], ['dealer', 'Concessions'], ['gps', 'Destination'],
+      ].map(([k, t]) => h('div', { class: 'mz-leg' }, h('canvas', { width: 36, height: 36, dataset: { k } }), t))),
+      h('div', { class: 'mz-leg-grid mz-leg-base' }, legendBase.map(([kind, col, t, w]) => h('div', { class: 'mz-leg' }, h('i', { class: 'mz-leg-line' + (kind === 'dash' ? ' is-dash' : ''), style: `--c:${col};--w:${w}px` }), t)))),
+    h('div', { class: 'mz-map-credit', text: sources }),
     big.info);
-  // pictos de la légende
   big.el.querySelectorAll('.mz-leg canvas').forEach((c) => {
     const g = c.getContext('2d'), k = c.dataset.k;
     if (k === 'me') arrow(g, 18, 18, 12, 0);
@@ -337,85 +321,290 @@ export function createMaps(ctx, api) {
   });
 
   function sizeBig() {
-    big.dpr = Math.min(window.devicePixelRatio || 1, 2);
+    big.dpr = Math.min(window.devicePixelRatio || 1, low ? 1 : 2);
     big.w = window.innerWidth; big.h = window.innerHeight;
     big.cv.width = Math.round(big.w * big.dpr); big.cv.height = Math.round(big.h * big.dpr);
-    big.g = big.cv.getContext('2d');
-    big.minZoom = Math.min(big.w / BW, big.h / BH) * 0.9;
+    big.g = big.cv.getContext('2d', { alpha: false });
+    big.minZoom = Math.min(big.w / B.w, big.h / B.h) * 0.94;
+    big.zoom = clamp(big.zoom, big.minZoom, ZMAX);
   }
   function clampView() { big.cx = clamp(big.cx, B.minX, B.maxX); big.cz = clamp(big.cz, B.minZ, B.maxZ); }
   const w2s = (x, z) => [(x - big.cx) * big.zoom + big.w / 2, (z - big.cz) * big.zoom + big.h / 2];
   const s2w = (sx, sy) => [(sx - big.w / 2) / big.zoom + big.cx, (sy - big.h / 2) / big.zoom + big.cz];
 
-  big.draw = (sharp = false) => {
-    const g = big.g; if (!g || !big.open) return;
-    const dpr = big.dpr, z = big.zoom, m = me();
-    const x0 = big.cx - big.w / 2 / z, z0 = big.cz - big.h / 2 / z;
-    g.setTransform(1, 0, 0, 1, 0, 0);
-    if (sharp || z <= S * 1.15) {
-      if (z > S * 1.15) paintWorld(g, z * dpr, x0, z0, big.cv.width, big.cv.height);
-      else { g.fillStyle = COL.bg; g.fillRect(0, 0, big.cv.width, big.cv.height); g.imageSmoothingQuality = 'high'; g.drawImage(base, (B.minX - x0) * z * dpr, (B.minZ - z0) * z * dpr, BW * z * dpr, BH * z * dpr); }
-    } else {
-      g.fillStyle = COL.bg; g.fillRect(0, 0, big.cv.width, big.cv.height);
-      g.drawImage(base, (B.minX - x0) * z * dpr, (B.minZ - z0) * z * dpr, BW * z * dpr, BH * z * dpr);
-      clearTimeout(big.sharpT); big.sharpT = setTimeout(() => big.draw(true), 160);
+  // ---------- Calque des libellés (noms de voies le long du tracé, pastilles de numéro, quartiers, parcs) ----------
+  const lab = { front: document.createElement('canvas'), back: document.createElement('canvas'), ready: false, cx: 0, cz: 0, z: 1, stale: true, job: null, token: 0 };
+  const cw = new Map(); // largeur des caractères par police
+  function charW(g, font, ch) {
+    let m = cw.get(font);
+    if (!m) cw.set(font, (m = new Map()));
+    let w = m.get(ch);
+    if (w == null) { w = g.measureText(ch).width; m.set(ch, w); }
+    return w;
+  }
+  // Quartiers et communes : POI dédiés s'il y en a ; sinon déduits des mairies (« Mairie de quartier Lardenne », « Mairie de Blagnac »)
+  // et des grands ensembles résidentiels nommés. Zones d'activité nommées : pour la recherche.
+  let districts = null, zones = null;
+  function buildDistricts() {
+    districts = []; zones = [];
+    const seen = new Set();
+    const add = (name, x, z) => { const n = norm(name); if (n && !seen.has(n) && isFinite(x) && isFinite(z)) { seen.add(n); districts.push({ name, x, z }); } };
+    for (const p of wd.pois?.pois || []) {
+      if (!p || !p.name) continue;
+      if (DISTRICT.test(p.kind || '')) add(p.name, p.x, p.z);
+      else if (p.kind === 'townhall') { const m = TOWNHALL.exec(p.name); if (m && !/^\d+$/.test(m[1])) add(m[1].replace(/^./, (c) => c.toUpperCase()), p.x, p.z); }
     }
+    for (const a of wd.pois?.areas || []) {
+      if (!a || !a.name || !Array.isArray(a.polygon) || (a.kind !== 'residential' && a.kind !== 'industrial' && a.kind !== 'commercial')) continue;
+      let x0 = Infinity, z0 = Infinity, x1 = -Infinity, z1 = -Infinity;
+      for (const q of a.polygon) { if (q[0] < x0) x0 = q[0]; if (q[0] > x1) x1 = q[0]; if (q[1] < z0) z0 = q[1]; if (q[1] > z1) z1 = q[1]; }
+      const size = Math.hypot(x1 - x0, z1 - z0);
+      if (a.kind === 'residential') { if (size >= 320) add(a.name, (x0 + x1) / 2, (z0 + z1) / 2); }
+      else if (size >= 160) zones.push({ name: a.name, x: (x0 + x1) / 2, z: (z0 + z1) / 2 });
+    }
+  }
+  function* buildLabels(token) {
+    const t0 = performance.now();
+    const z = big.zoom, dpr = big.dpr, W = big.w, H = big.h, cx = big.cx, cz = big.cz;
+    const cv = lab.back;
+    cv.width = Math.round(W * dpr); cv.height = Math.round(H * dpr);
+    const g = cv.getContext('2d');
+    const x0 = cx - W / 2 / z, z0 = cz - H / 2 / z, x1 = x0 + W / z, z1 = z0 + H / z;
+    const placed = [], seen = new Map(), cand = [];
+    const hit = (a, b, c, d) => { for (const q of placed) if (a < q[2] && c > q[0] && b < q[3] && d > q[1]) return true; return false; };
+    const repeat = (key, x, y, dist) => { const l = seen.get(key); if (l) { for (const q of l) if (Math.abs(q[0] - x) < dist && Math.abs(q[1] - y) < dist) return true; l.push([x, y]); } else seen.set(key, [[x, y]]); return false; };
+    const rx = [], ry = [], rl = [];
+    /** Plus longue portion d'une polyligne à l'écran → rx/ry (px) et longueurs cumulées rl. Renvoie sa longueur. */
+    const run = (P, a, e) => {
+      let bs = -1, be = -1, bl = 0, cs = -1, cl = 0, px = 0, py = 0;
+      for (let p = a; p < e; p++) {
+        const sx = (P[p * 2] - x0) * z, sy = (P[p * 2 + 1] - z0) * z;
+        const inside = sx > -30 && sy > -30 && sx < W + 30 && sy < H + 30;
+        if (inside) { if (cs < 0) { cs = p; cl = 0; } else cl += Math.hypot(sx - px, sy - py); if (cl > bl || bs < 0) { bl = cl; bs = cs; be = p; } } else cs = -1;
+        px = sx; py = sy;
+      }
+      rx.length = ry.length = rl.length = 0;
+      if (bs < 0 || be <= bs) return 0;
+      let acc = 0;
+      for (let p = bs; p <= be; p++) {
+        const sx = (P[p * 2] - x0) * z, sy = (P[p * 2 + 1] - z0) * z;
+        if (rx.length) acc += Math.hypot(sx - rx[rx.length - 1], sy - ry[ry.length - 1]);
+        rx.push(sx); ry.push(sy); rl.push(acc);
+      }
+      return acc;
+    };
+    const at = (d, out) => { // point et angle à l'abscisse curviligne d
+      let i = 1;
+      while (i < rl.length - 1 && rl[i] < d) i++;
+      const seg = rl[i] - rl[i - 1] || 1, t = (d - rl[i - 1]) / seg;
+      out[0] = rx[i - 1] + (rx[i] - rx[i - 1]) * t; out[1] = ry[i - 1] + (ry[i] - ry[i - 1]) * t; out[2] = Math.atan2(ry[i] - ry[i - 1], rx[i] - rx[i - 1]);
+    };
+    const pa = [0, 0, 0], pb = [0, 0, 0];
+    const along = (text, font, color, P, a, e, gap, spacing) => {
+      const len = run(P, a, e);
+      if (len < 40) return false;
+      g.font = font;
+      let tw = 0;
+      for (const ch of text) tw += charW(g, font, ch) + spacing;
+      if (len < tw + 24) return false;
+      const s0 = (len - tw) / 2;
+      at(s0, pa); at(s0 + tw, pb);
+      if (Math.hypot(pb[0] - pa[0], pb[1] - pa[1]) < tw * 0.86) return false; // trop sinueux
+      const bx0 = Math.min(pa[0], pb[0]) - 5, by0 = Math.min(pa[1], pb[1]) - 8, bx1 = Math.max(pa[0], pb[0]) + 5, by1 = Math.max(pa[1], pb[1]) + 8;
+      if (hit(bx0, by0, bx1, by1)) return false;
+      if (repeat(text, (bx0 + bx1) / 2, (by0 + by1) / 2, gap)) return false;
+      placed.push([bx0, by0, bx1, by1]);
+      const flip = pb[0] < pa[0];
+      const gl = [];
+      let d = flip ? s0 + tw : s0;
+      for (const ch of text) {
+        const w = charW(g, font, ch) + spacing;
+        at(flip ? d - w / 2 : d + w / 2, pa);
+        gl.push(ch, pa[0], pa[1], flip ? pa[2] + Math.PI : pa[2]);
+        d += flip ? -w : w;
+      }
+      g.textAlign = 'center'; g.textBaseline = 'middle'; g.lineJoin = 'round';
+      for (let pass = 0; pass < 2; pass++) {
+        if (pass === 0) { g.strokeStyle = pal.halo; g.lineWidth = 3; } else g.fillStyle = color;
+        for (let i = 0; i < gl.length; i += 4) {
+          const co = Math.cos(gl[i + 3]) * dpr, si = Math.sin(gl[i + 3]) * dpr;
+          g.setTransform(co, si, -si, co, gl[i + 1] * dpr, gl[i + 2] * dpr);
+          if (pass === 0) g.strokeText(gl[i], 0, 0); else g.fillText(gl[i], 0, 0);
+        }
+      }
+      g.setTransform(dpr, 0, 0, dpr, 0, 0);
+      return true;
+    };
+    const flat = (text, x, y, font, color, key, gap) => {
+      g.font = font;
+      const hw = g.measureText(text).width / 2 + 6;
+      if (x < -hw || y < -10 || x > W + hw || y > H + 10 || hit(x - hw, y - 9, x + hw, y + 9)) return false;
+      if (key && repeat(key, x, y, gap)) return false;
+      placed.push([x - hw, y - 9, x + hw, y + 9]);
+      g.textAlign = 'center'; g.textBaseline = 'middle'; g.lineJoin = 'round';
+      g.strokeStyle = pal.halo; g.lineWidth = 3.5; g.strokeText(text, x, y); g.fillStyle = color; g.fillText(text, x, y);
+      return true;
+    };
+    const shield = (ref, P, a, e) => {
+      const len = run(P, a, e);
+      if (len < 70) return;
+      at(len / 2, pa);
+      g.font = `700 10px ${SANS}`;
+      const hw = g.measureText(ref).width / 2 + 5, x = pa[0], y = pa[1];
+      if (hit(x - hw - 2, y - 10, x + hw + 2, y + 10) || repeat('#' + ref, x, y, 360)) return;
+      placed.push([x - hw - 2, y - 10, x + hw + 2, y + 10]);
+      const red = /^[AN]\s?\d/i.test(ref), yel = /^(R?[DM])\s?\d/i.test(ref);
+      g.beginPath(); g.roundRect(x - hw, y - 7.5, hw * 2, 15, 3);
+      g.fillStyle = red ? '#c8372d' : yel ? '#f2c230' : pal.bg; g.fill();
+      g.strokeStyle = red || yel ? 'rgba(255,255,255,.85)' : pal.mute; g.lineWidth = 1; g.stroke();
+      g.textAlign = 'center'; g.textBaseline = 'middle'; g.fillStyle = yel ? '#1a1206' : '#fff'; g.fillText(ref, x, y + 0.5);
+    };
+
     g.setTransform(dpr, 0, 0, dpr, 0, 0);
-    // itinéraire
+    g.clearRect(0, 0, W, H);
+    const { roads, ww, polys, ix, query } = data;
+    let work = 0;
+    const lodR = z < 0.2 ? roads.lodA : z < 1 ? roads.lodB : null;
+    const geo = (i) => (lodR && lodR.off[i + 1] - lodR.off[i] >= 2 ? [lodR.pts, lodR.off[i], lodR.off[i + 1]] : [roads.pts, roads.off[i], roads.off[i + 1]]);
+    // 1. pastilles de numéro (A620, N124, M901…)
+    query(ix.major, roads, x0, z0, x1, z1, cand);
+    const majors = cand.slice();
+    for (const i of majors) {
+      const r = roads.src[i];
+      if (!r.ref || roads.tier[i] > (z >= 0.25 ? TIER.MAJOR : TIER.TRUNK)) continue;
+      const [P, a, e] = geo(i);
+      shield(String(r.ref).split(';')[0].trim(), P, a, e);
+      if (++work % 60 === 0) { yield; if (token !== lab.token) return; g.setTransform(dpr, 0, 0, dpr, 0, 0); }
+    }
+    yield; if (token !== lab.token) return;
+    // 2. canaux et cours d'eau
+    if (z >= 0.1 && ww.n) {
+      query(ix.ww, ww, x0, z0, x1, z1, cand);
+      for (const i of cand.slice()) {
+        const name = ww.src[i].name;
+        if (!name || (ww.kind[i] === 2 && z < 0.8)) continue;
+        along(name, `italic 12.5px ${SERIF}`, pal.label.water, ww.pts, ww.off[i], ww.off[i + 1], 420, 0.6);
+      }
+      yield; if (token !== lab.token) return;
+    }
+    // 3. quartiers
+    if (z >= 0.03 && z <= 0.75) {
+      if (!districts) buildDistricts();
+      for (const d of districts) flat(String(d.name).toUpperCase(), (d.x - x0) * z, (d.z - z0) * z, `600 10.5px ${COND}`, pal.label.district, null, 0);
+      yield; if (token !== lab.token) return;
+    }
+    // 4. noms des voies, des plus importantes aux rues
+    const passes = [[majors, TIER.MAJOR, 0.42], [null, TIER.COLLECTOR, 0.95], [null, TIER.PED, 1.6]];
+    for (const [list0, maxTier, zMin] of passes) {
+      if (z < zMin) break;
+      let list = list0;
+      if (!list) { query(maxTier === TIER.COLLECTOR ? ix.mid : ix.minor, roads, x0, z0, x1, z1, cand); list = cand.slice(); if (maxTier === TIER.PED) { query(ix.ped, roads, x0, z0, x1, z1, cand); list = list.concat(cand); } }
+      for (const i of list) {
+        const t = roads.tier[i], name = roads.src[i].name;
+        if (!name || t === TIER.RAMP || t === TIER.PATH) continue;
+        const [P, a, e] = geo(i);
+        if (t <= TIER.MAJOR) along(name.toUpperCase(), `600 10px ${COND}`, t <= TIER.TRUNK ? pal.label.top : pal.label.major, P, a, e, 380, 1);
+        else along(name, `500 10.5px ${SANS}`, pal.label.street, P, a, e, 300, 0.2);
+        if (++work % 24 === 0) { yield; if (token !== lab.token) return; g.setTransform(dpr, 0, 0, dpr, 0, 0); }
+      }
+      yield; if (token !== lab.token) return;
+    }
+    // 5. parcs et forêts
+    if (z >= 0.12) {
+      query(z < 0.5 ? ix.polyBig : ix.polyAll, polys, x0, z0, x1, z1, cand);
+      const pf = `italic ${Math.round(clamp(z * 26, 11, 14))}px ${SERIF}`;
+      for (const i of cand.slice()) {
+        const k = polys.k[i], name = polys.src[i].name;
+        const green = k === AK.PARK || k === AK.FOREST || k === AK.CEMETERY;
+        if (!name || (!green && k !== AK.INDUS && k !== AK.COMM) || polys.size[i] * z < (green ? 70 : 110)) continue;
+        const q = i * 4;
+        flat(name, ((polys.bb[q] + polys.bb[q + 2]) / 2 - x0) * z, ((polys.bb[q + 1] + polys.bb[q + 3]) / 2 - z0) * z, pf, green ? pal.label.park : pal.label.district, name, 300);
+      }
+    }
+    perf.labels.n++; perf.labels.ms += performance.now() - t0;
+    if (token !== lab.token) return;
+    const f = lab.front; lab.front = lab.back; lab.back = f;
+    lab.cx = cx; lab.cz = cz; lab.z = z; lab.ready = true; big.dirty = true;
+  }
+
+  // ---------- Dessin ----------
+  const pick = (types) => (types.mission ? 'mission' : types.property ? 'property' : types.dealer ? 'dealer' : 'landmark');
+  function drawBig() {
+    const g = big.g; if (!g || !big.open) return;
+    const t0 = performance.now();
+    const dpr = big.dpr, z = big.zoom, zs = z * dpr, m = me();
+    const x0 = big.cx - big.w / 2 / z, z0 = big.cz - big.h / 2 / z, x1 = x0 + big.w / z, z1 = z0 + big.h / z;
+    g.setTransform(1, 0, 0, 1, 0, 0);
+    g.fillStyle = pal.out; g.fillRect(0, 0, big.cv.width, big.cv.height);
+    g.setTransform(zs, 0, 0, zs, -x0 * zs, -z0 * zs);
+    tiles.draw(g, zs, x0, z0, x1, z1, big.cx, big.cz);
+    big.seen = tiles.completed;
     const lp = livePath(m);
     if (lp) {
-      g.save(); g.setTransform(z * dpr, 0, 0, z * dpr, -x0 * z * dpr, -z0 * z * dpr);
       g.lineJoin = 'round'; g.lineCap = 'round'; strokePath(g, m, lp);
-      g.strokeStyle = 'rgba(12,16,27,.9)'; g.lineWidth = 8 / z; g.stroke();
-      g.strokeStyle = COL.rouge; g.lineWidth = 4 / z; g.stroke(); g.restore();
+      g.strokeStyle = pal.halo; g.lineWidth = 8 / z; g.stroke();
+      g.strokeStyle = pal.route; g.lineWidth = 4 / z; g.stroke();
     }
-    // libellés : priorité joueurs > monuments > sélection > reste > parcs, sans chevauchement
+    // calque des libellés (recalé sur la vue courante tant qu'il n'est pas recalculé)
+    if (lab.ready) {
+      const k = z / lab.z;
+      if (k > 0.7 && k < 1.45) {
+        g.setTransform(1, 0, 0, 1, 0, 0);
+        const lx = (lab.cx - big.w / 2 / lab.z - x0) * zs, ly = (lab.cz - big.h / 2 / lab.z - z0) * zs;
+        g.globalAlpha = k === 1 ? 1 : 0.75;
+        g.drawImage(lab.front, lx, ly, lab.front.width * k, lab.front.height * k);
+        g.globalAlpha = 1;
+      }
+    }
+    g.setTransform(dpr, 0, 0, dpr, 0, 0);
     g.textAlign = 'center'; g.textBaseline = 'middle';
     const placed = [];
-    const SANS = '"Avenir Next", Avenir, "Segoe UI", system-ui, sans-serif';
     const label = (t, x, y, col, font, force) => {
       g.font = font;
       const hw = g.measureText(t).width / 2 + 5, r = [x - hw, y - 9, x + hw, y + 9];
       if (!force) for (const q of placed) if (r[0] < q[2] && r[2] > q[0] && r[1] < q[3] && r[3] > q[1]) return;
       placed.push(r);
-      g.lineWidth = 3.5; g.strokeStyle = 'rgba(8,11,20,.92)'; g.lineJoin = 'round'; g.strokeText(t, x, y); g.fillStyle = col; g.fillText(t, x, y);
+      g.lineWidth = 3.5; g.strokeStyle = pal.halo; g.lineJoin = 'round'; g.strokeText(t, x, y); g.fillStyle = col; g.fillText(t, x, y);
     };
-    const all = playerMarkers().concat(markers);
-    const vis = [];
-    for (const mk of all) {
-      const [sx, sy] = w2s(mk.x, mk.z);
+    // marqueurs : regroupés par cases de 38 px quand ils se chevauchent
+    const CL = 38, cells = new Map(), list = [];
+    for (let i = 0; i < markers.length; i++) {
+      const mk = markers[i], sx = (mk.x - x0) * z, sy = (mk.z - z0) * z;
       if (sx < -40 || sy < -40 || sx > big.w + 40 || sy > big.h + 40) continue;
-      vis.push([mk, sx, sy]);
+      if (mk === big.sel) { list.push({ mk, x: sx, y: sy, n: 1 }); continue; }
+      const key = Math.floor(sx / CL) * 4096 + Math.floor(sy / CL);
+      let c = cells.get(key);
+      if (!c) { c = { mk, x: 0, y: 0, n: 0, types: {}, wx: 0, wz: 0 }; cells.set(key, c); list.push(c); }
+      c.x += sx; c.y += sy; c.wx += mk.x; c.wz += mk.z; c.n++; c.types[mk.t] = 1;
     }
-    for (let i = vis.length - 1; i >= 0; i--) { const [mk, sx, sy] = vis[i]; glyph(g, mk, sx, sy, mk.t === 'landmark' ? 8 : 7.5); }
-    for (const [mk, sx, sy] of vis) if (mk.t === 'player') label(mk.label, sx, sy - 16, COL.ciel, `600 12px ${SANS}`, true);
-    for (const [mk, sx, sy] of vis) if (mk.t === 'landmark') label(mk.label, sx, sy + 19, COL.gold, `600 12px ${SANS}`, false);
-    for (const [mk, sx, sy] of vis) if (mk === big.sel && mk.t !== 'player' && mk.t !== 'landmark') label(mk.label, sx, sy + 18, '#fff', `600 12px ${SANS}`, true);
-    if (z > 0.3) for (const [mk, sx, sy] of vis) if (mk.t !== 'player' && mk.t !== 'landmark' && mk !== big.sel) label(mk.label, sx, sy + 18, COL.txt, `500 11.5px ${SANS}`, false);
-    if (z > 0.2) {
-      const pf = `italic ${Math.round(clamp(z * 26, 11, 15))}px Didot, "Bodoni 72", Georgia, serif`;
-      for (const p of wd.parks || []) {
-        if (!p.name || !p.polygon?.length) continue;
-        let a = Infinity, b2 = Infinity, c = -Infinity, d = -Infinity;
-        for (const q of p.polygon) { if (q[0] < a) a = q[0]; if (q[0] > c) c = q[0]; if (q[1] < b2) b2 = q[1]; if (q[1] > d) d = q[1]; }
-        if ((c - a) * z < 90) continue;
-        const [sx, sy] = w2s((a + c) / 2, (b2 + d) / 2);
-        if (sx < 0 || sy < 0 || sx > big.w || sy > big.h) continue;
-        label(p.name, sx, sy, 'rgba(130,190,160,.8)', pf, false);
-      }
+    for (const c of list) if (c.n > 1) { c.x /= c.n; c.y /= c.n; c.wx /= c.n; c.wz /= c.n; }
+    big.clusters = list;
+    for (let i = list.length - 1; i >= 0; i--) {
+      const c = list[i];
+      if (c.n === 1) { glyph(g, c.mk, c.x, c.y, c.mk.t === 'landmark' ? 8 : 7.5); continue; }
+      glyph(g, { t: 'cluster' }, c.x, c.y, 11);
+      g.font = `700 11px ${SANS}`; g.fillStyle = pal.accent; g.fillText(String(c.n), c.x, c.y + 0.5);
     }
+    const pm = playerMarkers();
+    for (const mk of pm) { const [sx, sy] = w2s(mk.x, mk.z); glyph(g, mk, sx, sy, 7.5); label(mk.label, sx, sy - 16, pal.player, `600 12px ${SANS}`, true); }
+    if (big.sel && big.sel.t === 'place') { const [sx, sy] = w2s(big.sel.x, big.sel.z); glyph(g, big.sel, sx, sy, 8); }
+    for (const c of list) if (c.n === 1 && c.mk === big.sel) label(c.mk.label, c.x, c.y + 19, '#fff', `600 12px ${SANS}`, true);
+    for (const c of list) if (c.n === 1 && c.mk.t === 'landmark' && c.mk !== big.sel) label(c.mk.label, c.x, c.y + 19, pal.accent, `600 12px ${SANS}`, false);
+    if (z > 0.3) for (const c of list) if (c.n === 1 && c.mk.t !== 'landmark' && c.mk !== big.sel) label(c.mk.label, c.x, c.y + 18, pal.txt, `500 11.5px ${SANS}`, false);
     if (gps) { const [sx, sy] = w2s(gps.x, gps.z); glyph(g, { t: 'gps' }, sx, sy - 9, 11); }
     const [mx, my] = w2s(m.x, m.z);
-    g.beginPath(); g.arc(mx, my, 17, 0, 6.3); g.fillStyle = 'rgba(240,193,112,.16)'; g.fill();
-    arrow(g, mx, my, 10, m.yaw === 0 ? 0 : -m.yaw);
-    // rose des vents discrète + échelle
-    const bar = [50, 100, 200, 500, 1000, 2000].find((d) => d * z >= 70) || 2000;
+    g.beginPath(); g.arc(mx, my, 17, 0, 6.3); g.fillStyle = 'rgba(255,255,255,.14)'; g.fill();
+    arrow(g, mx, my, 10, -m.yaw);
+    // échelle
+    const bar = [50, 100, 200, 500, 1000, 2000, 5000].find((d) => d * z >= 70) || 5000;
     const bx = big.w - 28 - bar * z, by = big.h - 26;
-    g.strokeStyle = COL.mute; g.lineWidth = 1.5; g.beginPath(); g.moveTo(bx, by - 5); g.lineTo(bx, by); g.lineTo(bx + bar * z, by); g.lineTo(bx + bar * z, by - 5); g.stroke();
-    g.font = '500 11px "Avenir Next", Avenir, system-ui, sans-serif'; g.fillStyle = COL.mute; g.fillText(bar >= 1000 ? `${bar / 1000} km` : `${bar} m`, bx + bar * z / 2, by - 11);
-  };
+    g.strokeStyle = pal.mute; g.lineWidth = 1.5; g.beginPath(); g.moveTo(bx, by - 5); g.lineTo(bx, by); g.lineTo(bx + bar * z, by); g.lineTo(bx + bar * z, by - 5); g.stroke();
+    g.font = `500 11px ${SANS}`; g.fillStyle = pal.mute; g.fillText(bar >= 1000 ? `${bar / 1000} km` : `${bar} m`, bx + bar * z / 2, by - 11);
+    big.dirty = false;
+    tick(perf.big, t0);
+  }
 
-  function showInfo(mk, x, z) {
+  function showInfo(mk) {
     big.info.replaceChildren();
     if (!mk && !gps) { big.info.classList.remove('is-on'); return; }
     const title = mk?.label || gps?.label || 'Destination';
@@ -429,22 +618,91 @@ export function createMaps(ctx, api) {
       h('div', { class: 'mz-map-info-txt' }, h('span', { class: 'mz-eyebrow', text: mk?.sub || 'Itinéraire' }), h('strong', { text: title }), h('span', { class: 'mz-dim', text: `à ${fmtDist(d)}` })),
       h('div', { class: 'mz-row' }, actions));
     big.info.classList.add('is-on');
-    void x; void z;
   }
   function clickAt(sx, sy) {
+    // un groupe de marqueurs : on zoome dessus
+    let cl = null, cd = 15 * 15;
+    for (const c of big.clusters) if (c.n > 1) { const d = (c.x - sx) ** 2 + (c.y - sy) ** 2; if (d < cd) { cd = d; cl = c; } }
+    if (cl) { big.cx = cl.wx; big.cz = cl.wz; big.zoom = clamp(big.zoom * 2.6, big.minZoom, ZMAX); clampView(); view(); return; }
     let best = null, bd = 18 * 18;
-    for (const mk of markers.concat(playerMarkers())) { const [x, y] = w2s(mk.x, mk.z); const d = (x - sx) ** 2 + (y - sy) ** 2; if (d < bd) { bd = d; best = mk; } }
+    for (const c of big.clusters) if (c.n === 1) { const d = (c.x - sx) ** 2 + (c.y - sy) ** 2; if (d < bd) { bd = d; best = c.mk; } }
+    for (const mk of playerMarkers()) { const [x, y] = w2s(mk.x, mk.z); const d = (x - sx) ** 2 + (y - sy) ** 2; if (d < bd) { bd = d; best = mk; } }
     big.sel = best;
     let [x, z] = s2w(sx, sy); let label;
     if (best) { x = best.x; z = best.z; label = best.label; } else label = roadNameAt(x, z, 40) || 'Point sur la carte';
-    if (x < B.minX || x > B.maxX || z < B.minZ || z > B.maxZ) return;
+    if (x < data.bounds.minX || x > data.bounds.maxX || z < data.bounds.minZ || z > data.bounds.maxZ) { bus.emit('toast', { text: `Ce point est hors de ${cityName}.`, kind: 'info' }); return; }
     setGps(x, z, label);
-    showInfo(best, x, z);
+    showInfo(best);
+    big.dirty = true;
   }
 
-  // Interactions (pointeurs : souris + tactile avec pincement)
+  // ---------- Recherche d'un lieu ----------
+  let places = null;
+  function buildPlaces() {
+    const out = [], seen = new Set();
+    const add = (label, sub, x, z, rank, extra) => {
+      if (!label || !isFinite(x) || !isFinite(z)) return;
+      const n = norm(label), key = sub + '|' + n;
+      if (!n || seen.has(key)) return;
+      seen.add(key);
+      out.push({ label, sub, n, x, z, rank, ...extra });
+    };
+    for (const l of ctx.LANDMARKS || []) if (!l.hidden) add(l.name, 'Monument', l.x, l.z, 0, { zoom: 0.9 });
+    for (const p of wd.pois?.pois || []) {
+      if (!p || !p.name) continue;
+      if (PLACE_KIND[p.kind]) add(p.name, PLACE_KIND[p.kind][0], p.x, p.z, PLACE_KIND[p.kind][1], { zoom: 1 });
+    }
+    if (!districts) buildDistricts();
+    for (const d of districts) add(d.name, 'Quartier', d.x, d.z, 1, { zoom: 0.3 });
+    for (const d of zones) add(d.name, 'Zone d’activité', d.x, d.z, 4, { zoom: 0.5 });
+    for (const mk of markers) if (mk.t === 'dealer' || mk.t === 'property') add(mk.label, mk.t === 'dealer' ? 'Concession' : 'Bien immobilier', mk.x, mk.z, 3, { zoom: 1 });
+    const { polys, roads } = data;
+    for (let i = 0; i < polys.n; i++) {
+      const k = polys.k[i], name = polys.src[i].name;
+      if (name && polys.size[i] >= 40 && (k === AK.PARK || k === AK.FOREST)) add(name, k === AK.PARK ? 'Parc' : 'Forêt', (polys.bb[i * 4] + polys.bb[i * 4 + 2]) / 2, (polys.bb[i * 4 + 1] + polys.bb[i * 4 + 3]) / 2, 5, { zoom: 0.7 });
+    }
+    for (let i = 0; i < roads.count; i++) {
+      const name = roads.src[i].name;
+      if (!name || roads.tier[i] === TIER.RAMP) continue;
+      const mid = (roads.off[i] + roads.off[i + 1]) >> 1;
+      add(name, roads.tier[i] <= TIER.MAJOR ? 'Grand axe' : 'Rue', roads.pts[mid * 2], roads.pts[mid * 2 + 1], roads.tier[i] <= TIER.MAJOR ? 6 : 7, { zoom: 1.4 });
+    }
+    places = out;
+  }
+  function search(q) {
+    const n = norm(q);
+    if (n.length < 2) return [];
+    if (!places) buildPlaces();
+    const toks = n.split(' '), res = [];
+    for (const p of places) {
+      let ok = true;
+      for (const t of toks) if (!p.n.includes(t)) { ok = false; break; }
+      if (!ok) continue;
+      const sc = (p.n.startsWith(n) ? 0 : (' ' + p.n).includes(' ' + n) ? 2 : 8) + p.rank + p.n.length * 0.01;
+      res.push([sc, p]);
+    }
+    res.sort((a, b) => a[0] - b[0]);
+    return res.slice(0, 8).map((r) => r[1]);
+  }
+  function goTo(p) {
+    searchRes.hidden = true; searchIn.value = p.label; searchIn.blur();
+    big.cx = p.x; big.cz = p.z; big.zoom = clamp(Math.max(big.zoom, p.zoom || 1), big.minZoom, ZMAX); clampView();
+    big.sel = { t: 'place', x: p.x, z: p.z, label: p.label, sub: p.sub };
+    setGps(p.x, p.z, p.label); showInfo(big.sel); view();
+  }
+  let found = [];
+  searchIn.addEventListener('input', () => {
+    found = search(searchIn.value);
+    searchRes.replaceChildren(...(found.length ? found.map((p) => h('button', { class: 'mz-map-result', type: 'button', onclick: () => goTo(p) }, h('b', { text: p.label }), h('span', { text: p.sub })))
+      : norm(searchIn.value).length >= 2 ? [h('div', { class: 'mz-map-noresult', text: `Aucun lieu trouvé à ${cityName}.` })] : []));
+    searchRes.hidden = !searchRes.childElementCount;
+  });
+  searchIn.addEventListener('keydown', (e) => { if (e.key === 'Enter' && found[0]) { e.preventDefault(); goTo(found[0]); } });
+  searchIn.addEventListener('focus', () => { if (searchRes.childElementCount) searchRes.hidden = false; });
+
+  // ---------- Interactions (souris + tactile avec pincement) ----------
   const ptrs = new Map(); let moved = 0, pinch = 0;
-  big.cv.addEventListener('pointerdown', (e) => { big.cv.setPointerCapture?.(e.pointerId); ptrs.set(e.pointerId, [e.clientX, e.clientY]); if (ptrs.size === 1) moved = 0; pinch = 0; });
+  big.cv.addEventListener('pointerdown', (e) => { searchRes.hidden = true; if (document.activeElement === searchIn) searchIn.blur(); big.cv.setPointerCapture?.(e.pointerId); ptrs.set(e.pointerId, [e.clientX, e.clientY]); if (ptrs.size === 1) moved = 0; pinch = 0; });
   big.cv.addEventListener('pointermove', (e) => {
     const p = ptrs.get(e.pointerId); if (!p) return;
     const dx = e.clientX - p[0], dy = e.clientY - p[1];
@@ -452,57 +710,89 @@ export function createMaps(ctx, api) {
     p[0] = e.clientX; p[1] = e.clientY;
     if (ptrs.size === 2) {
       const [a, b] = [...ptrs.values()]; const d = Math.hypot(a[0] - b[0], a[1] - b[1]);
-      if (pinch) big.zoom = clamp(big.zoom * d / pinch, big.minZoom, 2.6);
+      if (pinch) big.zoom = clamp(big.zoom * d / pinch, big.minZoom, ZMAX);
       pinch = d; moved = 99;
     }
-    clampView(); big.draw();
+    clampView(); view();
   });
   const up = (e) => { if (!ptrs.has(e.pointerId)) return; ptrs.delete(e.pointerId); pinch = 0; if (e.type === 'pointerup' && ptrs.size === 0 && moved < 6 && e.button === 0) clickAt(e.clientX, e.clientY); };
   big.cv.addEventListener('pointerup', up); big.cv.addEventListener('pointercancel', up);
   big.cv.addEventListener('wheel', (e) => {
     e.preventDefault();
     const [wx, wz] = s2w(e.clientX, e.clientY);
-    big.zoom = clamp(big.zoom * Math.exp(-e.deltaY * 0.0015), big.minZoom, 2.6);
+    big.zoom = clamp(big.zoom * Math.exp(-e.deltaY * 0.0016), big.minZoom, ZMAX);
     big.cx = wx - (e.clientX - big.w / 2) / big.zoom; big.cz = wz - (e.clientY - big.h / 2) / big.zoom;
-    clampView(); big.draw();
+    clampView(); view();
   }, { passive: false });
   big.cv.addEventListener('contextmenu', (e) => { e.preventDefault(); big.sel = null; bus.emit('gps:clear', {}); showInfo(null); });
 
   function openBig() {
     refreshMarkers();
     big.open = true; big.el.hidden = false; sizeBig();
-    const m = me(); big.cx = m.x; big.cz = m.z; big.zoom = clamp(0.5, big.minZoom, 2.6); clampView();
-    showInfo(null); big.draw();
+    const m = me(); big.cx = m.x; big.cz = m.z; big.zoom = clamp(0.5, big.minZoom, ZMAX); clampView();
+    big.sel = null; searchIn.value = ''; searchRes.hidden = true; searchRes.replaceChildren();
+    lab.ready = false; showInfo(null); view(); drawBig();
   }
-  function closeBig() { big.open = false; big.el.hidden = true; clearTimeout(big.sharpT); }
+  function closeBig() { big.open = false; big.el.hidden = true; lab.token++; if (lab.job) { tiles.cancelJob(lab.job); lab.job = null; } }
 
   // ---------- Boucle ----------
   let tMini = 0, tSlow = 0, tBig = 0;
   sizeMini(); refreshMarkers();
-  bus.on('resize', () => { sizeMini(); if (big.open) { sizeBig(); big.draw(); } });
-  window.addEventListener('resize', () => { sizeMini(); if (big.open) { sizeBig(); big.draw(); } });
-  const miniStep = ctx.quality === 'low' ? 1 / 15 : 1 / 30;
+  const onResize = () => { sizeMini(); if (big.open) { sizeBig(); view(); } };
+  bus.on('resize', onResize);
+  window.addEventListener('resize', onResize);
+  const miniStep = low ? 1 / 15 : 1 / 30;
 
   function update(dt, visible) {
+    const f0 = performance.now();
+    tiles.beginFrame();
     tSlow += dt;
     if (tSlow > 1) {
       tSlow = 0; refreshMarkers();
       if (gps) {
         const m = me(), d = Math.hypot(gps.x - m.x, gps.z - m.z);
-        if (gps.mine && d < 22) { bus.emit('gps:clear', {}); bus.emit('toast', { text: `Vous êtes arrivé : ${gps?.label || 'destination'}`, kind: 'success' }); }
-        else if (gps.own && Math.hypot(m.x - gps.cx, m.z - gps.cz) > 45) { gps.path = route(m.x, m.z, gps.x, gps.z); gps.cx = m.x; gps.cz = m.z; }
+        if (gps.mine && d < 22) { const l = gps.label; bus.emit('gps:clear', {}); bus.emit('toast', { text: `Vous êtes arrivé : ${l || 'destination'}`, kind: 'success' }); }
+        else if (gps.own && Math.hypot(m.x - gps.cx, m.z - gps.cz) > 45) { gps.path = route(m.x, m.z, gps.x, gps.z); gps.cx = m.x; gps.cz = m.z; gps.hint = 0; }
       }
     }
-    if (big.open) { tBig += dt; if (tBig > 0.25) { tBig = 0; if (ptrs.size === 0) big.draw(big.zoom > S * 1.15); } return; }
-    if (!visible) return;
-    tMini += dt;
-    if (tMini >= miniStep) { tMini = 0; drawMini(); }
+    let drew = false;
+    if (big.open) {
+      tBig += dt;
+      if (big.dirty || tiles.completed !== big.seen || tBig > 0.25) { tBig = 0; drawBig(); drew = true; }
+      // libellés : recalculés quand la vue ne bouge plus depuis 180 ms
+      if (lab.stale && !lab.job && ptrs.size === 0 && performance.now() - big.moveT > 180 && tiles.pending < 6) {
+        lab.stale = false;
+        const token = ++lab.token;
+        lab.job = tiles.addJob(buildLabels(token), () => { lab.job = null; });
+      } else if (lab.stale && lab.job) { lab.token++; tiles.cancelJob(lab.job); lab.job = null; }
+    } else if (visible) {
+      tMini += dt;
+      if (tMini >= miniStep) { tMini = 0; drawMini(); drew = true; }
+    }
+    // génération des tuiles : budget de temps par image (le dessin de la carte est déjà compté)
+    tiles.pump(drew ? 3 : 4);
+    tick(perf.frame, f0);
   }
 
   return {
     miniEl: mini.el, bigEl: big.el, update, openBig, closeBig, resizeMini: sizeMini,
-    roadNameAt, setGps, getGps: () => gps, me,
+    roadNameAt, roadAt, setGps, getGps: () => gps, me, sources, sourceDetails,
     gpsDistance: () => { if (!gps) return null; const m = me(); return Math.hypot(gps.x - m.x, gps.z - m.z); },
-    missionList, propertyList,
+    missionList, propertyList, dealerList, search,
+    /** Vue de la grande carte (tests, captures) : setView({x, z, zoom}). */
+    setView(v) { if (v.x != null) big.cx = v.x; if (v.z != null) big.cz = v.z; if (v.zoom != null) big.zoom = clamp(v.zoom === 'fit' ? big.minZoom : v.zoom, big.minZoom, ZMAX); clampView(); view(); },
+    stats() {
+      const avg = (o) => (o.n ? +(o.ms / o.n).toFixed(3) : 0), r = (v) => +v.toFixed(2);
+      const t = tiles.stats;
+      return {
+        prep: data.stats,
+        tiles: { rendered: t.tiles, avgMs: t.tiles ? r(t.tileMs / t.tiles) : 0, maxTileMs: r(t.maxTileMs), steps: t.steps, maxStepMs: r(t.maxStepMs), avgPumpMs: t.pumps ? r(t.pumpMs / t.pumps) : 0, maxPumpMs: r(t.maxPumpMs), cached: t.cached, dropped: t.dropped, pending: tiles.pending },
+        mini: { draws: perf.mini.n, avgMs: avg(perf.mini), maxMs: r(perf.mini.max), zoom: r(mini.zoom), level: tiles.levelFor(mini.zoom * mini.dpr, MINI_SHARP) },
+        big: { draws: perf.big.n, avgMs: avg(perf.big), maxMs: r(perf.big.max), zoom: r(big.zoom), level: tiles.levelFor(big.zoom * big.dpr) },
+        labels: { builds: perf.labels.n, avgMs: avg(perf.labels) },
+        frame: { n: perf.frame.n, avgMs: avg(perf.frame), maxMs: r(perf.frame.max) },
+      };
+    },
+    resetStats() { tiles.resetStats(); for (const o of Object.values(perf)) { o.n = 0; o.ms = 0; o.max = 0; } },
   };
 }

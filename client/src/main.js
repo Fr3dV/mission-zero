@@ -101,7 +101,7 @@ async function boot() {
     ctx.player.teleport?.(r?.x ?? l.x + l.radius + 25, r?.z ?? l.z + l.radius + 25, Math.atan2(-(l.x - (r?.x ?? l.x)), -(l.z - (r?.z ?? l.z - 1))));
   }
   bus.emit('boot:done');
-  if (params.get('autostart')) bus.emit('intent:login', { name: params.get('name') || 'Test', room: params.get('room') || 'paris' });
+  if (params.get('autostart')) bus.emit('intent:login', { name: params.get('name') || 'Test', room: params.get('room') || CITY.id });
 
   addEventListener('resize', () => {
     renderer.setSize(innerWidth, innerHeight);

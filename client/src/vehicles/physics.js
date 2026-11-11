@@ -1,7 +1,12 @@
 // Physique arcade des véhicules : modèle « bicyclette » à deux essieux avec pneus saturants,
 // transfert de masse, boîte de vitesses, frein à main, collisions décor (cercles) et voiture↔voiture.
 // Conventions : yaw = 0 regarde −Z ; avant = (−sin yaw, −cos yaw) ; droite = (cos yaw, −sin yaw).
+import { STEP_UP } from '@shared/terrain.js';
+
 const G = 9.81, MU0 = 1.05;
+const LAUNCH = 0.7;           // part de la vitesse ascensionnelle conservée au décollage
+const DROOP = 0.09;          // débattement en détente : sous cet écart au sol, les roues touchent encore
+export const SAFE_DROP_V = 5.4;   // vitesse verticale d'une chute de 1,5 m : en dessous, réception sans dégât
 const clamp = (v, a, b) => (v < a ? a : v > b ? b : v);
 const smooth = (a, b, x) => { const t = clamp((x - a) / (b - a), 0, 1); return t * t * (3 - 2 * t); };
 
@@ -55,6 +60,8 @@ export function initPhysics(v, info, def) {
     steer: 0, ax: 0, ay: 0, shiftT: 0, rev: false, sleeping: true, crashT: 0, kinT: -1,
     spin: 0, slipR: 0, slipF: 0, lock: false, gx: 0, gz: 0, brakeOn: false,
     fxm: null, hit: null, scrape: 0, wob: 0, pending: null, brokeShape: null, brokeT: 0,
+    // vertical : yb = hauteur balistique de la caisse, vy sa vitesse, gap = écart au sol, air = roues décollées
+    yb: v.pos.y, vy: 0, gap: 0, air: false, airT: 0, landV: 0, slopeF: 0, slopeL: 0, sF: 0, sL: 0, ht: s.width * 0.4,
   };
 }
 
@@ -100,15 +107,19 @@ function substep(v, h, c, ctx) {
   const gf = gearbox(v, vf, throttle, h);
   let thrust = throttle * s.accel * gf * (fxm ? fxm.power : 1);
   if (v.wrecked) thrust = 0;
+  const air = p.air;                                        // roues décollées : ni motricité, ni freinage, ni guidage
+  if (air) thrust = 0;
   // charges par essieu (par unité de masse) avec transfert longitudinal
   const tr = clamp((p.ax * p.hcg) / p.L, -G * 0.3, G * 0.3);
   const Nf = G * (p.b / p.L) - tr, Nr = G * (p.a / p.L) + tr;
   const tracLimit = mu * (Nr * p.rear + Nf * (1 - p.rear)) * (p.rear > 0 && p.rear < 1 ? 1.6 : 1.15);
   p.spin = thrust > tracLimit && av < 14 ? clamp((thrust - tracLimit) / tracLimit + 0.3, 0, 1) : 0;
   if (thrust > tracLimit * 1.12) thrust = tracLimit * 1.12;
-  let brakeDec = Math.min(brake * s.brake * (fxm ? fxm.brake : 1), mu * G * 1.15);
-  const coast = throttle < 0.05 ? (s.electric ? 1.4 : 0.7 + 1.6 * v.rpm) * (hasDriver ? 1 : 0) : 0;
-  const drag = p.cd * vf * vf + 0.22 + coast + (fxm ? fxm.drag : 0) + (v.wrecked ? 1.2 : 0);
+  let brakeDec = air ? 0 : Math.min(brake * s.brake * (fxm ? fxm.brake : 1), mu * G * 1.15);
+  // frein moteur gaz coupé ; sur un thermique il s'efface à très basse vitesse (débrayage : la voiture roule dans une pente),
+  // un électrique garde son maintien en côte
+  const coast = throttle < 0.05 ? (s.electric ? 1.4 : (0.7 + 1.6 * v.rpm) * Math.min(1, av / 2.5)) * (hasDriver ? 1 : 0) : 0;
+  const drag = air ? p.cd * vf * vf : p.cd * vf * vf + 0.22 + coast + (fxm ? fxm.drag : 0) + (v.wrecked ? 1.2 : 0);
   let axB = thrust * dirSign;
   p.brakeOn = brake > 0.05 && av > 0.3;
 
@@ -121,7 +132,8 @@ function substep(v, h, c, ctx) {
   const kf = 1 - 0.22 * brake;
   let Fyf = -mu * Nf * pacF(af) * kf, Fyr, FxR = 0;
   p.lock = hand && hasDriver;
-  if (hand) {
+  if (air) { Fyf = 0; Fyr = 0; }
+  else if (hand) {
     // roues arrière bloquées : frottement de glissement opposé à la vitesse du train arrière
     const vr = Math.hypot(vf, vlr), k = (hasDriver ? 0.62 : 0.9) * mu * Nr / Math.max(vr, 1.2);
     FxR = -k * vf; Fyr = -k * vlr;
@@ -137,15 +149,19 @@ function substep(v, h, c, ctx) {
   axB += -Fyf * sd * 0 + FxR;                                // (la composante longitudinale du braquage est négligée : conduite arcade)
   let nvf = vf + axB * h, nvl = vl + ayB * h;
   if (nvf > 0) nvf = Math.max(0, nvf - dec * h); else if (nvf < 0) nvf = Math.min(0, nvf + dec * h);
-  // pente (gravité le long du terrain)
+  // pente : composante de la gravité le long de la chaussée (montée / descente) et en dévers (seulement en roulant :
+  // à l'arrêt l'adhérence statique tient la voiture en travers de la pente)
+  if (!air) {
+    nvf -= G * p.slopeF * h;
+    if (av > 0.5) nvl -= G * p.slopeL * h;
+  }
   let wx = fx * nvf + rx * nvl, wz = fz * nvf + rz * nvl;
-  if (p.gx || p.gz) { wx -= G * p.gx * h; wz -= G * p.gz * h; }
   let nw = w + ((p.a * Fyf * cd - p.b * Fyr) / p.k2) * h;
   nw *= Math.exp(-0.5 * h);
 
   // maintien à l'arrêt (frein, frein à main, voiture vide)
   const sp = Math.hypot(wx, wz);
-  if (sp < 0.35 && throttle < 0.05 && (brake > 0.05 || hand || !hasDriver || (!p.gx && !p.gz))) { wx *= 0.5; wz *= 0.5; nw *= 0.5; if (sp < 0.05) { wx = 0; wz = 0; nw = 0; } }
+  if (!air && sp < 0.35 && throttle < 0.05 && (brake > 0.05 || hand || !hasDriver || Math.abs(p.slopeF) < 0.004)) { wx *= 0.5; wz *= 0.5; nw *= 0.5; if (sp < 0.05) { wx = 0; wz = 0; nw = 0; } }
   // garde-fous
   const vmax = s.maxSpeed * 1.08;
   if (sp > vmax) { wx *= vmax / sp; wz *= vmax / sp; }
@@ -168,7 +184,7 @@ function substep(v, h, c, ctx) {
 function collideStatic(v, ctx) {
   const p = v.phys, col = ctx.collision;
   let impact = 0;
-  const y = v.pos.y + 0.6;
+  const y = v.pos.y + 0.6;                                  // hauteur réelle (roues + 0,6 m) : parapets, piles et murs propres à un niveau
   for (let i = 0; i < 3; i++) {
     const o = p.circ[i];
     const fx = -Math.sin(v.yaw), fz = -Math.cos(v.yaw);
@@ -219,6 +235,9 @@ function collideStatic(v, ctx) {
   return impact;
 }
 
+/** Recale l'état vertical sur la hauteur courante (téléportation, réveil, passage cinématique → dynamique). */
+export function resetVertical(v) { const p = v.phys; p.yb = v.pos.y; p.vy = 0; p.gap = 0; p.air = false; p.airT = 0; p.landV = 0; }
+
 /** Impulsion (N·s, repère monde) appliquée au véhicule ; point d'application optionnel (monde) → lacet. */
 export function applyImpulse(v, ix, iz, px, pz) {
   const p = v.phys;
@@ -239,7 +258,7 @@ export function stepVehicle(v, dt, ctx) {
   const p = v.phys, s = v.spec, c = v.controls;
   const hasDriver = v.driver != null;
   const sp0 = Math.hypot(v.vel.x, v.vel.z);
-  if (!hasDriver && sp0 < 0.05 && Math.abs(v.yawRate) < 0.05) { p.sleeping = true; v.speed = 0; v.vel.x = v.vel.z = 0; v.yawRate = 0; v.slip = 0; p.ax = p.ay = 0; v.rpm = 0; v.gear = 0; p.brakeOn = false; return 0; }
+  if (!hasDriver && sp0 < 0.05 && Math.abs(v.yawRate) < 0.05 && !p.air && p.gap < 0.01) { resetVertical(v); p.sleeping = true; v.speed = 0; v.vel.x = v.vel.z = 0; v.yawRate = 0; v.slip = 0; p.ax = p.ay = 0; v.rpm = 0; v.gear = 0; p.brakeOn = false; return 0; }
   p.sleeping = false;
 
   // direction : débattement limité par la vitesse (reste proche de la limite d'adhérence), lissage, contre-braquage assisté
@@ -249,7 +268,8 @@ export function stepVehicle(v, dt, ctx) {
   const dLim = Math.atan((p.L * mu * G) / Math.max(sp0 * sp0, 1)) * 1.6;
   const dMax = Math.min(0.6, dLim);
   const target = hasDriver ? clamp(+c.steer || 0, -1, 1) : 0;
-  const rate = (Math.abs(target) < Math.abs(p.steerN || 0) || target * (p.steerN || 0) < 0 ? 7 : 4.5) * dt;
+  // volant plus progressif à grande vitesse (voie rapide : un appui bref au clavier ne donne qu'une petite correction)
+  const rate = (Math.abs(target) < Math.abs(p.steerN || 0) || target * (p.steerN || 0) < 0 ? 7 : 4.5) * dt / (1 + (sp0 / 50) * (sp0 / 50));
   p.steerN = (p.steerN || 0) + clamp(target - (p.steerN || 0), -rate, rate);
   let d = p.steerN * dMax;
   if (vf > 4) {
@@ -266,10 +286,18 @@ export function stepVehicle(v, dt, ctx) {
   p.steer = clamp(d, -0.62, 0.62);
   v.steerAngle = p.steer;
 
-  // pente du terrain
-  const hAt = ctx.heightAt;
-  const h0 = hAt(v.pos.x, v.pos.z);
-  if (h0 > 0.01) { p.gx = (hAt(v.pos.x + 1, v.pos.z) - hAt(v.pos.x - 1, v.pos.z)) / 2; p.gz = (hAt(v.pos.x, v.pos.z + 1) - hAt(v.pos.x, v.pos.z - 1)) / 2; } else { p.gx = p.gz = 0; }
+  // pente locale au niveau courant : hauteurs sous les essieux et sous les flancs (échantillons d'un autre niveau écartés)
+  const hAt = ctx.heightAt, x0 = v.pos.x, z0 = v.pos.z, y0 = v.pos.y;
+  {
+    const hl = p.L * 0.5, ht = p.ht, rx = -fz, rz = fx, lim = 0.3 + hl * 0.45;
+    let hF = hAt(x0 + fx * hl, z0 + fz * hl, y0), hR = hAt(x0 - fx * hl, z0 - fz * hl, y0);
+    let hD = hAt(x0 + rx * ht, z0 + rz * ht, y0), hG = hAt(x0 - rx * ht, z0 - rz * ht, y0);
+    if (Math.abs(hF - y0) > lim) hF = y0; if (Math.abs(hR - y0) > lim) hR = y0;
+    if (Math.abs(hD - y0) > lim) hD = y0; if (Math.abs(hG - y0) > lim) hG = y0;
+    const sF = clamp((hF - hR) / (2 * hl), -0.6, 0.6), sL = clamp((hD - hG) / (2 * ht), -0.6, 0.6);
+    p.sF = sF; p.sL = sL;
+    p.slopeF += (sF - p.slopeF) * Math.min(1, dt * 20); p.slopeL += (sL - p.slopeL) * Math.min(1, dt * 20);
+  }
 
   const n = clamp(Math.ceil(Math.max(dt * 120, (sp0 * dt) / 0.35)), 1, 16);
   const h = dt / n;
@@ -277,6 +305,54 @@ export function stepVehicle(v, dt, ctx) {
   p.hit = null; p.scrape *= Math.exp(-8 * dt);
   if (p.brokeT > 0) { p.brokeT -= dt; if (p.brokeT <= 0) p.brokeShape = null; }
   for (let i = 0; i < n; i++) { const im = substep(v, h, c, ctx); if (im > impact) impact = im; }
+
+  // ---- vertical : la caisse suit une trajectoire balistique tant que le sol se dérobe plus vite que la pesanteur
+  //      (sommet de dos-d'âne à grande vitesse, fin de tablier sans parapet) ; sinon elle est posée sur le sol de SON niveau.
+  let g = hAt(v.pos.x, v.pos.z, y0);
+  if (!Number.isFinite(g)) g = y0;                           // couche de relief défaillante : on reste à la hauteur courante
+  {
+    // marche plus haute que STEP_UP sans rampe (quai, mur de soutènement, flanc de remblai) : infranchissable, jamais
+    // de téléportation verticale. On teste le centre et le point de la caisse le plus avancé dans le sens du mouvement.
+    const sp = Math.hypot(v.vel.x, v.vel.z);
+    let blocked = g > y0 + STEP_UP + 0.02;
+    if (!blocked && sp > 0.3) {
+      const ux = v.vel.x / sp, uz = v.vel.z / sp, reach = Math.abs(ux * fx + uz * fz) * (s.length * 0.5 - 0.15) + Math.abs(ux * fz - uz * fx) * (s.width * 0.5 - 0.1);
+      blocked = hAt(v.pos.x + ux * reach, v.pos.z + uz * reach, y0) > y0 + STEP_UP + 0.02;
+    }
+    if (blocked) {
+      const nx = sp > 0.1 ? -v.vel.x / sp : 0, nz = sp > 0.1 ? -v.vel.z / sp : 0;
+      if (sp > impact) { impact = sp; p.hit = { impact: sp, kind: 'static', tag: 'marche', x: v.pos.x - nx * s.length * 0.5, z: v.pos.z - nz * s.length * 0.5, nx, nz, broke: false, px: 0, pz: 0, other: null }; }
+      v.pos.x = x0; v.pos.z = z0; v.vel.x *= -0.15; v.vel.z *= -0.15; v.yawRate *= 0.5;
+      g = hAt(x0, z0, y0);
+      if (!(g <= y0 + STEP_UP)) g = y0;
+    }
+  }
+  // vitesse verticale imposée par la chaussée : pente moyenne sous l'empattement × vitesse (une bordure ou une
+  // marche ne catapulte donc pas la voiture, une rampe ou un dos-d'âne si)
+  let sFn = p.sF;
+  if (sp0 > 3) {
+    // pente relevée à la position d'arrivée (sans retard d'une image : pas de faux décollage aux cassures de rampe)
+    const hl = p.L * 0.5, lim = 0.3 + hl * 0.45;
+    let hF = hAt(v.pos.x + fx * hl, v.pos.z + fz * hl, y0), hR = hAt(v.pos.x - fx * hl, v.pos.z - fz * hl, y0);
+    if (Math.abs(hF - g) > lim) hF = g; if (Math.abs(hR - g) > lim) hR = g;
+    sFn = clamp((hF - hR) / (2 * hl), -0.6, 0.6);
+  }
+  const vfN = v.vel.x * fx + v.vel.z * fz, vlN = v.vel.x * -fz + v.vel.z * fx;
+  const vyG = clamp(sFn * vfN + p.sL * vlN, -40, 40);
+  p.vy -= G * dt;
+  let yb = p.yb + p.vy * dt;
+  p.landV = 0;
+  if (yb <= g) {
+    // au sol : la caisse épouse la chaussée ; à la réception d'un saut, la vitesse relative est absorbée
+    if (p.air) { p.landV = Math.max(0, vyG - p.vy); p.air = false; }
+    // la suspension absorbe une partie de l'élan vertical en montée : sauts « légers », plafonnés
+    yb = g; p.vy = vyG > 0 ? Math.min(vyG * LAUNCH, 6) : vyG; p.gap = 0; p.airT = 0;
+  } else {
+    p.gap = yb - g;
+    if (p.gap > DROOP) { p.air = true; p.airT += dt; }       // en deçà, la suspension en détente garde les roues au sol
+  }
+  p.yb = yb;
+  v.pos.y = yb - Math.min(p.gap, DROOP);                     // hauteur des roues
 
   const B = ctx.BOUNDS;
   if (B) { const m = 60; v.pos.x = clamp(v.pos.x, B.minX - m, B.maxX + m); v.pos.z = clamp(v.pos.z, B.minZ - m, B.maxZ + m); }

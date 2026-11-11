@@ -1,12 +1,19 @@
 // La Seine : eau (shader), quais maçonnés avec parapets, ponts à arches.
 import { L_STONE, L_PLAIN, L_SIDEWALK, L_PAVE, createWaterNormal } from './textures.js';
 import { Y_GROUND } from './streets.js';
+import { baseHeightAt } from '@shared/terrain.js';
 
-const QUAY = [214, 206, 190], BRIDGE = [232, 222, 202], COPING = [226, 220, 208];
 const Y_QUAY = 0.12, PARAPET_H = 1.02;
 
-export function buildRiver(ctx, net, surf, masks) {
-  const { THREE, scene, collision, WATER_LEVEL, heightAt } = ctx;
+/**
+ * Fleuve de la ville : construit d'un bloc au démarrage (ouvrage linéaire, coût proportionnel à la longueur des rives,
+ * pas à la surface de la ville) dans son propre jeu de tuiles permanent `surf`.
+ */
+export function buildRiver(ctx, net, surf, masks, profile, levels) {
+  const { THREE, scene, collision, WATER_LEVEL } = ctx;
+  const heightAt = baseHeightAt;
+  const QUAY = profile.quay?.wall || [214, 206, 190], BRIDGE = profile.quay?.bridge || [232, 222, 202], COPING = profile.quay?.coping || [226, 220, 208];
+  void heightAt;
   const { roads } = net;
 
   // ---------- 1. tronçons de route au-dessus de l'eau = ponts
@@ -17,7 +24,7 @@ export function buildRiver(ctx, net, surf, masks) {
     let start = -1, last = -1; const iv = [];
     for (let i = 0; i <= n; i++) {
       const s = (r._len * i) / n; net.pointAt(r, s, 0, o);
-      if (masks.isWater(o.x, o.z)) { if (start < 0) start = s; last = s; }
+      if (masks.isRiver(o.x, o.z)) { if (start < 0) start = s; last = s; }
       else if (start >= 0 && s - last > 6) { iv.push([start, last]); start = -1; }
     }
     if (start >= 0) iv.push([start, last]);
@@ -46,9 +53,9 @@ export function buildRiver(ctx, net, surf, masks) {
 
   // ---------- 2. quais : mur, couronnement, parapet (+ collision) — et berges basses en contrebas
   const probe = Math.max(3, masks.texel * 1.7);
-  const addParapetBox = (ax, az, bx, bz) => {
+  const addParapetBox = (ax, az, bx, bz, bottom = -Infinity) => {
     const len = Math.hypot(bx - ax, bz - az); if (len < 0.3) return;
-    collision.addBox({ x: (ax + bx) / 2, z: (az + bz) / 2, hw: len / 2 + 0.15, hd: 0.32, rot: Math.atan2(-(bz - az), bx - ax), top: PARAPET_H + 0.6, tag: 'parapet' });
+    collision.addBox({ x: (ax + bx) / 2, z: (az + bz) / 2, hw: len / 2 + 0.15, hd: 0.32, rot: Math.atan2(-(bz - az), bx - ax), bottom, top: PARAPET_H + 0.6, tag: 'parapet' });
   };
   /** Mur de collision mince entre deux points, actif seulement pour ce qui est sous `top` (berge) ou partout (top = Infinity). */
   const addWallBox = (ax, az, bx, bz, top, hd = 0.25) => {
@@ -61,14 +68,13 @@ export function buildRiver(ctx, net, surf, masks) {
 
   // --- où y a-t-il une berge basse ? tronçons réels (pois.paths riverbank) sinon repli par plages de longitude
   const Y_B = WATER_LEVEL + 1, BW = 9;                       // niveau et largeur de la promenade basse
-  const mPerLon0 = 111320 * Math.cos((48.8656 * Math.PI) / 180), lonX0 = (lon) => (lon - 2.3212) * mPerLon0;
   const bankPaths = (Array.isArray(ctx.worldData.pois?.paths) ? ctx.worldData.pois.paths : []).filter((p) => p && p.riverbank && Array.isArray(p.points) && p.points.length >= 2);
   const bankGrid = new Map(), BG = 40, bgk = (x, z) => (Math.floor(x / BG) + 2048) * 4096 + Math.floor(z / BG) + 2048;
   for (const p of bankPaths) for (let i = 0; i + 1 < p.points.length; i++) {
     const a = p.points[i], b = p.points[i + 1], L = Math.hypot(b[0] - a[0], b[1] - a[1]), n = Math.max(1, Math.ceil(L / 6));
     for (let k = 0; k <= n; k++) { const x = a[0] + ((b[0] - a[0]) * k) / n, z = a[1] + ((b[1] - a[1]) * k) / n, key = bgk(x, z); let arr = bankGrid.get(key); if (!arr) bankGrid.set(key, (arr = [])); arr.push(x, z); }
   }
-  const RB = [[lonX0(2.3015), lonX0(2.3325)], [lonX0(2.341), lonX0(2.3585)]], LB = [[lonX0(2.3015), lonX0(2.3265)], [lonX0(2.343), lonX0(2.357)]];
+  const RB = profile.bankFallback?.right || [], LB = profile.bankFallback?.left || [];
   function wantBank(x, z, nz) {
     if (bankPaths.length) {
       for (let ix = -1; ix <= 1; ix++) for (let iz = -1; iz <= 1; iz++) { const arr = bankGrid.get(bgk(x + ix * BG, z + iz * BG)); if (!arr) continue; for (let i = 0; i < arr.length; i += 2) if ((arr[i] - x) ** 2 + (arr[i + 1] - z) ** 2 < 30 * 30) return true; }
@@ -91,13 +97,14 @@ export function buildRiver(ctx, net, surf, masks) {
         const ax = a[0] + (b[0] - a[0]) * t0, az = a[1] + (b[1] - a[1]) * t0, bx = a[0] + (b[0] - a[0]) * t1, bz = a[1] + (b[1] - a[1]) * t1;
         const mx = (ax + bx) / 2, mz = (az + bz) / 2;
         let nx = -dz, nz = dx;
-        const wP = masks.isWater(mx + nx * probe, mz + nz * probe), wM = masks.isWater(mx - nx * probe, mz - nz * probe);
+        const wP = masks.isRiver(mx + nx * probe, mz + nz * probe), wM = masks.isRiver(mx - nx * probe, mz - nz * probe);
         if (wP === wM) { pcs.push(null); continue; }
         if (wP) { nx = -nx; nz = -nz; } // (nx,nz) pointe vers la terre
         const pc = { ax, az, bx, bz, mx, mz, nx, nz, dx, dz, len: L / m, u: L * t0, first: k === 0, berge: false, open: false, ua: 0 };
         // berge : donnée réelle proche, assez d'eau devant pour la bande, pas sous un pont (la hauteur du sol est 2D :
         // un même point ne peut pas être à la fois tablier et berge)
-        pc.berge = wantBank(mx - nx * 4, mz - nz * 4, nz) && !nearDeck(mx, mz, 3.5) && masks.isWater(mx - nx * (BW + 2), mz - nz * (BW + 2)) && masks.isWater(mx - nx * BW * 0.5, mz - nz * BW * 0.5) && !nearDeck(mx - nx * BW, mz - nz * BW, 3.5);
+        pc.berge = wantBank(mx - nx * 4, mz - nz * 4, nz) && masks.isRiver(mx - nx * (BW + 2), mz - nz * (BW + 2)) && masks.isRiver(mx - nx * BW * 0.5, mz - nz * BW * 0.5);
+        pc.under = nearDeck(mx, mz, 3.5) || nearDeck(mx - nx * BW, mz - nz * BW, 3.5); // sous un pont : la berge continue, sans mobilier
         pcs.push(pc);
       }
     }
@@ -177,8 +184,8 @@ export function buildRiver(ctx, net, surf, masks) {
         if (k8 % 9 === 4) for (const o of [-0.25, 0.25]) box2(pc.mx + pc.dx * o - pc.nx * 0.08, pc.mz + pc.dz * o - pc.nz * 0.08, pc.dx, pc.dz, 0.06, 0.08, Y_B, 2.9, L_PLAIN, [40, 40, 42]);
         const em = P(pc.ua + pc.len / 2, 0.93); box2(em[0], em[1], pc.dx, pc.dz, 0.34, 0.34, Y_B + 0.2, 0.42, L_PLAIN, [32, 34, 36]);
         const [hm, stm] = hAt(pc.ua + pc.len / 2);
-        if (!stm && k8 % 5 === 2) { const q = P(pc.ua + pc.len / 2, 0.08); bergeLamps.push(q[0], Y_B, q[1]); }
-        if (!stm && k8 % 6 === 0) { const q = P(pc.ua + pc.len / 2, 0.14); box2(q[0], q[1], pc.dx, pc.dz, 1.9, 0.45, Y_B + 0.4, 0.07, L_PLAIN, [120, 88, 54]); box2(q[0] + pc.nx * 0.2, q[1] + pc.nz * 0.2, pc.dx, pc.dz, 1.9, 0.06, Y_B + 0.45, 0.42, L_PLAIN, [120, 88, 54]); for (const o of [-0.8, 0.8]) box2(q[0] + pc.dx * o, q[1] + pc.dz * o, pc.dx, pc.dz, 0.08, 0.42, Y_B, 0.42, L_PLAIN, [40, 44, 42]); }
+        if (!stm && !pc.under && k8 % 5 === 2) { const q = P(pc.ua + pc.len / 2, 0.08); bergeLamps.push(q[0], Y_B, q[1]); }
+        if (!stm && !pc.under && k8 % 6 === 0) { const q = P(pc.ua + pc.len / 2, 0.14); box2(q[0], q[1], pc.dx, pc.dz, 1.9, 0.45, Y_B + 0.4, 0.07, L_PLAIN, [120, 88, 54]); box2(q[0] + pc.nx * 0.2, q[1] + pc.nz * 0.2, pc.dx, pc.dz, 1.9, 0.06, Y_B + 0.45, 0.42, L_PLAIN, [120, 88, 54]); for (const o of [-0.8, 0.8]) box2(q[0] + pc.dx * o, q[1] + pc.dz * o, pc.dx, pc.dz, 0.08, 0.42, Y_B, 0.42, L_PLAIN, [40, 44, 42]); }
         void hm;
       }
       // abouts de la berge (mur + collision)
@@ -253,12 +260,15 @@ export function buildRiver(ctx, net, surf, masks) {
     const { r, sa, sb, W } = d, L = sb - sa;
     // ponts célèbres individualisés d'après leur nom
     const nm = r.bridgeName || r.name || '';
-    const kind = /Alexandre.III/.test(nm) ? 'alex' : /Pont Neuf/.test(nm) ? 'neuf' : /Bir.Hakeim/.test(nm) ? 'bir' : /Arts|Debilly|Senghor|Solf[ée]rino|Passerelle/i.test(nm) ? 'metal' : 'stone';
+    const kind = profile.bridgeKind ? profile.bridgeKind(nm) : 'stone';
     d.kind = kind;
     const metal = kind === 'alex' || kind === 'metal';
-    const BR = kind === 'alex' ? [150, 160, 158] : kind === 'metal' ? [78, 92, 88] : kind === 'neuf' ? [226, 214, 190] : BRIDGE, BL = metal ? L_PLAIN : L_STONE;
+    const BR = kind === 'alex' ? [150, 160, 158] : kind === 'metal' ? [78, 92, 88] : kind === 'neuf' && !profile.quay?.brickBridges ? [226, 214, 190] : BRIDGE, BL = metal ? L_PLAIN : L_STONE;
+    // une berge basse passe-t-elle sous ce pont ? alors les arches de rive sont relevées (hauteur libre ≈ 2 m)
+    let overBerge = false;
+    for (const sq of [sa + 6, sa + 10, sb - 6, sb - 10]) { net.pointAt(r, Math.max(0, Math.min(r._len, sq)), 0, o); if (bergeHeight(o.x, o.z) !== undefined) overBerge = true; }
     const nSpan = kind === 'alex' ? 1 : Math.max(1, Math.round(L / (kind === 'neuf' ? 19 : kind === 'metal' ? 22 : 30))), Ls = L / nSpan, pw = Math.min(kind === 'metal' ? 0.5 : 1.6, Ls * 0.12);
-    const Y_PIER = -6.5, Y_SPRING = WATER_LEVEL + 0.5, Y_CROWN = kind === 'alex' ? -0.75 : metal ? -0.6 : -1.0, Y_TOP = Y_GROUND;
+    const Y_PIER = -6.5, Y_SPRING = overBerge ? -1.05 : WATER_LEVEL + 0.5, Y_CROWN = overBerge ? -0.6 : kind === 'alex' ? -0.75 : metal ? -0.6 : -1.0, Y_TOP = Y_GROUND;
     const prof = []; // [s, yBas]
     for (let i = 0; i < nSpan; i++) {
       const s0 = sa + i * Ls;
@@ -307,7 +317,7 @@ export function buildRiver(ctx, net, surf, masks) {
           net.pointAt(r, s0 + 1e-3, sg * (W + 0.12), o); net.pointAt(r, s1 - 1e-3, sg * (W + 0.12), o2);
           bld.prism(o.x, o.z, o2.x, o2.z, 0.3, -0.45, -0.45, 0.4, L_PLAIN, COPING, false);
           net.pointAt(r, s0, sg * pOff, o); net.pointAt(r, s1, sg * pOff, o2);
-          addParapetBox(o.x, o.z, o2.x, o2.z);
+          addParapetBox(o.x, o.z, o2.x, o2.z, -0.6); // n'arrête que ce qui roule sur le tablier (la berge passe dessous)
         }
       }
     }
@@ -321,7 +331,7 @@ export function buildRiver(ctx, net, surf, masks) {
       // quatre pylônes de pierre surmontés de groupes dorés, candélabres le long du parapet
       for (const s of [sa + 1.5, sb - 1.5]) for (const sg of [1, -1]) {
         net.pointAt(r, s, sg * (W + 1.6), o);
-        if (masks.isWater(o.x, o.z)) continue; // seulement aux culées (le pont peut être découpé en plusieurs tronçons)
+        if (masks.isRiver(o.x, o.z)) continue; // seulement aux culées (le pont peut être découpé en plusieurs tronçons)
         box(o.x, o.z, o.dx, o.dz, 3.2, 3.2, 0, 15, L_STONE, [236, 228, 210]);
         box(o.x, o.z, o.dx, o.dz, 3.8, 3.8, 15, 0.7, L_PLAIN, [236, 228, 210]);
         box(o.x, o.z, o.dx, o.dz, 2.2, 1.2, 15.7, 2.6, L_PLAIN, [235, 180, 45]);
@@ -346,8 +356,7 @@ export function buildRiver(ctx, net, surf, masks) {
   }
 
   // ---------- 3 bis. bouquinistes sur les parapets, péniches amarrées
-  const mPerLon = 111320 * Math.cos((48.8656 * Math.PI) / 180), lonX = (lon) => (lon - 2.3212) * mPerLon;
-  const BQ_L = [lonX(2.3285), lonX(2.357)], BQ_R = [lonX(2.333), lonX(2.3575)]; // rive gauche : Voltaire → Tournelle ; rive droite : Louvre → pont Marie
+  const BQ_L = profile.bookstalls?.left || [1, 0], BQ_R = profile.bookstalls?.right || [1, 0]; // plages (x) des boîtes de bouquinistes par rive
   let acc = 200, nBoat = 0, nBox = 0;
   for (const poly of masks.riverPolys) {
     for (let i = 0; i < poly.length; i++) {
@@ -358,7 +367,7 @@ export function buildRiver(ctx, net, surf, masks) {
       for (let t = 1.5; t < L - 1.5; t += 2.6) {
         const x = a[0] + dx * t, z = a[1] + dz * t;
         let nx = -dz, nz = dx;
-        const wP = masks.isWater(x + nx * probe, z + nz * probe), wM = masks.isWater(x - nx * probe, z - nz * probe);
+        const wP = masks.isRiver(x + nx * probe, z + nz * probe), wM = masks.isRiver(x - nx * probe, z - nz * probe);
         if (wP === wM) continue;
         if (wP) { nx = -nx; nz = -nz; }
         // boîtes vertes des bouquinistes (par groupes de 4, un vide entre les groupes)
@@ -370,7 +379,7 @@ export function buildRiver(ctx, net, surf, masks) {
         // péniches amarrées le long des quais
         acc += 2.6;
         const bo = bergeHeight(x - nx * 3, z - nz * 3) !== undefined ? BW + 0.6 : 0; // amarrée contre la berge s'il y en a une
-        if (acc > (bo ? 150 : 430) && !nearDeck(x, z, 30) && masks.isWater(x - nx * (5 + bo), z - nz * (5 + bo)) && masks.isWater(x - nx * 9, z - nz * 9) && masks.isWater(x - nx * 5 + dx * 16, z - nz * 5 + dz * 16) && masks.isWater(x - nx * 5 - dx * 16, z - nz * 5 - dz * 16)) {
+        if (profile.boats !== false && acc > (bo ? 150 : 430) && !nearDeck(x, z, 30) && masks.isRiver(x - nx * (5 + bo), z - nz * (5 + bo)) && masks.isRiver(x - nx * 9, z - nz * 9) && masks.isRiver(x - nx * 5 + dx * 16, z - nz * 5 + dz * 16) && masks.isRiver(x - nx * 5 - dx * 16, z - nz * 5 - dz * 16)) {
           acc = 0; nBoat++;
           const bx = x - nx * (4.6 + bo), bz = z - nz * (4.6 + bo), long = nBoat % 3 === 0;
           if (bo) box(x - nx * (BW + 1.2), z - nz * (BW + 1.2), nx, nz, 3.4, 1.1, Y_B - 0.05, 0.12, L_PLAIN, [150, 120, 84]); // passerelle
@@ -420,15 +429,30 @@ uniform float uWTime; uniform sampler2D uWNrm; uniform vec3 uWSky; varying vec3 
 }
 #include <opaque_fragment>`);
   };
-  const cx = masks.x0 + masks.sizeX / 2, cz = masks.z0 + masks.sizeZ / 2;
-  const water = new THREE.Mesh(new THREE.PlaneGeometry(masks.sizeX + 3000, masks.sizeZ + 3000), mat);
-  water.rotation.x = -Math.PI / 2; water.position.set(cx, WATER_LEVEL, cz);
-  water.receiveShadow = true; water.name = 'seine';
+  mat.color.setHex(profile.waterColor ?? 0x2c3a31);
+  // surface de l'eau : les polygones du fleuve (et leurs prolongements hors emprise), triangulés
+  const wp = [], wi = [];
+  for (const poly of masks.waterPolys) {
+    if (poly._ribbon) continue; // canaux et ruisseaux : surface propre, à leur niveau (waterways.js)
+    const contour = poly.map((p) => new THREE.Vector2(p[0], p[1]));
+    let tris = [];
+    try { tris = THREE.ShapeUtils.triangulateShape(contour, []); } catch { tris = []; }
+    const base = wp.length / 3;
+    for (const p of poly) wp.push(p[0], WATER_LEVEL, p[1]);
+    for (const t of tris) wi.push(base + t[0], base + t[1], base + t[2], base + t[0], base + t[2], base + t[1]); // deux faces : sens des polygones indifférent
+  }
+  const wg = new THREE.BufferGeometry();
+  wg.setAttribute('position', new THREE.BufferAttribute(new Float32Array(wp.length ? wp : [0, 0, 0]), 3));
+  { const nn = new Float32Array(Math.max(3, wp.length)); for (let i = 1; i < nn.length; i += 3) nn[i] = 1; wg.setAttribute('normal', new THREE.BufferAttribute(nn, 3)); }
+  wg.setIndex(wi);
+  const water = new THREE.Mesh(wg, mat);
+  water.receiveShadow = true; water.name = 'fleuve'; water.frustumCulled = false; water.matrixAutoUpdate = false; water.visible = wi.length > 0;
   scene.add(water);
+  levels?.setBerge(bergeHeight, (x, z) => nearDeck(x, z, 0));
 
   const tmpC = new THREE.Color();
   return {
-    water, decks, nearDeck, boats: nBoat, bookstalls: nBox, bergeHeight, bergeLamps, bergeLen: Math.round(bergeLen), ramps: nRamps, stairs: nStairs, runsInfo, Y_B,
+    water, waterMaterial: mat, waterUniforms: uni, decks, nearDeck, boats: nBoat, bookstalls: nBox, bergeHeight, bergeLamps, bergeLen: Math.round(bergeLen), ramps: nRamps, stairs: nStairs, runsInfo, Y_B,
     update(dt, night) {
       uni.uWTime.value += dt;
       // reflet du ciel : couleur du brouillard / fond de scène (fournis par l'agent environnement)

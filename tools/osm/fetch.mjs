@@ -9,6 +9,11 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { BBOX } from '../../shared/geo.js';
 
+// Option --city <id> (défaut : paris). Les villes du contrat v5 (toulouse) ont leur propre chaîne : tools/osm/v5/.
+{ const i = process.argv.indexOf('--city'), city = i >= 0 ? process.argv[i + 1] : 'paris';
+  if (city !== 'paris') { await import('./v5/fetch.mjs'); process.exit(0); } }
+
+
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
 const CACHE = join(ROOT, '.data', 'osm');
 mkdirSync(CACHE, { recursive: true });

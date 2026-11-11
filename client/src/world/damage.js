@@ -246,8 +246,19 @@ export function createDamage(ctx, { props, veg, uniforms, terraces }) {
     const b = broken[i]; broken.splice(i, 1);
     dropObj(b); b.restore();
     const d = b.d, s = b.shape; d.broken = false; d.lean = 0; d.m0 = null; d.t = -9; d.last = null;
-    const ns = collision.addCircle({ x: s.x, z: s.z, r: s.r, bottom: s.bottom, top: s.top, tag: s.tag, data: d });
-    void ns;
+    // la collision revient ; pour un objet de tuile, seulement si les collisions de sa tuile sont actives (elle la gère ensuite)
+    if (d.tileRef) { if (d.tileRef.shapes) d.tileRef.shapes.push(collision.addCircle({ x: s.x, z: s.z, r: s.r, bottom: s.bottom, top: s.top, tag: s.tag, data: d })); }
+    else collision.addCircle({ x: s.x, z: s.z, r: s.r, bottom: s.bottom, top: s.top, tag: s.tag, data: d });
+  }
+  /** Une tuile perd ses collisions ou est libérée : on oublie ses objets cassés (remis en place) et ses vibrations. */
+  function releaseTile(t) {
+    for (let i = broken.length - 1; i >= 0; i--) {
+      const b = broken[i]; if (b.d.tileRef !== t) continue;
+      broken.splice(i, 1); dropObj(b);
+      try { b.restore(); } catch { /* maillage déjà libéré */ }
+      const d = b.d; d.broken = false; d.lean = 0; d.m0 = null; d.t = -9; d.last = null; d.dented = false;
+    }
+    for (let k = wobbles.length - 1; k >= 0; k--) if (wobbles[k].d.tileRef === t) { const w = wobbles[k]; wobbles.splice(k, 1); try { setInst(w.mesh, w.i, w.m0); } catch { /* libéré */ } w.d.m0 = null; w.d.lean = 0; }
   }
 
   // ------------------------------------------------------------ onImpact
@@ -367,7 +378,7 @@ export function createDamage(ctx, { props, veg, uniforms, terraces }) {
     }
   }
   return {
-    onImpact,
+    onImpact, releaseTile,
     /** Objets tombés au sol près de (x,z) : [{x, z, r, tag}] (pour l'évitement par le trafic / les piétons). */
     propsNear(x, z, r) {
       const out = [];

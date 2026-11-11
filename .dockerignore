@@ -1,6 +1,9 @@
-# Tout ce qui n'est pas nécessaire à l'image (node_modules est réinstallé par npm ci)
+# Tout ce qui n'est pas nécessaire à l'image (node_modules est réinstallé par npm ci).
+# NE PAS exclure shared/ : shared/cities/** (contenus par ville) et shared/world/** (données, dont
+# shared/world/toulouse/**) doivent être dans l'image.
 .git
 .gitignore
+.gcloudignore
 .tools
 .data
 .env
@@ -8,7 +11,6 @@
 node_modules
 docs
 tools
-tools/out
 client/debug
 server/test
 server/testkit.js

@@ -4,6 +4,7 @@
 // la plus proche, parallèle à elle, en laissant un passage côté chaussée.
 import { Geo, createPropMaterial } from './props.js';
 import { hash2 } from './util.js';
+import { baseHeightAt } from '@shared/terrain.js';
 
 const VIEW = 125;
 
@@ -55,7 +56,7 @@ const TINT = [[0.75, 0.12, 0.12], [0.12, 0.38, 0.2], [0.14, 0.22, 0.5], [0.16, 0
 
 export function buildTerraces(ctx, net, bld, river, masks, Q, uniforms) {
   const { THREE, scene, collision } = ctx;
-  const heightAt = ctx.heightAt;
+  const heightAt = baseHeightAt;
   const empty = { count: 0, seats: [], update() {}, sets: null };
   const list = Array.isArray(ctx.worldData.pois?.pois) ? ctx.worldData.pois.pois.filter((p) => p && (p.kind === 'cafe' || p.kind === 'restaurant') && Number.isFinite(p.x) && Number.isFinite(p.z)) : [];
   if (!list.length) return empty;
@@ -135,7 +136,7 @@ export function buildTerraces(ctx, net, bld, river, masks, Q, uniforms) {
         seats.push({ x: cx, y, z: cz, yaw, t });
       }
       const data = { type: 'terrasse', x, y, z, ti, ch, broken: false };
-      if (!low) collision.addCircle({ x, z, r: 0.5, top: y + 0.78, tag: 'terrasse', data }); // sous la hauteur testée par les piétons : seuls les véhicules la touchent
+      if (!low) collision.addCircle({ x, z, r: 0.5, bottom: y - 0.6, top: y + 0.78, tag: 'terrasse', data }); // sous la hauteur testée par les piétons : seuls les véhicules la touchent
       t.tables.push(data);
     }
     // bacs à buis : côté rue et aux deux bouts

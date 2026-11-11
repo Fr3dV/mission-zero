@@ -7,6 +7,11 @@ import { BOUNDS } from '../../shared/geo.js';
 import { LANDMARKS, LANDMARK_BY_ID } from '../../shared/landmarks.js';
 import { polyArea, pointInPoly, selfIntersects, polylineLength } from './geom.mjs';
 
+// Option --city <id> (défaut : paris). Les villes du contrat v5 (toulouse) ont leurs contrôles dans tools/osm/v5/check.mjs.
+{ const i = process.argv.indexOf('--city'), city = i >= 0 ? process.argv[i + 1] : 'paris';
+  if (city !== 'paris') await import('./v5/check.mjs'); }
+
+
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
 const pFile = join(ROOT, 'shared', 'world', 'paris.json'), bFile = join(ROOT, 'shared', 'world', 'buildings.json');
 const d = JSON.parse(readFileSync(pFile, 'utf8'));

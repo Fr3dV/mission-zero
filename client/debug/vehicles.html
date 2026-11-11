@@ -33,6 +33,8 @@
     const q = new URLSearchParams(location.search);
     // banc de crash : ?crash=front|offset|side|rear&speed=50&id=… (page dédiée)
     if (q.get('crash')) location.replace('/debug/vehicles-crash.html' + location.search);
+    // banc niveaux superposés / relief : ?levels=all|bridge|under|tremie|lid|hill|downhill|hump50|hump120|hump200|fall|ledge|step|remote|fast (page dédiée)
+    if (q.get('levels')) location.replace('/debug/vehicles-levels.html' + location.search);
     const all = q.get('all') === '1', night = q.get('night') === '1';
     const id = VEHICLE_BY_ID[q.get('id')] ? q.get('id') : 'porsche_911';
     const canvas = document.getElementById('c');

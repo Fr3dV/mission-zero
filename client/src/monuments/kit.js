@@ -36,6 +36,24 @@ export const P = {
   pave: mk(0xc6bfae, 0.9, 0, 1, 0),
   paveD: mk(0x9a958a, 0.9, 0, 1, 0),
   steel: mk(0x8fa39a, 0.5, 0.5, 0, 0.6),      // charpente vert réséda (Grand Palais)
+  // ---- Toulouse : t = 2 + force -> texture de brique foraine ; t = 4 + force -> tuiles canal ----
+  brick: mk(0xffffff, 0.9, 0, 3, 1),          // brique foraine (la couleur est dans la texture)
+  brickL: mk(0xfff0e6, 0.9, 0, 3, 1),         // brique claire, rosée
+  brickD: mk(0xd8c2b6, 0.92, 0, 3, 0.9),      // brique patinée, soubassements
+  brickR: mk(0xffd9c8, 0.9, 0, 3, 1),         // brique plus rouge
+  tile: mk(0xffffff, 0.85, 0, 5, 0.25),       // tuiles canal
+  pierre: mk(0xe2d9c6, 0.9, 0, 0.8, 1),       // pierre claire des chaînages et encadrements
+  marbre: mk(0xb9695f, 0.3, 0.05, 0, 1),     // marbre rose (colonnes du Capitole)
+  blanc: mk(0xe9e6de, 0.6, 0, 0, 1),          // menuiseries, enduits blancs
+  beton: mk(0xb9b6ae, 0.85, 0, 0.25, 0.6),    // béton clair
+  metal: mk(0xc9ced2, 0.35, 0.7, 0, 0.7),     // bardage métallique, mâts
+  metalD: mk(0x4a5058, 0.45, 0.6, 0, 0.4),
+  verre: mk(0x4d6a7c, 0.1, 0.4, 0, 0),        // vitrage bleuté des bâtiments modernes
+  verreLit: mk(0x6a8696, 0.12, 0.3, 0, 2),
+  ardoise: mk(0x4d5761, 0.55, 0.3, 0, 0.3),
+  bois: mk(0x8a6844, 0.8, 0, 0, 0.5),
+  rougeJ: mk(0xb3261c, 0.5, 0.05, 0, 0.9),    // rouge laqué (pont japonais)
+  pelouse: mk(0x5f8a3e, 0.95, 0, 0, 0),
 };
 
 export function rng(seed) {
@@ -90,6 +108,65 @@ function makeStone(aniso) {
     return t;
   };
   return { map: mkTex(col, true), normalMap: mkTex(nor, false) };
+}
+
+function dataTex(data, S, srgb, aniso) {
+  const t = new THREE.DataTexture(data, S, S, THREE.RGBAFormat);
+  t.wrapS = t.wrapT = THREE.RepeatWrapping; t.generateMipmaps = true;
+  t.minFilter = THREE.LinearMipmapLinearFilter; t.magFilter = THREE.LinearFilter;
+  t.anisotropy = aniso; if (srgb) t.colorSpace = THREE.SRGBColorSpace; t.needsUpdate = true;
+  return t;
+}
+function normalFrom(hgt, S, k) {
+  const nor = new Uint8Array(S * S * 4);
+  for (let y = 0; y < S; y++) for (let x = 0; x < S; x++) {
+    const h = (xx, yy) => hgt[((yy + S) % S) * S + ((xx + S) % S)];
+    const dx = (h(x + 1, y) - h(x - 1, y)) * k, dy = (h(x, y + 1) - h(x, y - 1)) * k;
+    const l = Math.hypot(dx, dy, 1), i = (y * S + x) * 4;
+    nor[i] = (-dx / l * 0.5 + 0.5) * 255; nor[i + 1] = (-dy / l * 0.5 + 0.5) * 255; nor[i + 2] = (1 / l * 0.5 + 0.5) * 255; nor[i + 3] = 255;
+  }
+  return nor;
+}
+// Brique foraine toulousaine (42 × 5 cm, joints épais à la chaux) : une tuile = 5 briques × 32 assises = 2,175 m × 2,08 m.
+export const BRICK_UV = [TEX / 2.175, TEX / 2.08];
+function makeBrick(aniso) {
+  const S = 512, COURSE = 16, BW = S / 5, r = rng(31);
+  const n1 = tileNoise(S, 128, 3), n2 = tileNoise(S, 32, 5), n3 = tileNoise(S, 4, 9);
+  const hgt = new Float32Array(S * S), col = new Uint8Array(S * S * 4);
+  // palette chaude : du rose saumon à l'orangé soutenu, quelques briques surcuites et quelques claires
+  const pal = [[207, 137, 108], [216, 150, 119], [198, 125, 97], [222, 160, 130], [191, 117, 91], [211, 143, 116], [229, 175, 147], [170, 102, 80]];
+  const rows = S / COURSE, offs = [], tones = [];
+  for (let j = 0; j < rows; j++) { offs.push(((j % 2) * 0.5 + (r() < 0.3 ? 0.25 : 0) + (r() - 0.5) * 0.06) * BW); const t = []; for (let i = 0; i < 6; i++) { const q = r(); t.push([q < 0.035 ? 7 : q < 0.13 ? 6 : Math.floor(r() * 6), 0.93 + r() * 0.14]); } tones.push(t); }
+  for (let y = 0; y < S; y++) for (let x = 0; x < S; x++) {
+    const j = Math.floor(y / COURSE), xo = (x + offs[j] + S) % S, bi = Math.floor(xo / BW), fy = y % COURSE, fx = xo % BW;
+    const dj = Math.min(fy - 1.6, COURSE - 1 - fy - 1.6, fx - 1.2, BW - 1 - fx - 1.2);
+    const jf = smooth(0, 1.8, dj);                                   // 0 = joint, 1 = brique
+    const n = n1(x, y) * 0.45 + n2(x, y) * 0.3 + n3(x, y) * 0.25;
+    const [pi, tone] = tones[j][bi % 6], p = pal[pi], k = tone * (0.86 + 0.24 * n);
+    const m = 0.9 + 0.14 * n3(x, y), i = (y * S + x) * 4;
+    col[i] = Math.min(255, (p[0] * k) * jf + 214 * m * (1 - jf)); col[i + 1] = Math.min(255, (p[1] * k) * jf + 201 * m * (1 - jf)); col[i + 2] = Math.min(255, (p[2] * k) * jf + 182 * m * (1 - jf)); col[i + 3] = 255;
+    hgt[y * S + x] = jf * 0.75 + n * 0.3;
+  }
+  return { map: dataTex(col, S, true, aniso), normalMap: dataTex(normalFrom(hgt, S, 2.4), S, false, aniso) };
+}
+// Tuiles canal : une tuile de texture = 8 rangs de tuiles (u, le long de l'égout) × 4 pureaux (v, le long de la pente) ≈ 1,68 m × 1,6 m.
+export const TILE_UV = [TEX / 1.68, TEX / 1.6];
+function makeTile(aniso) {
+  const S = 512, CW = 64, RH = 128, r = rng(57);
+  const n1 = tileNoise(S, 64, 13), n3 = tileNoise(S, 4, 17);
+  const pal = [[188, 128, 100], [198, 142, 112], [174, 116, 90], [208, 156, 124], [162, 108, 86], [214, 174, 140]];
+  const tone = []; for (let i = 0; i < 64; i++) tone.push([Math.floor(r() * r() * 6), 0.88 + 0.24 * r()]);
+  const hgt = new Float32Array(S * S), col = new Uint8Array(S * S * 4);
+  for (let y = 0; y < S; y++) for (let x = 0; x < S; x++) {
+    const c = Math.floor(x / CW), fx = (x % CW) / CW, rowOff = (c % 2) * RH / 2, yy = (y + rowOff) % S, rr = Math.floor(yy / RH), fy = (yy % RH) / RH;
+    const ridge = Math.sin(fx * Math.PI);                              // tuile de couvert bombée, creux sombre entre deux rangs
+    const lap = smooth(0, 0.08, fy) * (0.82 + 0.18 * fy);             // ombre du recouvrement en bas de chaque tuile
+    const [pi, tn] = tone[(c * 4 + rr) % 64], p = pal[pi], n = n1(x, y) * 0.6 + n3(x, y) * 0.4;
+    const k = tn * (0.42 + 0.58 * Math.pow(ridge, 0.7)) * (0.55 + 0.45 * lap) * (0.88 + 0.22 * n), i = (y * S + x) * 4;
+    col[i] = Math.min(255, p[0] * k); col[i + 1] = Math.min(255, p[1] * k); col[i + 2] = Math.min(255, p[2] * k); col[i + 3] = 255;
+    hgt[y * S + x] = ridge * 1.6 + lap * 0.3 + n * 0.1;
+  }
+  return { map: dataTex(col, S, true, aniso), normalMap: dataTex(normalFrom(hgt, S, 2.0), S, false, aniso) };
 }
 
 // Masque dessiné en canvas 2D (blanc = matière) -> DataTexture RGBA de couleur uniforme (pas de franges sombres).
@@ -161,41 +238,63 @@ function drawGlassRoof(g, w, h) {
 }
 
 // ---------- matériau partagé ----------
-function makeMainMaterial(tex, uNight) {
+function makeMainMaterial(tex, uNight, multi) {
   const mat = new THREE.MeshStandardMaterial({ vertexColors: true, map: tex.map, normalMap: tex.normalMap, normalScale: new THREE.Vector2(0.6, 0.6), roughness: 1, metalness: 0 });
   mat.onBeforeCompile = (sh) => {
     sh.uniforms.uNight = uNight;
     sh.vertexShader = sh.vertexShader
       .replace('#include <common>', '#include <common>\nattribute vec4 aMat;\nvarying vec4 vMat;')
       .replace('#include <begin_vertex>', '#include <begin_vertex>\nvMat = aMat;');
-    sh.fragmentShader = sh.fragmentShader
-      .replace('#include <common>', '#include <common>\nvarying vec4 vMat;\nuniform float uNight;')
-      .replace('#include <map_fragment>', '#ifdef USE_MAP\n diffuseColor.rgb *= mix(vec3(1.0), texture2D(map, vMapUv).rgb, vMat.z);\n#endif')
+    let fs = sh.fragmentShader
       .replace('#include <roughnessmap_fragment>', 'float roughnessFactor = vMat.x;')
       .replace('#include <metalnessmap_fragment>', 'float metalnessFactor = vMat.y;')
-      .replace('#include <normal_fragment_maps>', THREE.ShaderChunk.normal_fragment_maps.replace('mapN.xy *= normalScale;', 'mapN.xy *= normalScale * vMat.z;'))
       .replace('#include <emissivemap_fragment>', '#include <emissivemap_fragment>\n totalEmissiveRadiance += uNight * (vMat.w > 1.5 ? vec3(1.0, 0.66, 0.3) * 0.85 : diffuseColor.rgb * vec3(1.0, 0.84, 0.58) * vMat.w * 0.5);');
+    if (!multi) {
+      fs = fs
+        .replace('#include <common>', '#include <common>\nvarying vec4 vMat;\nuniform float uNight;')
+        .replace('#include <map_fragment>', '#ifdef USE_MAP\n diffuseColor.rgb *= mix(vec3(1.0), texture2D(map, vMapUv).rgb, vMat.z);\n#endif')
+        .replace('#include <normal_fragment_maps>', THREE.ShaderChunk.normal_fragment_maps.replace('mapN.xy *= normalScale;', 'mapN.xy *= normalScale * vMat.z;'));
+    } else {
+      // vMat.z = 2·k + force : k = 0 pierre (map), 1 brique, 2 tuile. Constant par triangle, donc sans interpolation parasite.
+      sh.uniforms.uBrick = { value: multi.brick.map }; sh.uniforms.uBrickN = { value: multi.brick.normalMap };
+      sh.uniforms.uTile = { value: multi.tile.map }; sh.uniforms.uTileN = { value: multi.tile.normalMap };
+      const bu = `vec2(${BRICK_UV[0].toFixed(4)}, ${BRICK_UV[1].toFixed(4)})`, tu = `vec2(${TILE_UV[0].toFixed(4)}, ${TILE_UV[1].toFixed(4)})`;
+      fs = fs
+        .replace('#include <common>', '#include <common>\nvarying vec4 vMat;\nuniform float uNight;\nuniform sampler2D uBrick, uBrickN, uTile, uTileN;')
+        .replace('#include <map_fragment>', `float mzK = floor(vMat.z * 0.5 + 0.01), mzS = clamp(vMat.z - 2.0 * mzK, 0.0, 1.0), mzB = step(0.5, mzK) * step(mzK, 1.5), mzT = step(1.5, mzK);
+ #ifdef USE_MAP
+ { vec3 t0 = texture2D(map, vMapUv).rgb, t1 = texture2D(uBrick, vMapUv * ${bu}).rgb, t2 = texture2D(uTile, vMapUv * ${tu}).rgb;
+   diffuseColor.rgb *= mix(vec3(1.0), mix(mix(t0, t1, mzB), t2, mzT), mzS); }
+ #endif`)
+        .replace('#include <normal_fragment_maps>', THREE.ShaderChunk.normal_fragment_maps
+          .replace('vec3 mapN = texture2D( normalMap, vNormalMapUv ).xyz * 2.0 - 1.0;', `vec3 mapN = mix(mix(texture2D( normalMap, vNormalMapUv ).xyz, texture2D( uBrickN, vNormalMapUv * ${bu} ).xyz, mzB), texture2D( uTileN, vNormalMapUv * ${tu} ).xyz, mzT) * 2.0 - 1.0;`)
+          .replace('mapN.xy *= normalScale;', 'mapN.xy *= normalScale * mzS * (1.0 + 0.9 * mzB + 1.6 * mzT);'));
+    }
+    sh.fragmentShader = fs;
   };
-  mat.customProgramCacheKey = () => 'mz-monument-v1';
+  mat.customProgramCacheKey = () => (multi ? 'mz-monument-brique' : 'mz-monument-v1');
   return mat;
 }
 
 export function createKit(ctx) {
   const aniso = Math.min(8, ctx.renderer?.capabilities?.getMaxAnisotropy?.() || 1);
   const uNight = { value: 0 };
+  const style = ctx.city?.style || ctx.city?.id || 'paris';
   const stone = makeStone(aniso);
-  const main = makeMainMaterial(stone, uNight);
-  // Tour Eiffel
-  const latticeMap = maskTexture(1024, 256, drawLattice, 0x7b6348, aniso);
-  const lattice = new THREE.MeshStandardMaterial({ map: latticeMap, alphaTest: 0.42, side: THREE.DoubleSide, roughness: 0.62, metalness: 0.35, emissive: 0xffa838, emissiveIntensity: 0 });
-  const iron = new THREE.MeshStandardMaterial({ color: 0x7b6348, roughness: 0.6, metalness: 0.35, emissive: 0xffa838, emissiveIntensity: 0 });
+  // Toulouse : brique foraine et tuiles canal dans le même matériau (un seul appel de dessin par édifice)
+  const main = makeMainMaterial(stone, uNight, style === 'toulouse' ? { brick: makeBrick(aniso), tile: makeTile(aniso) } : null);
+  const lazy = {};
+  const memo = (name, make) => Object.defineProperty(lazy, name, { get() { const v = make(); Object.defineProperty(lazy, name, { value: v }); return v; }, configurable: true, enumerable: true });
+  // Tour Eiffel (créés seulement si un monument les demande)
+  memo('lattice', () => new THREE.MeshStandardMaterial({ map: maskTexture(1024, 256, drawLattice, 0x7b6348, aniso), alphaTest: 0.42, side: THREE.DoubleSide, roughness: 0.62, metalness: 0.35, emissive: 0xffa838, emissiveIntensity: 0 }));
+  memo('iron', () => new THREE.MeshStandardMaterial({ color: 0x7b6348, roughness: 0.6, metalness: 0.35, emissive: 0xffa838, emissiveIntensity: 0 }));
   // verrières
   const glassOf = (draw, color, tint, aMin) => {
     const map = maskTexture(256, 256, draw, color, aniso, { alphaMin: aMin, fill: tint, wrapS: THREE.RepeatWrapping });
     return new THREE.MeshStandardMaterial({ map, transparent: true, side: THREE.DoubleSide, depthWrite: false, roughness: 0.08, metalness: 0.25, emissive: 0xffc070, emissiveIntensity: 0, envMapIntensity: 1.6 });
   };
-  const glassLouvre = glassOf(drawLozenge, 0x4e565c, [0.6, 0.72, 0.78], 0.36);
-  const glassPalais = glassOf(drawGlassRoof, 0x5f7469, [0.7, 0.8, 0.82], 0.62);
+  memo('glassLouvre', () => glassOf(drawLozenge, 0x4e565c, [0.6, 0.72, 0.78], 0.36));
+  memo('glassPalais', () => glassOf(drawGlassRoof, 0x5f7469, [0.7, 0.8, 0.82], 0.62));
   // eau animée (jets, nappes, cascades) : non éclairée, stries défilant le long de v
   const uTime = { value: 0 };
   const water = new THREE.ShaderMaterial({
@@ -211,7 +310,7 @@ export function createKit(ctx) {
         #include <colorspace_fragment>
       }`,
   });
-  return { THREE, P, uNight, uTime, main, lattice, iron, water, glassLouvre, glassPalais, quality: ctx.quality || 'high' };
+  return Object.assign(lazy, { THREE, P, uNight, uTime, main, water, style, quality: ctx.quality || 'high' });
 }
 
 // ---------- géométries de base ----------
@@ -253,7 +352,19 @@ export class Builder {
     const nv = p.length / 3;
     const Pp = new Float32Array(nv * 3), Nn = new Float32Array(nv * 3), Uu = new Float32Array(nv * 2), Cc = new Float32Array(nv * 3), Aa = new Float32Array(nv * 4);
     const s = 1 / TEX;
-    if (o.uv === 'cyl' && uv) {
+    const roofUV = o.uv === 'roof' || (o.uv === undefined && mat.t >= 4);
+    if (roofUV) {
+      for (let i = 0; i < nv; i += 3) {
+        const a = i * 3;
+        const ax = p[a + 3] - p[a], ay = p[a + 4] - p[a + 1], az = p[a + 5] - p[a + 2], bx = p[a + 6] - p[a], by = p[a + 7] - p[a + 1], bz = p[a + 8] - p[a + 2];
+        let nx = ay * bz - az * by, ny = az * bx - ax * bz, nz = ax * by - ay * bx; const nl = Math.hypot(nx, ny, nz) || 1; nx /= nl; ny /= nl; nz /= nl;
+        // direction horizontale de l'égout h = up × n ; direction de la pente sl = n × h
+        let hx = nz, hz = -nx; const hl = Math.hypot(hx, hz);
+        if (hl < 0.05) { hx = 1; hz = 0; } else { hx /= hl; hz /= hl; }
+        const sx = ny * hz, sy = nz * hx - nx * hz, sz = -ny * hx;
+        for (let k = 0; k < 3; k++) { const q = (i + k) * 3, px = p[q] + x, py = p[q + 1] + y, pz = p[q + 2] + z; Uu[(i + k) * 2] = (px * hx + pz * hz) * s; Uu[(i + k) * 2 + 1] = (px * sx + py * sy + pz * sz) * s; }
+      }
+    } else if (o.uv === 'cyl' && uv) {
       const rep = Math.max(1, Math.round(2 * Math.PI * (o.r || 1) / TEX));
       for (let i = 0; i < nv; i++) { Uu[i * 2] = uv[i * 2] * rep; Uu[i * 2 + 1] = (p[i * 3 + 1] + y) * s; }
     } else {
@@ -285,7 +396,7 @@ export class Builder {
   // --- primitives (y = base de l'objet) ---
   box(mat, w, h, d, x = 0, y = 0, z = 0, ry = 0, o) { return this.add(new THREE.BoxGeometry(w, h, d).translate(0, h / 2, 0), mat, x, y, z, ry, o); }
   cyl(mat, rt, rb, h, x = 0, y = 0, z = 0, seg = 24, o = {}) {
-    return this.add(new THREE.CylinderGeometry(rt, rb, h, this.n(seg), 1, !!o.open, o.t0 ?? 0, o.tl ?? Math.PI * 2).translate(0, h / 2, 0), mat, x, y, z, o.ry || 0, { uv: 'cyl', r: Math.max(rt, rb), ...o });
+    return this.add(new THREE.CylinderGeometry(rt, rb, h, o.exact ? seg : this.n(seg), 1, !!o.open, o.t0 ?? 0, o.tl ?? Math.PI * 2).translate(0, h / 2, 0), mat, x, y, z, o.ry || 0, { uv: 'cyl', r: Math.max(rt, rb), ...o });
   }
   dome(mat, r, h, x = 0, y = 0, z = 0, seg = 32, o = {}) {
     const g = new THREE.SphereGeometry(r, this.n(seg), this.n(seg / 2), o.p0 ?? 0, o.pl ?? Math.PI * 2, 0, o.tl ?? Math.PI / 2); g.scale(1, h / r, 1);
@@ -338,6 +449,7 @@ export class Builder {
     if (this.hi && o.frame !== false) { const [fx, fz] = off(0.02); this.box(o.frameMat || P.stoneL, w + 0.5, h + 0.45, 0.16, fx, y - 0.2, fz, ry, { jit: 0 }); }
     const [px, pz] = off(0.06);
     this.box(pane, w, h, 0.14, px, y, pz, ry, { jit: 0 });
+    if (o.mitre) { const [ax, az] = off(0.132); this.add(new THREE.CircleGeometry(w / 2, 2, 0, Math.PI), pane, ax, y + h, az, ry, { jit: 0 }); }   // arc en mitre (gothique toulousain)
     if (o.arch) {
       const [ax, az] = off(0.132);
       if (this.hi && o.frame !== false) { const [fx, fz] = off(0.1); this.add(new THREE.CircleGeometry(w / 2 + 0.25, 10, 0, Math.PI), o.frameMat || P.stoneL, fx, y + h, fz, ry, { jit: 0 }); }
@@ -496,15 +608,16 @@ export function ogiveShape(w, h, x = 0, y = 0) {
 export function palaceWing(b, o) {
   const wall = o.wall || P.stone, len = o.len, dep = o.dep, bay = o.bay || 5, nb = Math.max(1, Math.floor((len - 2) / bay));
   let H = 0; for (const f of o.floors) H += f.h;
-  b.box(wall, len, H + 3, dep, 0, -3, 0);
-  if (b.hi) b.box(P.stoneD, len + 0.5, 1.1, dep + 0.5, 0, 0, 0);
+  const base = o.base ?? 3;                       // prolongement sous le sol (terrain en pente) ; 0 pour un étage posé sur autre chose
+  b.box(wall, len, H + base, dep, 0, -base, 0);
+  if (b.hi && o.plinth !== false) b.box(o.plinthMat || P.stoneD, len + 0.5, 1.1, dep + 0.5, 0, 0, 0);
   let y = 0;
   for (const f of o.floors) {
     const sill = f.sill ?? f.h * 0.22, wh = f.wh ?? f.h * 0.6, w = f.w ?? bay * 0.42;
     for (const side of [1, -1]) {
       if (side < 0 && o.back === false) continue;
       b.group(0, 0, side * dep / 2, side > 0 ? 0 : Math.PI, () => {
-        if (b.hi) b.winRow(-nb * bay / 2, nb * bay / 2, y + sill, 0, nb, w, wh, { arch: f.arch, lit: f.lit ?? 0.3 });
+        if (b.hi) b.winRow(-nb * bay / 2, nb * bay / 2, y + sill, 0, nb, w, wh, { arch: f.arch, mitre: f.mitre, lit: f.lit ?? 0.3, frameMat: o.frameMat, mat: f.mat });
         else if (y === 0 && nb > 2) b.box(P.glass, nb * bay * 0.96, H * 0.72, 0.1, 0, H * 0.12, 0.02, 0, { jit: 0 });   // version lointaine : une seule bande sombre suggère les baies
         if (b.hi && o.pil) for (let i = 0; i <= nb; i++) b.box(P.stoneL, 0.7, f.h - 0.5, 0.35, -nb * bay / 2 + i * bay, y + 0.2, 0.1, 0, { jit: 0.02 });
       });
@@ -523,6 +636,8 @@ export function palaceWing(b, o) {
       b.group(x, 0, z + side * 0.8, side > 0 ? 0 : Math.PI, () => b.win(0, H + 1.3, 0, 1.1, 1.5, { frame: false }));
     }
     if (b.hi && o.chimneys !== false) for (let i = 1; i < nb; i += 4) b.box(P.stoneD, 1.2, rh + 1.5, 2.6, -nb * bay / 2 + i * bay, H + 0.8, 0, 0);
+  } else if (o.roof === 'gable') {
+    b.gable(wall, rm, dep + 0.9, rh, len + 0.7, 0, H + 0.8, 0, Math.PI / 2);
   } else if (o.roof === 'hip') {
     b.frustum(rm, len + 0.4, dep + 0.4, Math.max(0.2, len - dep), 0.2, rh, 0, H + 0.8, 0);
   } else {

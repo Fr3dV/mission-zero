@@ -14,19 +14,23 @@
   <div id="hud"></div>
   <script type="module">
   // Monument isolé avec caméra orbitale. Paramètres :
-  //   id=eiffel (ou all), time=H, quality, az (degrés, 0 = face à la façade), el, dist, ty (hauteur visée),
-  //   lod=far (force la version lointaine), col=1 (affiche les collisions), env=0 (éclairage simple), sparkle=1/0, hud=0
+  //   city=paris|toulouse (défaut paris), id=eiffel / tls_capitole (ou all), time=H, quality, az (degrés, 0 = face à la façade), el, dist, ty (hauteur visée),
+  //   lod=far (force la version lointaine), col=1 (affiche les collisions), env=0 (éclairage simple), sparkle=1/0, hud=0,
+  //   osm=1 (superpose routes et emprises de bâtiments réelles de la ville autour du monument, pour caler les positions)
   import * as THREE from 'three';
   import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
   import { bus } from '/src/core/bus.js';
   import { store } from '/src/core/store.js';
   import { collision } from '/src/core/collision.js';
-  import { heightAt } from '@shared/terrain.js';
+  import { heightAt, setHeightmap } from '@shared/terrain.js';
+  import { CITY } from '@shared/cities.js';
   import { LANDMARKS, LANDMARK_BY_ID } from '@shared/landmarks.js';
   import { createMonuments } from '/src/monuments/index.js';
 
   const params = new URLSearchParams(location.search);
-  const id = params.get('id') || 'eiffel';
+  const id = params.get('id') || LANDMARKS[0].id;
+  // relief réel de la ville (s'il existe), avant toute pose
+  if (CITY.files.terrain) { try { const r = await fetch(CITY.files.terrain); if (r.ok) setHeightmap(await r.json()); } catch { /* relief plat */ } }
   const canvas = document.getElementById('game');
   const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, powerPreference: 'high-performance' });
   renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
@@ -41,7 +45,7 @@
     addCircle(o) { shapes.push({ kind: 'circle', ...o }); return collision.addCircle(o); } };
 
   const ctx = { THREE, renderer, scene, camera, canvas, bus, store, collision: col, params, quality: params.get('quality') || 'high', time: 0, fps: 60,
-    heightAt, LANDMARKS, LANDMARK_BY_ID, worldData: { parks: [] } };
+    heightAt, LANDMARKS, LANDMARK_BY_ID, city: CITY, worldData: { parks: [] } };
   window.__game = ctx;
 
   // sol (suit le relief de la butte)
@@ -73,7 +77,7 @@
 
   const only = id === 'all' ? undefined : id;
   const t0 = performance.now();
-  const mon = createMonuments(ctx, { only, lodDist: params.get('lod') === 'far' ? 0 : params.get('lod') === 'near' ? 1e9 : undefined });
+  const mon = await createMonuments(ctx, { only, lodDist: params.get('lod') === 'far' ? 0 : params.get('lod') === 'near' ? 1e9 : undefined });
   const buildMs = performance.now() - t0;
   ctx.monuments = mon;
   const item = mon.get(L.id);
@@ -86,6 +90,35 @@
   camera.position.set(target.x + Math.sin(yaw) * Math.cos(el) * dist, target.y + Math.sin(el) * dist, target.z + Math.cos(yaw) * Math.cos(el) * dist);
   const controls = new OrbitControls(camera, canvas); controls.target.copy(target); controls.update();
 
+  // données réelles autour du monument : routes (gris), emprises OSM (boîtes bleues translucides)
+  if (params.get('osm')) {
+    const RO = +(params.get('osmr') || Math.max(L.radius * 2.2, 260)), near = (x, z) => Math.hypot(x - L.x, z - L.z) < RO;
+    try {
+      const d = await (await fetch(CITY.files.roads)).json();
+      const mats = { car: new THREE.MeshBasicMaterial({ color: 0x33363c }), ped: new THREE.MeshBasicMaterial({ color: 0x8d7f5c }) };
+      for (const r of d.roads) for (let i = 0; i < r.points.length - 1; i++) {
+        const [ax, az] = r.points[i], [bx, bz] = r.points[i + 1]; if (!near(ax, az) && !near(bx, bz)) continue;
+        const len = Math.hypot(bx - ax, bz - az), me = new THREE.Mesh(new THREE.PlaneGeometry(r.width || 5, len), r.kind === 'pedestrian' ? mats.ped : mats.car);
+        me.rotation.order = 'YXZ'; me.rotation.y = Math.atan2(bx - ax, bz - az); me.rotation.x = -Math.PI / 2;
+        me.position.set((ax + bx) / 2, heightAt((ax + bx) / 2, (az + bz) / 2) + (r.kind === 'pedestrian' ? 0.06 : 0.09), (az + bz) / 2); scene.add(me);
+      }
+      for (const poly of (d.river?.polygons || [])) { if (!poly.some(([x, z]) => near(x, z))) continue; const sh = new THREE.Shape(poly.map(([x, z]) => new THREE.Vector2(x, -z))); const me = new THREE.Mesh(new THREE.ShapeGeometry(sh), new THREE.MeshBasicMaterial({ color: 0x3f6f86 })); me.rotation.x = -Math.PI / 2; me.position.y = y0p() + 0.03; scene.add(me); }
+    } catch (e) { console.warn('routes indisponibles', e); }
+    try {
+      const f = CITY.files.buildings; let b = null;
+      if (f.endsWith('.bin')) { const r = await fetch(f); if (r.ok) b = new Float32Array(await r.arrayBuffer()); } else { const r = await fetch(f); if (r.ok) b = (await r.json()).buildings; }
+      if (b) {
+        const mIn = new THREE.MeshBasicMaterial({ color: 0x2060ff, transparent: true, opacity: 0.28, depthWrite: false }), mOut = new THREE.MeshStandardMaterial({ color: 0xb9a48f, roughness: 0.9 });
+        for (let i = 0; i < b.length; i += 6) {
+          if (!near(b[i], b[i + 1])) continue;
+          const inside = LANDMARKS.some((l) => Math.hypot(b[i] - l.x, b[i + 1] - l.z) < l.radius + Math.min(b[i + 2], b[i + 3]) * 0.5);
+          const me = new THREE.Mesh(new THREE.BoxGeometry(b[i + 2], b[i + 5] || 8, b[i + 3]), inside ? mIn : mOut);
+          me.position.set(b[i], heightAt(b[i], b[i + 1]) + (b[i + 5] || 8) / 2, b[i + 1]); me.rotation.y = b[i + 4] * Math.PI / 180; if (!inside) { me.castShadow = true; me.receiveShadow = true; } else me.renderOrder = 5; scene.add(me);
+        }
+      }
+    } catch (e) { console.warn('bâtiments indisponibles', e); }
+  }
+  function y0p() { return heightAt(L.x, L.z); }
   if (params.get('col')) {
     const mat = new THREE.MeshBasicMaterial({ color: 0xff2060, wireframe: true });
     for (const s of shapes) {

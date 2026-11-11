@@ -1,6 +1,7 @@
 // Matériaux partagés des véhicules : peinture (clearcoat + paillettes), "divers" (couleur/rugosité/métal par sommet),
 // optiques (émissif par canal), atlas de textures procédural (plaques, lumineux TAXI).
 import * as THREE from 'three';
+import { CITY } from '@shared/cities.js';
 
 // ---------------------------------------------------------------------------------------------
 // Atlas (canvas 512×512) : texel blanc, plaques d'immatriculation françaises, lumineux « TAXI ».
@@ -31,7 +32,7 @@ export function getAtlas() {
     g.fillStyle = '#123a9c'; g.fillRect(x + 4, y + 4, 34, h - 8); g.fillRect(x + w - 38, y + 4, 34, h - 8);
     g.fillStyle = '#f5d20a'; for (let k = 0; k < 12; k++) { const a = (k / 12) * Math.PI * 2; g.fillRect(x + 21 + Math.cos(a) * 9 - 1, y + 24 + Math.sin(a) * 9 - 1, 2.4, 2.4); }
     g.fillStyle = '#fff'; g.font = 'bold 22px Arial, sans-serif'; g.textAlign = 'center'; g.textBaseline = 'middle';
-    g.fillText('F', x + 21, y + 58); g.font = 'bold 20px Arial, sans-serif'; g.fillText('75', x + w - 21, y + 56);
+    g.fillText('F', x + 21, y + 58); g.font = 'bold 20px Arial, sans-serif'; g.fillText(String(CITY?.plate || '75').slice(0, 3), x + w - 21, y + 56);   // suffixe départemental de la ville courante
     g.fillStyle = '#101014'; g.font = 'bold 54px "Arial Narrow", Arial, sans-serif';
     g.fillText(plateText(i + 3), x + w / 2, y + h / 2 + 3, w - 96);
   });

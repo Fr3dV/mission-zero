@@ -7,10 +7,16 @@ import {
   MAX_PLAYERS_PER_ROOM, MAX_SPEED, encode, decode, normColor,
 } from '../shared/protocol.js';
 import * as eco from '../shared/economy.js';
-import { BOUNDS } from '../shared/geo.js';
-import { VEHICLE_BY_ID, STARTER_VEHICLE } from '../shared/catalog.js';
+import { DEFAULT_CITY, sanitizeCity, geoFor } from '../shared/cities.js';
+import { VEHICLES, VEHICLE_BY_ID, STARTER_VEHICLE } from '../shared/catalog.js';
 
-const BOUNDS_MARGIN = 300; // tolérance autour de l'emprise jouable (m)
+const BOUNDS_MARGIN = 300; // tolérance autour de l'emprise jouable de la ville (m)
+// Vitesse plausible : au moins 130 m/s (468 km/h), et toujours 30 % au-dessus de la voiture la plus rapide du catalogue
+// (97 m/s = 350 km/h aujourd'hui) : un joueur honnête lancé sur la rocade reste très en dessous.
+const SPEED_CAP = Math.max(MAX_SPEED, 1.3 * Math.max(0, ...VEHICLES.map((v) => +v.maxSpeed || 0)));
+const MOVE_BUDGET_MAX = SPEED_CAP * 2; // crédit de déplacement accumulable (m) : absorbe ~2 s de gel réseau à pleine vitesse
+const TELEPORT_MIN_MS = 1500; // au plus une téléportation (réapparition, garage, GPS rapide) par intervalle
+const FLOOD_DROPS = 300; // messages consécutifs au-delà du débit autorisé avant de couper la connexion
 const HELLO_TIMEOUT_MS = 10000;
 const ACCOUNT_KEEP_MS = 5 * 60 * 1000; // compte gardé en mémoire après déconnexion (reprise de session, mission en cours)
 const LEADERBOARD_SIZE = 10;
@@ -20,8 +26,15 @@ const sha256 = (s) => createHash('sha256').update(s).digest('hex');
 const clamp = (v, a, b) => (v < a ? a : v > b ? b : v);
 const fmt = (n) => String(Math.round(n)).replace(/\B(?=(\d{3})+(?!\d))/g, '\u202f') + ' Ƶ';
 
+/**
+ * Clé d'une salle, en mémoire comme en persistance. Une salle appartient à une ville : Paris garde le code nu
+ * (compatibilité avec les salles enregistrées avant le multi-villes), les autres villes sont préfixées
+ * (« toulouse:<code> »). Un code de salle ne contient jamais « : » (sanitizeRoom) : aucune collision possible.
+ */
+export const roomKey = (city, code) => (city === DEFAULT_CITY ? code : `${city}:${code}`);
+
 export function createGame({ store, now = Date.now, log = () => {}, rentIntervalMs = 60000, maxConnections = +(process.env.MAX_CONNECTIONS || 1000) } = {}) {
-  const rooms = new Map(); // code -> { code, record: { code, owners, members }, conns: Map(playerId -> conn), lbDirty }
+  const rooms = new Map(); // clé (roomKey) -> { key, code, city, bounds, record: { code: clé, city, room, owners, members }, conns: Map(playerId -> conn), lbDirty }
   const roomLoads = new Map();
   const accounts = new Map(); // id -> { profile, session: { mission }, conn, evictAt }
   const accountLoads = new Map();
@@ -87,23 +100,25 @@ export function createGame({ store, now = Date.now, log = () => {}, rentInterval
 
   // ------------------------------------------------------------------ salles
 
-  async function fetchRoom(code) {
-    if (rooms.has(code)) return rooms.get(code);
-    if (!roomLoads.has(code)) {
-      roomLoads.set(code, (async () => {
+  async function fetchRoom(city, code) {
+    const key = roomKey(city, code);
+    if (rooms.has(key)) return rooms.get(key);
+    if (!roomLoads.has(key)) {
+      roomLoads.set(key, (async () => {
         try {
-          const rec = (await store.getRoom(code)) || { code, createdAt: now() };
-          if (rooms.has(code)) return rooms.get(code);
-          rec.code = code;
+          const rec = (await store.getRoom(key)) || { code: key, createdAt: now() };
+          if (rooms.has(key)) return rooms.get(key);
+          rec.code = key; // clé de persistance (inchangée pour les salles de Paris déjà enregistrées)
+          rec.city = city; rec.room = code; // ajouts : ville de la salle et code saisi par les joueurs
           rec.owners = rec.owners && typeof rec.owners === 'object' ? rec.owners : {};
           rec.members = rec.members && typeof rec.members === 'object' ? rec.members : {};
-          const room = { code, record: rec, conns: new Map(), lbDirty: false };
-          rooms.set(code, room);
+          const room = { key, code, city, bounds: geoFor(city).BOUNDS, record: rec, conns: new Map(), lbDirty: false };
+          rooms.set(key, room);
           return room;
-        } finally { roomLoads.delete(code); }
+        } finally { roomLoads.delete(key); }
       })());
     }
-    return roomLoads.get(code);
+    return roomLoads.get(key);
   }
 
   function saveRoom(room) {
@@ -145,10 +160,12 @@ export function createGame({ store, now = Date.now, log = () => {}, rentInterval
 
   async function onHello(conn, m) {
     if (m.v !== PROTOCOL_VERSION) return reject(conn, 'version', 'Version du jeu obsolète : rechargez la page.');
+    const city = sanitizeCity(m.city); // absent (client d'avant le multi-villes) ou inconnu : Paris
     const code = eco.sanitizeRoom(m.room);
+    const key = roomKey(city, code);
     let name = eco.sanitizeName(m.name);
     const { account, token } = await resolveAccount(m.token, name);
-    const room = await fetchRoom(code);
+    const room = await fetchRoom(city, code);
     if (conn.closed || stopped) return;
 
     // même compte déjà connecté (autre onglet, reconnexion avant détection de la coupure) : l'ancien est remplacé
@@ -158,9 +175,9 @@ export function createGame({ store, now = Date.now, log = () => {}, rentInterval
       detach(old);
       old.ws.close(CLOSE.REPLACED, 'replaced');
     }
-    if (!rooms.has(code)) rooms.set(code, room); // la salle a pu être libérée entre-temps (chargement, remplacement)
+    if (!rooms.has(key)) rooms.set(key, room); // la salle a pu être libérée entre-temps (chargement, remplacement)
     if (room.conns.size >= MAX_PLAYERS_PER_ROOM) {
-      if (!room.conns.size) rooms.delete(code);
+      if (!room.conns.size) rooms.delete(key);
       return reject(conn, 'room_full', `La salle « ${code} » est pleine (${MAX_PLAYERS_PER_ROOM} joueurs).`);
     }
     // unicité du pseudo dans la salle
@@ -182,7 +199,7 @@ export function createGame({ store, now = Date.now, log = () => {}, rentInterval
     clearTimeout(conn.helloTimer);
 
     const payload = {
-      v: PROTOCOL_VERSION, id: p.id, room: code, ts: now(),
+      v: PROTOCOL_VERSION, id: p.id, room: code, city, ts: now(),
       me: eco.publicProfile(p, eco.ownedProperties(room.record.owners, p.id)),
       players: [...room.conns.values()].filter((c) => c !== conn).map((c) => ({ id: c.account.profile.id, name: c.account.profile.name })),
       owners: room.record.owners, lb: leaderboard(room),
@@ -191,7 +208,7 @@ export function createGame({ store, now = Date.now, log = () => {}, rentInterval
     if (token) payload.token = token;
     send(conn, S.WELCOME, payload);
     broadcast(room, S.JOIN, { id: p.id, name }, conn);
-    log(`[salle ${code}] + ${name} (${room.conns.size} joueur(s))`);
+    log(`[salle ${key}] + ${name} (${room.conns.size} joueur(s))`);
   }
 
   /** Retire une connexion de sa salle (fermeture, remplacement). */
@@ -211,8 +228,8 @@ export function createGame({ store, now = Date.now, log = () => {}, rentInterval
     room.lbDirty = true;
     if (!silent) broadcast(room, S.LEAVE, { id: p.id, name: p.name }); // l'annonce « X est parti » est affichée par le client
     saveRoom(room);
-    if (!room.conns.size) rooms.delete(room.code);
-    log(`[salle ${room.code}] - ${p.name} (${room.conns.size} joueur(s))`);
+    if (!room.conns.size) rooms.delete(room.key);
+    log(`[salle ${room.key}] - ${p.name} (${room.conns.size} joueur(s))`);
   }
 
   // ------------------------------------------------------------------ synchronisation
@@ -221,22 +238,32 @@ export function createGame({ store, now = Date.now, log = () => {}, rentInterval
     const s = m.s;
     if (!Array.isArray(s) || s.length < 7 || s.length > 9) return;
     for (let i = 0; i < 7; i++) if (typeof s[i] !== 'number' || !Number.isFinite(s[i])) return;
-    const x = clamp(s[0], BOUNDS.minX - BOUNDS_MARGIN, BOUNDS.maxX + BOUNDS_MARGIN);
-    const z = clamp(s[2], BOUNDS.minZ - BOUNDS_MARGIN, BOUNDS.maxZ + BOUNDS_MARGIN);
+    const B = conn.room.bounds; // emprise de la ville de la salle
+    const x = clamp(s[0], B.minX - BOUNDS_MARGIN, B.maxX + BOUNDS_MARGIN);
+    const z = clamp(s[2], B.minZ - BOUNDS_MARGIN, B.maxZ + BOUNDS_MARGIN);
     const t = now();
     if (conn.pos) {
-      const dt = Math.max(0.02, (t - conn.pos.t) / 1000);
-      if (Math.hypot(x - conn.pos.x, z - conn.pos.z) > MAX_SPEED * dt + 8) {
-        // vitesse implausible : toléré comme téléportation (réapparition, garage), mais pas en rafale
-        if (t - conn.teleportAt < 1500) return;
+      // Crédit de déplacement : SPEED_CAP mètres par seconde écoulée, plafonné. On borne ainsi la vitesse MOYENNE et
+      // non l'écart entre deux messages : les états arrivent souvent groupés (gel réseau, onglet ralenti) puis à
+      // quelques millisecondes d'intervalle, ce qui ne doit pas faire rejeter une voiture lancée à 350 km/h.
+      conn.moveBudget = Math.min(MOVE_BUDGET_MAX, conn.moveBudget + (SPEED_CAP * Math.max(0, t - conn.moveAt)) / 1000);
+      conn.moveAt = t;
+      const d = Math.hypot(x - conn.pos.x, z - conn.pos.z);
+      if (d > conn.moveBudget) {
+        // déplacement implausible : toléré comme téléportation (réapparition, garage), mais pas en rafale
+        if (t - conn.teleportAt < TELEPORT_MIN_MS) return;
         conn.teleportAt = t;
-      }
+        conn.moveBudget = MOVE_BUDGET_MAX / 2;
+      } else conn.moveBudget -= d;
+      conn.pos.x = x; conn.pos.z = z;
+    } else {
+      conn.pos = { x, z };
+      conn.moveAt = t; conn.moveBudget = MOVE_BUDGET_MAX;
     }
-    conn.pos = { x, z, t };
     const mode = s[5] === 1 ? 1 : 0;
     const st = [conn.account.profile.id, x, clamp(s[1], -60, 500), z, Math.round(Math.atan2(Math.sin(s[3]), Math.cos(s[3])) * 100) / 100,
-      clamp(s[4], -MAX_SPEED, MAX_SPEED), mode, Number.isInteger(s[6]) && s[6] >= 0 && s[6] < ANIMS.length ? s[6] : 0];
-    if (mode === 1) st.push(typeof s[7] === 'string' && VEHICLE_BY_ID[s[7]] ? s[7] : STARTER_VEHICLE, normColor(s[8]));
+      clamp(s[4], -SPEED_CAP, SPEED_CAP), mode, Number.isInteger(s[6]) && s[6] >= 0 && s[6] < ANIMS.length ? s[6] : 0];
+    if (mode === 1) st.push(typeof s[7] === 'string' && Object.hasOwn(VEHICLE_BY_ID, s[7]) ? s[7] : STARTER_VEHICLE, normColor(s[8]));
     conn.state = st;
   }
 
@@ -277,15 +304,15 @@ export function createGame({ store, now = Date.now, log = () => {}, rentInterval
     },
 
     [C.MISSION_START](conn, m) {
-      // refus (cooldown, mission inconnue) : signalé par mission_result { ok: false } — c'est le gameplay qui l'affiche
+      // refus (cooldown, mission inconnue ou d'une autre ville) : signalé par mission_result { ok: false } — c'est le gameplay qui l'affiche
       const id = String(m.id).slice(0, 64);
-      const res = eco.missionStart(conn.account.profile, conn.account.session, id, now());
+      const res = eco.missionStart(conn.account.profile, conn.account.session, id, now(), conn.room.city);
       if (!res.ok) send(conn, S.MISSION_RESULT, { id, ok: false, reward: 0, code: res.code, reason: res.text });
     },
     [C.MISSION_ABORT](conn) { eco.missionAbort(conn.account.session); },
     [C.MISSION_COMPLETE](conn, m) {
       const p = conn.account.profile, id = String(m.id).slice(0, 64);
-      const res = eco.missionComplete(p, conn.account.session, id, now());
+      const res = eco.missionComplete(p, conn.account.session, id, now(), conn.room.city);
       if (!res.ok) return send(conn, S.MISSION_RESULT, { id, ok: false, reward: 0, code: res.code, reason: res.text });
       saveAccount(conn.account);
       send(conn, S.MISSION_RESULT, { id, ok: true, reward: res.reward });
@@ -298,7 +325,7 @@ export function createGame({ store, now = Date.now, log = () => {}, rentInterval
 
     [C.BUY_PROPERTY](conn, m) {
       const room = conn.room, p = conn.account.profile;
-      const res = eco.buyProperty(p, room.record.owners, String(m.id));
+      const res = eco.buyProperty(p, room.record.owners, String(m.id), room.city);
       if (!settle(conn, C.BUY_PROPERTY, res)) return;
       saveRoom(room);
       broadcast(room, S.OWNERS, { owners: room.record.owners });
@@ -306,7 +333,7 @@ export function createGame({ store, now = Date.now, log = () => {}, rentInterval
     },
     [C.SELL_PROPERTY](conn, m) {
       const room = conn.room, p = conn.account.profile;
-      const res = eco.sellProperty(p, room.record.owners, String(m.id));
+      const res = eco.sellProperty(p, room.record.owners, String(m.id), room.city);
       if (!settle(conn, C.SELL_PROPERTY, res)) return;
       saveRoom(room);
       broadcast(room, S.OWNERS, { owners: room.record.owners });
@@ -332,7 +359,11 @@ export function createGame({ store, now = Date.now, log = () => {}, rentInterval
   function onMessage(conn, raw, isBinary) {
     if (conn.closed) return;
     conn.alive = true;
-    if (isBinary || !conn.bucket.take(now())) { conn.ws.close(CLOSE.FLOOD, 'flood'); return; }
+    if (isBinary) { conn.ws.close(CLOSE.FLOOD, 'binary'); return; }
+    // Débit dépassé : le message est ignoré. Une rafale ponctuelle (états mis en tampon pendant un gel réseau puis
+    // livrés d'un coup) ne coupe pas un joueur honnête ; seul un dépassement prolongé ferme la connexion.
+    if (!conn.bucket.take(now())) { if (++conn.dropped > FLOOD_DROPS) conn.ws.close(CLOSE.FLOOD, 'flood'); return; }
+    conn.dropped = 0;
     const m = decode(raw);
     if (!m) { if (++conn.strikes > 5) conn.ws.close(CLOSE.FLOOD, 'invalid'); return; }
     if (!conn.account) {
@@ -350,8 +381,8 @@ export function createGame({ store, now = Date.now, log = () => {}, rentInterval
 
   function onConnection(ws, req) {
     const conn = {
-      ws, account: null, room: null, state: null, pos: null, teleportAt: 0, accrueAt: 0, alive: true, closed: false,
-      helloPending: false, strikes: 0,
+      ws, account: null, room: null, state: null, pos: null, moveAt: 0, moveBudget: 0, teleportAt: 0, accrueAt: 0, alive: true, closed: false,
+      helloPending: false, strikes: 0, dropped: 0,
       bucket: eco.createBucket(90, 45), // tous messages (15 états/s + pings en régime normal)
       opBucket: eco.createBucket(12, 2), // opérations d'économie
       chatBucket: eco.createBucket(5, 0.5),

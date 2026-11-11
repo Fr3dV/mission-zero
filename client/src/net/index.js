@@ -3,8 +3,11 @@
 //   joueurs distants interpolés, reconnexion automatique ;
 // - hors-ligne (serveur injoignable ou ?offline=1) : mêmes règles appliquées localement (shared/economy.js).
 // Dans les deux cas le reste du jeu ne voit que le store et le bus (voir docs/ARCHITECTURE.md).
+// Multi-villes : la ville courante (CITY_ID, ?city=) part dans le hello ; le serveur ne réunit que des joueurs de
+// la même ville. Le compte (argent, voitures) est le même dans toutes les villes ; store.room reste le code saisi.
 import { C, S, CLOSE, PROTOCOL_VERSION, WS_PATH, CLIENT_SEND_HZ, DEFAULT_ROOM, encodeState } from '@shared/protocol.js';
 import { sanitizeName, sanitizeRoom } from '@shared/economy.js';
+import { CITY_ID, CITIES, DEFAULT_CITY } from '@shared/cities.js';
 import { createConnection } from './connection.js';
 import { createOffline } from './offline.js';
 import { createRemotes } from './remotes.js';
@@ -30,7 +33,7 @@ export function createNet(ctx) {
   let sendAcc = 0, lastSent = '', lastSentAt = 0, lastPingAt = 0, lastWarnAt = 0;
 
   const net = {
-    connected: false, offline: false, players, status: 'idle', ping: 0, id: null,
+    connected: false, offline: false, players, status: 'idle', ping: 0, id: null, city: CITY_ID,
     update,
     /** Envoi brut d'un message de protocole (outils de debug). */
     send: (type, payload) => transmit(type, payload),
@@ -55,6 +58,21 @@ export function createNet(ctx) {
 
   const onServer = {
     [S.WELCOME](m) {
+      // Un serveur d'avant le multi-villes ignore `city` et rangerait ce joueur dans une salle de Paris
+      // (positions hors emprise, biens et missions d'une autre ville) : on préfère jouer hors-ligne.
+      if (!net.offline && (m.city || DEFAULT_CITY) !== CITY_ID) {
+        const text = `Le serveur ne propose pas encore ${CITIES[CITY_ID]?.name || CITY_ID} en ligne`;
+        if (!welcomed) startOffline(`${text} : mode hors-ligne.`);
+        else {
+          // déjà en jeu avec un profil en ligne : on s'arrête là, sans basculer sur une économie locale
+          conn?.close(); conn = null; session = false;
+          clearRemotes();
+          setStatus('offline');
+          store.set({ online: false });
+          toast(`${text}.`, 'error');
+        }
+        return;
+      }
       session = true;
       net.id = m.id;
       if (m.token) { const a = readAccounts(); a[accountKey()] = m.token; writeAccounts(a); }
@@ -110,7 +128,7 @@ export function createNet(ctx) {
     setStatus('connecting');
     conn = createConnection({
       url: wsUrl(),
-      onOpen() { conn.send(C.HELLO, { v: PROTOCOL_VERSION, name: login.name, room: login.room, token: readAccounts()[accountKey()] }); },
+      onOpen() { conn.send(C.HELLO, { v: PROTOCOL_VERSION, name: login.name, room: login.room, city: CITY_ID, token: readAccounts()[accountKey()] }); },
       onMessage: handle,
       onDown({ fatal, code, attempts }) {
         const hadSession = session;
@@ -144,7 +162,7 @@ export function createNet(ctx) {
     conn?.close(); conn = null;
     net.offline = true;
     clearRemotes();
-    offline = createOffline({ name: login.name, room: login.room, emit: handle });
+    offline = createOffline({ name: login.name, room: login.room, city: CITY_ID, emit: handle });
     if (reason) toast(reason, 'info');
     handle(offline.welcome());
   }

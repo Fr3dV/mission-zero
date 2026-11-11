@@ -38,7 +38,30 @@ export function createPanels(ctx, api) {
   const curMissionId = () => store.mission?.id ?? store.mission?.mission?.id ?? null;
   const maxOf = (k) => Math.max(...VEHICLES.map((v) => v[k] || 0));
   const MAXV = { maxSpeed: maxOf('maxSpeed'), accel: maxOf('accel'), brake: maxOf('brake'), grip: maxOf('grip') };
-  const inviteUrl = () => `${location.origin}${location.pathname}?room=${encodeURIComponent(store.room || ctx.params?.get('room') || 'paris')}`;
+  const cityName = ctx.city?.name || 'Paris', cityId = ctx.city?.id || 'paris';
+  const roomName = () => store.room || ctx.params?.get('room') || cityId;
+  // lien d'invitation : la ville ET la salle
+  const inviteUrl = () => api.inviteUrl?.() || `${location.origin}${location.pathname}?city=${encodeURIComponent(cityId)}&room=${encodeURIComponent(roomName())}`;
+  /** Longues listes (Toulouse) : affichage par tranches, le reste à la demande. */
+  const PAGE = 60;
+  function paged(key, items, render) {
+    const max = st.more[key] || PAGE, rest = items.length - max;
+    return [
+      h('div', { class: 'mz-list' }, items.slice(0, max).map(render)),
+      rest > 0 ? h('button', { class: 'mz-btn mz-btn--ghost mz-more', type: 'button', text: `Afficher la suite · ${rest} de plus`, onclick: () => { st.more[key] = max + PAGE; render0(); } }) : null,
+    ];
+  }
+  const render0 = () => render(true);
+  function dealerRows() {
+    const list = (api.maps.dealerList?.() || []).filter((d) => d && isFinite(d.x) && isFinite(d.z)).sort((a, b) => distTo(a) - distTo(b));
+    if (!list.length) return null;
+    return [h('h4', { class: 'mz-h4', text: `Concessions à ${cityName}` }),
+      h('div', { class: 'mz-list' }, list.map((d) => h('article', { class: 'mz-card' },
+        h('div', { class: 'mz-card-main' }, h('h3', { text: d.name || (d.brand ? `Concession ${d.brand}` : 'Concession') }), h('div', { class: 'mz-tags' }, d.brand ? badge(d.brand) : null, badge(fmtDist(distTo(d)), '', 'pin'))),
+        h('div', { class: 'mz-card-side' }, h('div', { class: 'mz-row' },
+          h('button', { class: 'mz-btn mz-btn--ghost mz-btn--sm', type: 'button', onclick: () => { gpsTo(d, d.name || 'Concession'); api.close(); } }, icon('pin', 14), 'GPS'),
+          h('button', { class: 'mz-btn mz-btn--sm', type: 'button', text: 'Catalogue', onclick: () => api.open('dealer', { brand: d.brand }) }))))))];
+  }
   const pos = () => ctx.player?.pos || { x: 0, z: 0 };
   const distTo = (o) => (o && isFinite(o.x) && isFinite(o.z) ? Math.hypot(o.x - pos().x, o.z - pos().z) : NaN);
   const gpsTo = (o, lbl) => { api.maps.setGps(o.x, o.z, lbl); bus.emit('toast', { text: `Itinéraire vers ${lbl}`, kind: 'info' }); };
@@ -57,7 +80,7 @@ export function createPanels(ctx, api) {
   // =====================================================================
   // Téléphone
   // =====================================================================
-  const st = { tab: lsGet('mz.tab', 'missions'), mFilter: 'all', pFilter: 'all', sendTo: null, sig: '' };
+  const st = { tab: lsGet('mz.tab', 'missions'), mFilter: 'all', pFilter: 'all', sendTo: null, sig: '', more: {} };
   if (!TABS.some((t) => t[0] === st.tab)) st.tab = 'missions';
   const body = h('div', { class: 'mz-phone-body' });
   const nav = h('nav', { class: 'mz-phone-nav' });
@@ -83,7 +106,7 @@ export function createPanels(ctx, api) {
     wallet.textContent = zc(money());
     const s = api.netState();
     net.className = 'mz-phone-net is-' + s;
-    net.textContent = s === 'online' ? `Salle ${store.room || '—'}` : s === 'offline' ? 'Hors ligne' : 'Connexion…';
+    net.textContent = `${cityName} · ` + (s === 'online' ? `salle ${store.room || '—'}` : s === 'offline' ? 'hors ligne' : 'connexion…');
   }
 
   // ----- Missions -----
@@ -97,8 +120,8 @@ export function createPanels(ctx, api) {
     const shown = list.filter((m) => st.mFilter === 'all' || m.type === st.mFilter).sort((a, b) => (a.level || 1) - (b.level || 1) || (a.reward || 0) - (b.reward || 0));
     const out = [];
     if (types.length > 1) out.push(chips([['all', `Toutes · ${list.length}`], ...types.map((t) => [t, label(TYPE_LABEL, t)])], st.mFilter, (k) => { st.mFilter = k; render(true); }));
-    if (!shown.length) out.push(empty('mission', 'Aucune mission', 'De nouvelles missions arrivent bientôt dans Paris.'));
-    out.push(h('div', { class: 'mz-list' }, shown.map((m) => {
+    if (!shown.length) out.push(empty('mission', 'Aucune mission', `Pas encore de mission à ${cityName} : elles arrivent bientôt. En attendant, la ville est à vous.`));
+    out.push(paged('missions:' + st.mFilter, shown, (m) => {
       const stt = states[m.id], cd = Number(stt?.cooldownLeft) || 0;
       const locked = stt ? !!stt.locked : (m.level || 1) > myLevel(), active = m.id === cur, s = stt?.start || m.start;
       const d = distTo(s);
@@ -121,7 +144,7 @@ export function createPanels(ctx, api) {
             active
               ? h('button', { class: 'mz-btn mz-btn--sm', type: 'button', text: 'Abandonner', onclick: () => { ctx.gameplay?.abortMission?.(); api.close(); } })
               : h('button', { class: 'mz-btn mz-btn--gold mz-btn--sm', type: 'button', disabled: locked || cd > 0 || !ctx.gameplay?.startMission, onclick: () => { ctx.gameplay?.startMission?.(m.id); api.close(); } }, icon(locked ? 'lock' : 'play', 14), locked ? 'Verrouillée' : 'Démarrer'))));
-    })));
+    }));
     return out;
   }
 
@@ -153,12 +176,12 @@ export function createPanels(ctx, api) {
         h('div', { class: 'mz-kpi' }, h('span', { text: 'Loyers' }), h('strong', { text: zc(rent) }), h('small', { text: 'par heure connectée' })),
         h('div', { class: 'mz-kpi' }, h('span', { text: 'Patrimoine' }), h('strong', { text: zc(mine.reduce((s, p) => s + (p.price || 0), 0)) }), h('small', { text: `revente à ${Math.round(SELL_RATIO * 100)} %` }))),
       chips([['all', 'Tous'], ['free', 'À vendre'], ['mine', 'Les miens']], st.pFilter, (k) => { st.pFilter = k; render(true); }),
-      shown.length ? null : empty('home', 'Rien ici', st.pFilter === 'mine' ? 'Vous ne possédez encore aucun bien. Un premier studio rapporte vite.' : 'Aucun bien ne correspond.'),
-      h('div', { class: 'mz-list' }, shown.map((p) => h('article', { class: 'mz-card' + (isMine(p.id) ? ' is-active' : '') },
+      shown.length ? null : empty('home', 'Rien ici', !list.length ? `Aucun bien n’est encore en vente à ${cityName}.` : st.pFilter === 'mine' ? 'Vous ne possédez encore aucun bien. Un premier studio rapporte vite.' : 'Aucun bien ne correspond.'),
+      paged('immo:' + st.pFilter, shown, (p) => h('article', { class: 'mz-card' + (isMine(p.id) ? ' is-active' : '') },
         h('div', { class: 'mz-card-main' },
           h('div', { class: 'mz-card-top' }, h('h3', { text: p.name }), ownerBadge(p)),
           h('div', { class: 'mz-tags' }, badge(label(KIND_LABEL, p.kind)), badge(`Loyer ${zc(p.income)}/h`, '', 'bolt'), p.garageSlots ? badge(`${p.garageSlots} place${p.garageSlots > 1 ? 's' : ''}`, '', 'car') : null, isFinite(distTo(p)) ? badge(fmtDist(distTo(p)), '', 'pin') : null)),
-        h('div', { class: 'mz-card-side' }, h('div', { class: 'mz-price', text: zc(p.price) }), h('div', { class: 'mz-row' }, propertyActions(p, true)))))),
+        h('div', { class: 'mz-card-side' }, h('div', { class: 'mz-price', text: zc(p.price) }), h('div', { class: 'mz-row' }, propertyActions(p, true))))),
     ];
   }
 
@@ -170,7 +193,7 @@ export function createPanels(ctx, api) {
   }
   function tabGarage() {
     const cars = [...new Set(myCars())].map((id) => VEHICLE_BY_ID[id]).filter(Boolean);
-    if (!cars.length) return [empty('car', 'Garage vide', 'Passez dans une concession Tesla, Porsche ou Lamborghini pour acheter votre première voiture.')];
+    if (!cars.length) return [empty('car', 'Garage vide', 'Passez dans une concession pour acheter votre première voiture.'), dealerRows()];
     const active = carId(me().activeCar);
     return [
       h('p', { class: 'mz-lead', text: 'Sortez une voiture : elle apparaît près de vous, prête à démarrer.' }),
@@ -181,6 +204,7 @@ export function createPanels(ctx, api) {
         h('div', { class: 'mz-row mz-row--end' },
           v.id === active ? null : h('button', { class: 'mz-btn mz-btn--ghost mz-btn--sm', type: 'button', text: 'Par défaut', onclick: () => bus.emit('intent:setActiveCar', { typeId: v.id }) }),
           h('button', { class: 'mz-btn mz-btn--gold mz-btn--sm', type: 'button', onclick: () => takeOut(v.id) }, icon('key', 14), 'Sortir'))))),
+      dealerRows(),
     ];
   }
 
@@ -211,9 +235,9 @@ export function createPanels(ctx, api) {
   };
   function tabJoueurs() {
     const list = players().sort((a, b) => (a.name || '').localeCompare(b.name || ''));
-    if (!list.length) return [empty('users', 'Personne d’autre pour l’instant', `Partagez le code de salle « ${store.room || 'paris'} » pour jouer avec vos amis.`, inviteBtn())];
+    if (!list.length) return [empty('users', 'Personne d’autre pour l’instant', `Partagez le code de salle « ${roomName()} » pour jouer à ${cityName} avec vos amis.`, inviteBtn())];
     return [
-      h('div', { class: 'mz-row mz-row--between' }, h('p', { class: 'mz-lead', text: `${list.length + 1} joueurs dans la salle « ${store.room || 'paris'} »` }), inviteBtn()),
+      h('div', { class: 'mz-row mz-row--between' }, h('p', { class: 'mz-lead', text: `${list.length + 1} joueurs à ${cityName}, salle « ${roomName()} »` }), inviteBtn()),
       h('div', { class: 'mz-list' }, list.map((p) => {
         const veh = p.mode === 'vehicle' ? VEHICLE_BY_ID[p.vehicleType]?.name || 'En voiture' : 'À pied';
         return h('article', { class: 'mz-card mz-player' },
@@ -269,7 +293,7 @@ export function createPanels(ctx, api) {
     return [
       h('div', { class: 'mz-profile' },
         h('div', { class: 'mz-avatar mz-avatar--lg', text: (me().name || '?').slice(0, 1).toUpperCase() }),
-        h('div', null, h('span', { class: 'mz-eyebrow', text: `Salle ${store.room || '—'} · Niveau ${myLevel()}${levelTitle()}` }), h('h3', { class: 'mz-profile-name', text: me().name || 'Joueur' })),
+        h('div', null, h('span', { class: 'mz-eyebrow', text: `${cityName} · salle ${store.room || '—'} · niveau ${myLevel()}${levelTitle()}` }), h('h3', { class: 'mz-profile-name', text: me().name || 'Joueur' })),
         h('div', { class: 'mz-profile-fortune' }, h('span', { class: 'mz-eyebrow', text: 'Fortune totale' }), h('strong', { text: zc(total) }))),
       h('div', { class: 'mz-split' }, seg(money(), 'a'), seg(vProps, 'b'), seg(vCars, 'c')),
       h('div', { class: 'mz-kpis' },
@@ -289,6 +313,7 @@ export function createPanels(ctx, api) {
     const volV = h('span', { class: 'mz-perf-v', text: `${Math.round(vol * 100)} %` });
     const slider = h('input', { class: 'mz-range', type: 'range', min: '0', max: '100', value: String(Math.round(vol * 100)), 'aria-label': 'Volume' });
     slider.addEventListener('input', () => { const v = Number(slider.value) / 100; volV.textContent = `${slider.value} %`; lsSet('mz.volume', String(v)); bus.emit('audio:volume', { value: v }); });
+    const others = api.otherCities?.() || [];
     const setQ = (k) => { if (k === q) return; const u = new URL(location.href); u.searchParams.set('quality', k); if (store.room) u.searchParams.set('room', store.room); location.href = u.toString(); };
     return [
       h('div', { class: 'mz-setting' }, h('div', null, h('h3', { text: 'Qualité graphique' }), h('p', { class: 'mz-dim', text: 'Le jeu se recharge pour appliquer le changement.' })),
@@ -296,8 +321,12 @@ export function createPanels(ctx, api) {
       h('div', { class: 'mz-setting' }, h('div', null, h('h3', { text: 'Volume' }), h('p', { class: 'mz-dim', text: 'Moteurs, ville et ambiance.' })), h('div', { class: 'mz-row' }, slider, volV)),
       h('div', { class: 'mz-setting' }, h('div', null, h('h3', { text: 'Coincé ?' }), h('p', { class: 'mz-dim', text: 'Vous replace sur la chaussée la plus proche ou à votre domicile.' })),
         h('button', { class: 'mz-btn', type: 'button', onclick: () => { bus.emit('intent:respawn', {}); api.close(); } }, icon('locate', 14), 'Me débloquer')),
-      h('div', { class: 'mz-setting' }, h('div', null, h('h3', { text: 'Inviter des amis' }), h('p', { class: 'mz-dim', text: `Salle « ${store.room || 'paris'} » — le lien ouvre directement cette salle.` })), inviteBtn()),
+      h('div', { class: 'mz-setting' }, h('div', null, h('h3', { text: 'Inviter des amis' }), h('p', { class: 'mz-dim', text: `${cityName}, salle « ${roomName()} » — le lien ouvre directement cette ville et cette salle.` })), inviteBtn()),
+      others.length ? h('div', { class: 'mz-setting' }, h('div', null, h('h3', { text: 'Changer de ville' }), h('p', { class: 'mz-dim', text: `Vous êtes à ${cityName}. Changer de ville recharge le jeu : votre argent et vos voitures vous suivent, les biens restent dans leur ville.` })),
+        h('div', { class: 'mz-row' }, others.map((c) => confirmButton(`Aller à ${c.name}`, `Quitter ${cityName} ?`, () => api.switchCity?.(c.id), 'mz-btn')))) : null,
       h('h4', { class: 'mz-h4', text: 'Commandes' }), controlsGrid(),
+      h('p', { class: 'mz-credits' }, h('b', { text: `Données cartographiques de ${cityName}` }), ` ${api.maps.sources || ''}`,
+        (api.maps.sourceDetails || []).map((t) => h('small', { text: t }))),
     ];
   }
 

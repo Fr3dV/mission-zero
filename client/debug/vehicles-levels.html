@@ -1,0 +1,283 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8" />
+  <title>Mission Zéro — banc « niveaux et relief »</title>
+  <link rel="icon" href="data:," />
+  <style>
+    html,body{margin:0;height:100%;overflow:hidden;background:#15171b;font-family:system-ui,sans-serif;color:#dde}
+    canvas{position:fixed;inset:0;width:100%;height:100%;display:block}
+    #info{position:fixed;left:8px;bottom:8px;z-index:2;font:11px/1.4 ui-monospace,monospace;background:#000c;padding:6px 10px;border-radius:6px;white-space:pre;max-height:70vh;overflow:auto}
+    #lab{position:fixed;left:8px;top:8px;z-index:2;font:12px ui-monospace,monospace;background:#000b;padding:4px 8px;border-radius:6px}
+  </style>
+  <script type="importmap">
+  { "imports": { "three": "/vendor/three/build/three.module.js", "three/addons/": "/vendor/three/examples/jsm/", "@shared/": "/shared/" } }
+  </script>
+</head>
+<body>
+  <div id="lab"></div><div id="info"></div>
+  <canvas id="c"></canvas>
+  <script type="module">
+    // Banc « niveaux superposés et relief » (contrat v5) : une couche de relief locale enregistrée par setHeightLayer,
+    // avec un tablier à +6,5 m et deux rampes à 7 % au-dessus d'une route au sol, une trémie à −6 m sous une dalle,
+    // une côte à 12 %, un dos-d'âne et un quai de 1,3 m.
+    //   ?levels=all                      : exécute tous les scénarios et affiche les mesures (window.__levels)
+    //   ?levels=<scénario>&t=<secondes>  : exécute un scénario jusqu'à t et montre la voiture (capture)
+    //   &id=<typeId>  &view=side|top|chase  &city=toulouse (plaques 31)
+    import * as THREE from 'three';
+    import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
+    import { VEHICLE_BY_ID } from '@shared/catalog.js';
+    import { heightAt, setHeightLayer, STEP_UP } from '@shared/terrain.js';
+    import { bus } from '/src/core/bus.js';
+    import { collision } from '/src/core/collision.js';
+    import { createVehicles } from '/src/vehicles/index.js';
+
+    const q = new URLSearchParams(location.search);
+    const which = q.get('levels') || 'all', id = VEHICLE_BY_ID[q.get('id')] ? q.get('id') : 'tesla_model3';
+
+    // ------------------------------------------------------------------ couche de relief du banc
+    const RAMP = 0.07, DECK = 6.5, DX = 57, RX = DX + DECK / RAMP;        // tablier |x| ≤ 57, rampes jusqu'à |x| ≈ 149,9
+    const TR = -6, TX = 64, TRX = TX + -TR / RAMP, LID = 40;              // trémie : fond |x| ≤ 64, dalle |x| ≤ 40
+    /** Surfaces praticables en (x, z) : une seule en général, deux là où des niveaux se superposent. */
+    function surfaces(x, z, base, out) {
+      out.length = 0;
+      const ax = Math.abs(x);
+      if (Math.abs(z) <= 5 && ax <= RX) {                                 // pont (axe x)
+        if (ax <= 50) { out.push(base, DECK); return out; }               // travée : route au sol + tablier
+        out.push(ax <= DX ? DECK : (DECK * (RX - ax)) / (RX - DX)); return out; // culée pleine puis rampe en remblai
+      }
+      if (z >= 36 && z <= 44 && ax <= TRX) {                              // trémie (axe x)
+        const h = ax <= TX ? TR : (TR * (TRX - ax)) / (TRX - TX);
+        if (ax <= LID) out.push(h, base); else out.push(h);               // sous la dalle : chaussée basse + place
+        return out;
+      }
+      if (z >= 70 && z <= 90) { out.push(base + Math.min(14.4, Math.max(0, (x + 60) * 0.12))); return out; } // côte à 12 %
+      if (z >= -70 && z <= -50 && ax < 16) { const c = Math.cos((Math.PI * x) / 32); out.push(base + 1.3 * c * c); return out; } // dos-d'âne (pont de brique : 1,3 m sur 32 m, pente max 12,8 %)
+      if (z >= -110 && z <= -90 && x >= -80 && x < 0) { out.push(base + 1.3); return out; }                  // quai de 1,3 m
+      out.push(base); return out;
+    }
+    const _S = [];
+    setHeightLayer((x, z, base, y) => {
+      const S = surfaces(x, z, base, _S);
+      if (S.length === 1) return S[0];
+      if (y === undefined) { let b = S[0]; for (const h of S) if (Math.abs(h - base) < Math.abs(b - base)) b = h; return b; }
+      let best = -Infinity, low = Infinity;
+      for (const h of S) { if (h < low) low = h; if (h < y + STEP_UP && h > best) best = h; }
+      return best > -Infinity ? best : low;
+    });
+
+    // ------------------------------------------------------------------ scène
+    const canvas = document.getElementById('c');
+    const renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
+    renderer.setPixelRatio(Math.min(devicePixelRatio, 2)); renderer.setSize(innerWidth, innerHeight);
+    renderer.toneMapping = THREE.ACESFilmicToneMapping;
+    const scene = new THREE.Scene(); scene.background = new THREE.Color(0x9fb6cc);
+    scene.environment = new THREE.PMREMGenerator(renderer).fromScene(new RoomEnvironment(), 0.03).texture; scene.environmentIntensity = 0.8;
+    const camera = new THREE.PerspectiveCamera(36, innerWidth / innerHeight, 0.1, 2000);
+    const sun = new THREE.DirectionalLight(0xfff4e6, 2.4); sun.position.set(80, 120, -60); scene.add(sun);
+    // sol : surface la plus basse (fond de trémie, rampes, côte, bosse)
+    {
+      const x0 = -210, x1 = 210, z0 = -125, z1 = 105, st = 1, nx = (x1 - x0) / st, nz = (z1 - z0) / st;
+      const g = new THREE.PlaneGeometry(x1 - x0, z1 - z0, nx, nz); g.rotateX(-Math.PI / 2);
+      const p = g.attributes.position, col = [];
+      for (let i = 0; i < p.count; i++) {
+        const x = p.getX(i) + (x0 + x1) / 2, z = p.getZ(i) + (z0 + z1) / 2, h = heightAt(x, z, -100);
+        p.setXYZ(i, x, h, z);
+        const road = (Math.abs(z) <= 5 && Math.abs(x) <= RX) || (z >= 36 && z <= 44 && Math.abs(x) <= TRX) || (Math.abs(x) <= 8 && z > -45 && z < 66) || (z >= 70 && z <= 90) || (z >= -70 && z <= -50) || (z >= -110 && z <= -90);
+        const line = road && ((Math.abs(x) % 6) < 0.6 && Math.abs(z % 1) < 0.5 && (Math.abs(z) < 0.5 || Math.abs(z - 40) < 0.5 || Math.abs(z - 80) < 0.5 || Math.abs(z + 60) < 0.5 || Math.abs(z + 100) < 0.5));
+        const c = line ? 0.85 : road ? 0.23 : 0.42; col.push(c * (road ? 1 : 0.8), c, c * (road ? 1 : 0.75));
+      }
+      g.setAttribute('color', new THREE.Float32BufferAttribute(col, 3)); g.computeVertexNormals();
+      scene.add(new THREE.Mesh(g, new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.9 })));
+    }
+    const concrete = new THREE.MeshStandardMaterial({ color: 0xb9b4aa, roughness: 0.85 }), asphalt = new THREE.MeshStandardMaterial({ color: 0x3a3c40, roughness: 0.9 });
+    const box = (w, h, d, x, y, z, m = concrete) => { const o = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), m); o.position.set(x, y, z); scene.add(o); return o; };
+    box(100.2, 0.5, 10, 0, DECK - 0.26, 0, asphalt);                      // tablier (travée)
+    box(LID * 2, 0.5, 8, 0, -0.26, 40, asphalt);                          // dalle au-dessus de la trémie
+    /** Obstacle = collision + volume visible. */
+    const wall = (x, z, hw, hd, bottom, top, tag = 'parapet') => { collision.addBox({ x, z, hw, hd, bottom, top, tag }); const b = Math.max(bottom, -6.5); box(hw * 2, top - b, hd * 2, x, (top + b) / 2, z); };
+    // parapets du tablier (propres à ce niveau : bottom = 6), avec une brèche de 12 m côté sud pour l'essai de chute
+    wall(0, -5.2, DX, 0.15, DECK - 0.5, DECK + 1.1);
+    wall(-21, 5.2, 36, 0.15, DECK - 0.5, DECK + 1.1); wall(42, 5.2, 15, 0.15, DECK - 0.5, DECK + 1.1);
+    wall(-50.2, 0, 0.2, 5, -Infinity, DECK - 0.6, 'building'); wall(50.2, 0, 0.2, 5, -Infinity, DECK - 0.6, 'building'); // culées
+    // murs de la trémie : garde-corps à l'air libre (top = 1), murs enterrés sous la dalle (top = −0,4)
+    for (const zz of [35.85, 44.15]) { wall(0, zz, LID, 0.15, -Infinity, -0.4, 'building'); wall(-(LID + TRX) / 2, zz, (TRX - LID) / 2, 0.15, -Infinity, 1, 'parapet'); wall((LID + TRX) / 2, zz, (TRX - LID) / 2, 0.15, -Infinity, 1, 'parapet'); }
+
+    // ------------------------------------------------------------------ véhicules
+    const events = [];
+    bus.on('vehicle:crash', (e) => events.push({ t: +ctx.time.toFixed(2), id: e.vehicle.id, impact: +e.impact.toFixed(1), kind: e.kind, tag: e.tag }));
+    const ctx = { THREE, renderer, scene, camera, canvas, bus, collision, params: q, quality: 'high', time: 0, heightAt, world: null, player: null, env: null };
+    const vehicles = createVehicles(ctx);
+    const dt = 1 / 60, E = -Math.PI / 2, S = Math.PI, N = 0, W = Math.PI / 2;   // caps : E = +x, S = +z, N = −z, W = −x
+    const f2 = (x) => +x.toFixed(2);
+    const drive = (x, z, yaw, kmh, opts = {}) => { const v = vehicles.spawn(opts.id || id, x, z, yaw, { y: opts.y }); v.driver = 'bench'; v.setTransform(x, z, yaw, kmh / 3.6, opts.y); v.phys.kinT = -1; return v; };
+    /** Avance la simulation ; rec(v, i) est appelé à chaque pas. Retourne les statistiques verticales de v. */
+    function run(v, secs, ctl, tStop = Infinity) {
+      const st = { maxDy: 0, maxDyAir: 0, yMin: 1e9, yMax: -1e9, airT: 0, maxGap: 0, landV: 0, nan: 0, ys: [], t: 0 };
+      let py = v.pos.y, wasAir = false;
+      for (let i = 0; i < secs / dt; i++) {
+        if (st.t >= tStop) break;
+        if (ctl) ctl(v, st.t);
+        ctx.time += dt; st.t += dt; vehicles.update(dt);
+        const p = v.phys, dy = Math.abs(v.pos.y - py);
+        if (p.air || wasAir) st.maxDyAir = Math.max(st.maxDyAir, dy); else st.maxDy = Math.max(st.maxDy, dy);
+        if (p.air) st.airT += dt; st.maxGap = Math.max(st.maxGap, p.gap); st.landV = Math.max(st.landV, p.landV);
+        if (!Number.isFinite(v.pos.x + v.pos.y + v.pos.z + v.yaw + v.speed)) st.nan++;
+        st.yMin = Math.min(st.yMin, v.pos.y); st.yMax = Math.max(st.yMax, v.pos.y);
+        if (i % 6 === 0) st.ys.push(f2(v.pos.y));
+        py = v.pos.y; wasAir = p.air;
+      }
+      return st;
+    }
+    const sum = (st, extra = {}) => ({ yMin: f2(st.yMin), yMax: f2(st.yMax), 'saut de y max par image (au sol) m': +st.maxDy.toFixed(3), 'en l’air s': f2(st.airT), 'écart max au sol m': f2(st.maxGap), 'réception m/s': f2(st.landV), nan: st.nan, ...extra });
+    const evOf = (v) => events.filter((e) => e.id === v.id).map((e) => `${e.impact} m/s ${e.tag}`);
+
+    const SC = {
+      // montée de rampe, tablier, descente ; une voiture garée SOUS le tablier ne doit pas être heurtée
+      bridge(tStop) {
+        const parked = vehicles.spawn('citadine', 0, 0, S);                            // au niveau de la rue, sous le tablier
+        const v = drive(-185, 0, E, 54); const sp = {};
+        const st = run(v, 24, (v) => { v.controls.throttle = 0.3; const x = v.pos.x; if (!sp.pied && x > -150) sp.pied = v.speed; if (!sp.haut && x > -57) sp.haut = v.speed; if (!sp.fin && x > 57) sp.fin = v.speed; if (!sp.bas && x > 150) sp.bas = v.speed; }, tStop);
+        return { v, cam: 'side', r: sum(st, { 'km/h pied de rampe → haut → fin du tablier → bas': [sp.pied, sp.haut, sp.fin, sp.bas].map((s) => s == null ? null : Math.round(s * 3.6)), 'y de la voiture garée dessous': f2(parked.pos.y), chocs: evOf(v), y: st.ys }) };
+      },
+      // passage SOUS le tablier (route au sol, axe z) pendant qu'une voiture est garée dessus
+      under(tStop) {
+        const above = vehicles.spawn('taxi', 0, 0, E, { y: DECK });
+        const v = drive(0, -44, S, 50);
+        const st = run(v, 4.5, (v) => { v.controls.throttle = 0.15; }, tStop);
+        return { v, cam: 'chase', r: sum(st, { 'z final': f2(v.pos.z), 'y de la voiture garée sur le tablier': f2(above.pos.y), chocs: evOf(v) }) };
+      },
+      // trémie : descente à −6 m, passage sous la dalle (voiture garée dessus), remontée
+      tremie(tStop) {
+        const above = vehicles.spawn('citadine', 0, 40, S);                              // sur la dalle (niveau de la rue)
+        const v = drive(-185, 40, E, 54); const sp = {};
+        const st = run(v, 24, (v) => { v.controls.throttle = 0.3; const x = v.pos.x; if (!sp.haut && x > -150) sp.haut = v.speed; if (!sp.fond && x > -64) sp.fond = v.speed; if (!sp.sortie && x > 150) sp.sortie = v.speed; }, tStop);
+        return { v, cam: 'side', r: sum(st, { 'km/h entrée → fond → sortie': [sp.haut, sp.fond, sp.sortie].map((s) => s == null ? null : Math.round(s * 3.6)), 'y de la voiture garée sur la dalle': f2(above.pos.y), chocs: evOf(v), y: st.ys }) };
+      },
+      // traversée de la dalle au-dessus de la trémie (axe z) : on reste au niveau de la rue
+      lid(tStop) {
+        const v = drive(0, 62, N, 40);
+        const st = run(v, 5, (v) => { v.controls.throttle = 0.25; }, tStop);
+        return { v, cam: 'chase', r: sum(st, { 'z final': f2(v.pos.z), chocs: evOf(v) }) };
+      },
+      // côte à 12 % : frein à main, roue libre, puis montée
+      hill(tStop) {
+        const v = drive(0, 80, E, 0); const x0 = v.pos.x; const o = {};
+        let st = run(v, 5, (v) => { v.controls.handbrake = true; v.controls.throttle = 0; }, tStop);
+        o['frein à main 5 s : déplacement m'] = f2(v.pos.x - x0);
+        if (ctx.time < tStop) { const xa = v.pos.x; st = run(v, 3, (v) => { v.controls.handbrake = false; }); o['frein lâché 3 s (recule) : déplacement m, km/h'] = [f2(v.pos.x - xa), Math.round(v.speed * 3.6)]; }
+        if (ctx.time < tStop) { st = run(v, 2, (v) => { v.controls.handbrake = true; }); st = run(v, 4, (v) => { v.controls.handbrake = false; v.controls.throttle = 1; }); o['départ arrêté plein gaz 4 s en montée : km/h'] = Math.round(v.speed * 3.6); }
+        // voiture garée sans conducteur dans la pente
+        const pk = vehicles.spawn(id, 20, 85, E); const xp = pk.pos.x; for (let i = 0; i < 300; i++) { ctx.time += dt; vehicles.update(dt); } o['garée sans conducteur 5 s : déplacement m, tangage °'] = [f2(pk.pos.x - xp), f2(pk.group.rotation.x * 57.3)];
+        // comparaison : même voiture, même durée, sur le plat
+        const w = drive(0, 600, E, 0); run(w, 4, (w) => { w.controls.throttle = 1; }); o['départ arrêté plein gaz 4 s sur le plat : km/h'] = Math.round(w.speed * 3.6); vehicles.remove(w);
+        return { v, cam: 'side', r: sum(st, o) };
+      },
+      // descente de la côte gaz coupé puis au frein
+      downhill(tStop) {
+        const v = drive(55, 80, W, 30);
+        const st = run(v, 4, (v) => { v.controls.throttle = 0.25; }, tStop); const kD = Math.round(v.speed * 3.6); v.controls.throttle = 0; v.controls.handbrake = true;
+        const w = drive(55, 600, W, 30); run(w, 4, (w) => { w.controls.throttle = 0.25; }); const kF = Math.round(w.speed * 3.6); vehicles.remove(w);
+        const u = drive(-55, 85, E, 30); run(u, 4, (u) => { u.controls.throttle = 0.25; }); const kU = Math.round(u.speed * 3.6); vehicles.remove(u);
+        // thermique : frein lâché dans la pente, sans gaz (la citadine recule)
+        const c = drive(0, 85, E, 0, { id: 'citadine' }); const xc = c.pos.x; run(c, 3, () => {}); const back = [f2(c.pos.x - xc), Math.round(c.speed * 3.6)]; vehicles.remove(c);
+        const r = sum(st, { '25 % de gaz pendant 4 s depuis 30 km/h — descente 12 % / plat / montée 12 % : km/h': [kD, kF, kU], 'citadine (thermique) frein lâché 3 s dans la côte : déplacement m, km/h': back });
+        return { v, cam: 'side', r };
+      },
+      hump50(tStop) { const v = drive(-70, -60, E, 50); const y0 = v.yaw; const st = run(v, 6, (v) => { v.controls.throttle = 0.2; }, tStop); return { v, cam: 'side', r: sum(st, { 'cap dévié °': f2((v.yaw - y0) * 57.3), chocs: evOf(v), y: st.ys }) }; },
+      hump120(tStop) { const v = drive(-110, -60, E, 120); const y0 = v.yaw; const st = run(v, 6, (v) => { v.controls.throttle = 0.5; }, tStop); return { v, cam: 'side', r: sum(st, { 'cap dévié °': f2((v.yaw - y0) * 57.3), 'km/h final': Math.round(v.speed * 3.6), chocs: evOf(v), y: st.ys }) }; },
+      hump200(tStop) { const v = drive(-150, -60, E, 200, { id: 'porsche_911' }); const y0 = v.yaw; const st = run(v, 5, (v) => { v.controls.throttle = 0.6; }, tStop); return { v, cam: 'side', r: sum(st, { 'cap dévié °': f2((v.yaw - y0) * 57.3), 'km/h final': Math.round(v.speed * 3.6), dégâts: f2(v.damage), chocs: evOf(v) }) }; },
+      // fin de tablier sans parapet : chute de 6,5 m par gravité (dégâts), puis quai de 1,3 m (aucun dégât)
+      fall(tStop) {
+        const v = drive(21, 0, S, 30, { y: DECK });
+        const st = run(v, 4, (v) => { v.controls.throttle = 0.2; }, tStop);
+        return { v, cam: 'chase', r: sum(st, { 'saut de y max par image en vol m': +st.maxDyAir.toFixed(3), 'y final': f2(v.pos.y), dégâts: f2(v.damage), zones: Object.fromEntries(Object.entries(v.damageZones).map(([k, x]) => [k, f2(x)])), chocs: evOf(v), y: st.ys }) };
+      },
+      ledge(tStop) {
+        const v = drive(-12, -100, E, 30, { y: 1.3 });
+        const st = run(v, 3, (v) => { v.controls.throttle = 0.2; }, tStop);
+        return { v, cam: 'side', r: sum(st, { 'saut de y max par image en vol m': +st.maxDyAir.toFixed(3), 'y final': f2(v.pos.y), dégâts: f2(v.damage), chocs: evOf(v) }) };
+      },
+      // marche de 1,3 m prise par le bas : infranchissable (plus haute que STEP_UP), jamais de téléportation
+      step(tStop) {
+        const v = drive(18, -100, W, 30);
+        const st = run(v, 3, (v) => { v.controls.throttle = 0.4; }, tStop);
+        return { v, cam: 'side', r: sum(st, { 'x final (le quai commence à x = 0)': f2(v.pos.x), 'y final': f2(v.pos.y), chocs: evOf(v) }) };
+      },
+      // véhicules distants pilotés par setTransform SANS y : ils restent sur leur niveau d'une image à l'autre
+      remote(tStop) {
+        const a = vehicles.spawn('taxi', -185, 0, E, { remote: true }), b = vehicles.spawn('citadine', 0, -44, S, { remote: true }), c = vehicles.spawn('taxi', -185, 40, E, { remote: true });
+        const d = vehicles.spawn('citadine', 30, 0, W, { remote: true, y: DECK });   // créé sur le tablier, puis piloté sans y
+        a.driver = b.driver = c.driver = d.driver = 'ai';
+        const st = { a: [1e9, -1e9, 0], b: [1e9, -1e9, 0], c: [1e9, -1e9, 0], d: [1e9, -1e9, 0] };
+        let xa = -185, zb = -44, xd = 30, pitch = 0; const prev = { a: a.pos.y, b: b.pos.y, c: c.pos.y, d: d.pos.y };
+        for (let i = 0; i < 22 / dt && ctx.time < tStop; i++) {
+          xa += 16 * dt; zb += 3.8 * dt; xd -= 1.2 * dt;
+          a.setTransform(xa, 0, E, 16); b.setTransform(0, zb, S, 3.8); c.setTransform(xa, 40, E, 16); d.setTransform(xd, 0, W, 1.2);
+          ctx.time += dt; vehicles.update(dt);
+          if (xa > -105 && xa < -100) pitch = a.group.rotation.x;
+          for (const [k, v] of [['a', a], ['b', b], ['c', c], ['d', d]]) { const y = v.pos.y; st[k][0] = Math.min(st[k][0], y); st[k][1] = Math.max(st[k][1], y); st[k][2] = Math.max(st[k][2], Math.abs(y - prev[k])); prev[k] = y; }
+        }
+        const fm = (k) => ({ yMin: f2(st[k][0]), yMax: f2(st[k][1]), 'saut max par image': +st[k][2].toFixed(3) });
+        return { v: a, cam: 'side', r: { 'sur le pont (sans y)': fm('a'), 'sous le pont (sans y)': fm('b'), 'dans la trémie (sans y)': fm('c'), 'créé sur le tablier avec opts.y puis sans y': fm('d'), 'tangage sur la rampe (7 % = 4,0°)': f2(pitch * 57.3) } };
+      },
+      // tableau fixe pour les captures : des voitures posées sur chaque niveau (créées avec opts.y)
+      tableau() {
+        vehicles.spawn('porsche_911', -12, -1.6, E, { y: DECK }); vehicles.spawn('taxi', 14, 1.7, W, { y: DECK });   // sur le tablier
+        vehicles.spawn('tesla_model3', -1.8, 1, S); vehicles.spawn('citadine', 1.9, -3, N);                         // dessous, au sol
+        vehicles.spawn('lambo_urus', -100, 0, E, { y: 3 }); vehicles.spawn('porsche_cayenne', 95, 0, E, { y: 3 });  // sur les rampes
+        vehicles.spawn('tesla_cybertruck', -22, 40, E, { y: TR }); vehicles.spawn('lambo_huracan', -52, 40, E, { y: TR }); // au fond de la trémie
+        vehicles.spawn('taxi', -20, 40, S); vehicles.spawn('citadine', -90, 40, E, { y: -4 });                    // sur la dalle, dans la rampe de trémie
+        const pk = vehicles.spawn('tesla_models', 10, 80, E); vehicles.spawn('lambo_aventador', -8, 60, E);            // dans la côte, sur la bosse voisine
+        for (let i = 0; i < 30; i++) { ctx.time += dt; vehicles.update(dt); }
+        const r = {}; for (const v of vehicles.list) r[`${v.typeId} (${f2(v.pos.x)}, ${f2(v.pos.z)})`] = `y = ${f2(v.pos.y)}  tangage ${f2(v.group.rotation.x * 57.3)}°`;
+        return { v: pk, cam: 'side', r };
+      },
+      // voie rapide : 130 à 250 km/h en ligne droite, courbe large, changement de file
+      fast(tStop) {
+        const out = {};
+        for (const [tid, kmh] of [['tesla_model3', 130], ['porsche_911', 200], ['lambo_aventador', 250]]) {
+          const v = drive(-3000, 800 + kmh, E, kmh, { id: tid }); const hold = (v) => { v.controls.throttle = v.speed * 3.6 < kmh ? 1 : 0.35; };
+          // ligne droite 4 s : dérive latérale, lacet
+          let zMax = 0, yrMax = 0; const z0 = v.pos.z;
+          run(v, 4, (v) => { hold(v); zMax = Math.max(zMax, Math.abs(v.pos.z - z0)); yrMax = Math.max(yrMax, Math.abs(v.yawRate)); });
+          // courbe large : 30 % de braquage pendant 4 s → rayon, accélération latérale, régularité du lacet
+          const yrs = []; let slipMax = 0, t0 = 0;
+          run(v, 4, (v, t) => { hold(v); v.controls.steer = 0.3; if (t > 1.5) { yrs.push(v.yawRate); slipMax = Math.max(slipMax, v.slip); } });
+          const m = yrs.reduce((a, b) => a + b, 0) / yrs.length, sd = Math.sqrt(yrs.reduce((a, b) => a + (b - m) * (b - m), 0) / yrs.length);
+          const radius = Math.abs(v.speed / m), alat = Math.abs(v.speed * m);
+          // changement de file brusque puis retour : dépassement du lacet, temps de stabilisation
+          let yrPeak = 0, settle = 0, slip2 = 0;
+          run(v, 5, (v, t) => { hold(v); v.controls.steer = t < 0.4 ? 0 : t < 0.9 ? -0.6 : t < 1.4 ? 0.6 : 0; if (t > 1.4) { yrPeak = Math.max(yrPeak, Math.abs(v.yawRate)); if (Math.abs(v.yawRate) > 0.02) settle = t - 1.4; } slip2 = Math.max(slip2, v.slip); });
+          out[`${tid} à ${kmh} km/h`] = { 'ligne droite : dérive latérale m / lacet max rad/s': [f2(zMax), +yrMax.toFixed(4)], 'courbe (braquage 30 %) : rayon m / latéral m/s² / écart-type du lacet / glissement': [Math.round(radius), f2(alat), +sd.toFixed(4), f2(slipMax)], 'changement de file : lacet résiduel max rad/s / stabilisé en s / glissement': [f2(yrPeak), f2(settle), f2(slip2)], 'km/h final': Math.round(v.speed * 3.6), nan: !Number.isFinite(v.pos.x + v.yaw + v.speed) };
+          vehicles.remove(v);
+        }
+        return { v: null, cam: 'side', r: out };
+      },
+    };
+
+    // ------------------------------------------------------------------ exécution
+    const names = which === 'all' ? Object.keys(SC).filter((n) => n !== 'tableau') : [which];
+    const tStop = q.get('t') != null ? +q.get('t') : Infinity;
+    const results = {}; let focus = null, cam = 'side';
+    for (const n of names) {
+      if (!SC[n]) continue;
+      const t0 = ctx.time;
+      const o = SC[n](tStop === Infinity ? Infinity : t0 + tStop);
+      results[n] = o.r; if (o.v) { focus = o.v; cam = o.cam; }
+      if (which === 'all') for (const v of [...vehicles.list]) vehicles.remove(v);      // chaque scénario repart d'une scène vide
+    }
+    window.__levels = results;
+    document.getElementById('lab').textContent = `banc niveaux — ${which}${tStop < Infinity ? ' à t = ' + tStop + ' s' : ''} — ${id}`;
+    document.getElementById('info').textContent = JSON.stringify(results, (k, v) => (k === 'y' ? undefined : v), 1).replace(/[{}"]/g, '').replace(/\n\s*\n/g, '\n');
+    const view = q.get('view') || cam, T = focus ? focus.pos : { x: 0, y: 3, z: 0 };
+    if (which === 'all' || !focus) { camera.position.set(-150, 110, 190); camera.lookAt(0, 0, 0); }
+    else if (view === 'top') { camera.position.set(T.x + 0.01, T.y + 60, T.z); camera.lookAt(T.x, T.y, T.z); }
+    else if (view === 'chase') { const fx = -Math.sin(focus.yaw), fz = -Math.cos(focus.yaw); camera.position.set(T.x - fx * 13 + fz * 5, T.y + 5.5, T.z - fz * 13 - fx * 5); camera.lookAt(T.x, T.y + 0.8, T.z); }
+    else { const fx = -Math.sin(focus.yaw), fz = -Math.cos(focus.yaw); camera.position.set(T.x + fz * 22 + fx * 3, T.y + 5, T.z - fx * 22 + fz * 3); camera.lookAt(T.x, T.y + 1, T.z); }
+    if (q.get('cam')) { const c = q.get('cam').split(',').map(Number); camera.position.set(c[0], c[1], c[2]); camera.lookAt(c[3], c[4], c[5]); }
+    if (q.get('ui') === '0') document.getElementById('info').style.display = 'none';
+    renderer.setAnimationLoop(() => renderer.render(scene, camera));
+  </script>
+</body>
+</html>

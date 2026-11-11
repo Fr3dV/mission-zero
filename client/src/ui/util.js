@@ -73,10 +73,11 @@ export function fill(el, ...kids) { el.replaceChildren(); append(el, kids); retu
 export const clamp = (v, a, b) => (v < a ? a : v > b ? b : v);
 export const fmtInt = (n) => Math.round(Number(n) || 0).toLocaleString('fr-FR');
 export const zc = (n) => `Ƶ ${fmtInt(n)}`;
+/** Distance lisible : mètres (arrondis à 10) jusqu'à 1 000 m, kilomètres au-delà. */
 export function fmtDist(m) {
   if (!isFinite(m)) return '';
-  if (m < 950) return `${Math.max(0, Math.round(m / 10) * 10)} m`;
-  return `${(m / 1000).toLocaleString('fr-FR', { minimumFractionDigits: 1, maximumFractionDigits: 1 })} km`;
+  if (m < 995) return `${Math.max(0, Math.round(m / 10) * 10)}\u00a0m`;
+  return `${(m / 1000).toLocaleString('fr-FR', { minimumFractionDigits: m >= 99950 ? 0 : 1, maximumFractionDigits: m >= 99950 ? 0 : 1 })}\u00a0km`;
 }
 export function fmtClock(sec) {
   sec = Math.max(0, Math.ceil(sec));

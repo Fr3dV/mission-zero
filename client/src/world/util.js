@@ -19,12 +19,35 @@ export const clamp = (v, a, b) => (v < a ? a : v > b ? b : v);
 export const lerp = (a, b, t) => a + (b - a) * t;
 export const tileKey = (x, z, size = TILE) => (Math.floor(x / size) + 512) * 1024 + (Math.floor(z / size) + 512);
 export const tileOrigin = (key) => ({ x: (Math.floor(key / 1024) - 512) * TILE, z: ((key % 1024) - 512) * TILE });
+/** Clé d'une tuile (TILE m) à partir de ses indices entiers. */
+export const tileKeyI = (ix, iz) => (ix + 512) * 1024 + iz + 512;
+/** Distance d'un point au rectangle d'une tuile (0 à l'intérieur). */
+export function tileDist(ix, iz, x, z, size = TILE) {
+  const dx = x < ix * size ? ix * size - x : x > (ix + 1) * size ? x - (ix + 1) * size : 0;
+  const dz = z < iz * size ? iz * size - z : z > (iz + 1) * size ? z - (iz + 1) * size : 0;
+  return Math.hypot(dx, dz);
+}
+/** Range des éléments par tuile : retourne { start (Int32Array CSR), items (Int32Array), cellOf(ix, iz) } sur une grille bornée. */
+export function bucketByTile(n, xzOf, size = TILE) {
+  let x0 = Infinity, x1 = -Infinity, z0 = Infinity, z1 = -Infinity;
+  const p = [0, 0];
+  for (let i = 0; i < n; i++) { xzOf(i, p); if (p[0] < x0) x0 = p[0]; if (p[0] > x1) x1 = p[0]; if (p[1] < z0) z0 = p[1]; if (p[1] > z1) z1 = p[1]; }
+  if (!n) { x0 = z0 = 0; x1 = z1 = 1; }
+  const gx0 = Math.floor(x0 / size), gz0 = Math.floor(z0 / size), gw = Math.floor(x1 / size) - gx0 + 1, gh = Math.floor(z1 / size) - gz0 + 1;
+  const start = new Int32Array(gw * gh + 1), cell = new Int32Array(n);
+  for (let i = 0; i < n; i++) { xzOf(i, p); const c = (Math.floor(p[1] / size) - gz0) * gw + Math.floor(p[0] / size) - gx0; cell[i] = c; start[c + 1]++; }
+  for (let c = 0; c < gw * gh; c++) start[c + 1] += start[c];
+  const items = new Int32Array(n), fill = start.slice(0, gw * gh);
+  for (let i = 0; i < n; i++) items[fill[cell[i]]++] = i;
+  return { start, items, gx0, gz0, gw, gh, range(ix, iz) { const cx = ix - gx0, cz = iz - gz0; if (cx < 0 || cz < 0 || cx >= gw || cz >= gh) return null; const c = cz * gw + cx; return start[c + 1] > start[c] ? [start[c], start[c + 1]] : null; } };
+}
+
 
 /** Réglages par niveau de qualité. */
 export function qualityPreset(q) {
-  if (q === 'low') return { texSize: 256, maskSize: 1024, viewDist: 1300, detailDist: 250, treeDist: 500, treeNear: 90, lampDist: 400, propDist: 300, treeDensity: 0.5, lampStep: 44, aniso: 2, chimneys: false, shadows: false, relief: false, detailLod: [-2, -1] };
-  if (q === 'medium') return { texSize: 512, maskSize: 2048, viewDist: 2600, detailDist: 450, treeDist: 900, treeNear: 140, lampDist: 650, propDist: 450, treeDensity: 0.8, lampStep: 34, aniso: 4, chimneys: true, shadows: true, relief: true, detailLod: [60, 85] };
-  return { texSize: 512, maskSize: 4096, viewDist: 9000, detailDist: 700, treeDist: 1500, treeNear: 220, lampDist: 1000, propDist: 700, treeDensity: 1, lampStep: 30, aniso: 8, chimneys: true, shadows: true, relief: true, detailLod: [100, 130] };
+  if (q === 'low') return { texSize: 256, maskSize: 1024, viewDist: 1300, detailDist: 250, treeDist: 500, treeNear: 90, lampDist: 400, propDist: 300, treeDensity: 0.5, lampStep: 44, aniso: 2, chimneys: false, shadows: false, relief: false, detailLod: [-2, -1], budgetMs: 3 };
+  if (q === 'medium') return { texSize: 512, maskSize: 2048, viewDist: 2600, detailDist: 450, treeDist: 900, treeNear: 140, lampDist: 650, propDist: 450, treeDensity: 0.8, lampStep: 34, aniso: 4, chimneys: true, shadows: true, relief: true, detailLod: [60, 85], budgetMs: 4 };
+  return { texSize: 512, maskSize: 4096, viewDist: 9000, detailDist: 700, treeDist: 1500, treeNear: 220, lampDist: 1000, propDist: 700, treeDensity: 1, lampStep: 30, aniso: 8, chimneys: true, shadows: true, relief: true, detailLod: [100, 130], budgetMs: 4.5 };
 }
 
 /**

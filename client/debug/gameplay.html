@@ -1,0 +1,146 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8" />
+  <title>Mission Zéro — banc d'essai gameplay</title>
+  <link rel="icon" href="data:," />
+  <link rel="stylesheet" href="/src/ui/ui.css" />
+  <style>html,body{margin:0;height:100%;overflow:hidden;background:#0b0e14;font-family:system-ui,sans-serif}#game{position:fixed;inset:0;width:100%;height:100%;display:block}#ui-root{position:fixed;inset:0;pointer-events:none}</style>
+  <script type="importmap">
+  { "imports": { "three": "/vendor/three/build/three.module.js", "three/addons/": "/vendor/three/examples/jsm/", "@shared/": "/shared/" } }
+  </script>
+</head>
+<body>
+  <canvas id="game"></canvas>
+  <div id="ui-root"></div>
+  <!--
+    Banc d'essai du module gameplay (agent « gameplay »).
+    Même contexte que client/src/main.js, mêmes paramètres d'URL (?city=, ?autostart=1, ?tp=, ?name=, ?room=),
+    mais chaque module est importé dynamiquement : s'il ne se charge pas (réécriture en cours par un autre agent),
+    ou si on le demande avec ?stub=world,env,monuments,traffic, il est remplacé par un bouchon minimal.
+    Le bouchon du monde dessine les axes des chaussées (colorés par élévation) : pratique pour vérifier que
+    marqueurs, voitures et itinéraires tombent bien sur les routes, ponts compris.
+  -->
+  <script type="module">
+    import * as THREE from 'three';
+    import { bus } from '/src/core/bus.js';
+    import { store } from '/src/core/store.js';
+    import { collision } from '/src/core/collision.js';
+    import { heightAt, baseHeightAt, WATER_LEVEL, setHeightmap } from '@shared/terrain.js';
+    import { CITY, CITIES } from '@shared/cities.js';
+    import { LANDMARKS, LANDMARK_BY_ID } from '@shared/landmarks.js';
+    import { BOUNDS } from '@shared/geo.js';
+    import { createRoadIndex } from '/src/gameplay/gps.js';
+
+    const params = new URLSearchParams(location.search);
+    const forced = new Set((params.get('stub') || '').split(',').filter(Boolean));
+    const canvas = document.getElementById('game');
+    const renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
+    renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+    renderer.setSize(innerWidth, innerHeight);
+    const scene = new THREE.Scene();
+    const camera = new THREE.PerspectiveCamera(60, innerWidth / innerHeight, 0.3, 9000);
+    const loadJSON = async (url) => { const r = await fetch(url); if (!r.ok) throw new Error(url + ' ' + r.status); return r.json(); };
+
+    const ctx = {
+      THREE, renderer, scene, camera, canvas, bus, store, collision, params,
+      uiRoot: document.getElementById('ui-root'),
+      heightAt, WATER_LEVEL, LANDMARKS, LANDMARK_BY_ID, BOUNDS, city: CITY, cities: CITIES,
+      quality: params.get('quality') || 'medium', worldData: null, time: 0, fps: 60, stubs: [],
+    };
+    window.__game = ctx;
+
+    // ---- bouchons ----
+    const STUBS = {
+      env(ctx) {
+        scene.background = new THREE.Color(0x9fc4e8);
+        scene.add(new THREE.HemisphereLight(0xffffff, 0x556655, 1.6));
+        const sun = new THREE.DirectionalLight(0xffffff, 1.4); sun.position.set(300, 600, 200); scene.add(sun);
+        store.timeOfDay = +(params.get('time') || 14);
+        return { sun, update() {}, render() { renderer.render(scene, camera); }, isNight: () => false, setTimeOfDay(h) { store.timeOfDay = h; } };
+      },
+      world(ctx) {
+        const wd = ctx.worldData, roads = createRoadIndex(wd);
+        const g = new THREE.Mesh(new THREE.PlaneGeometry(BOUNDS.maxX - BOUNDS.minX + 2000, BOUNDS.maxZ - BOUNDS.minZ + 2000), new THREE.MeshStandardMaterial({ color: 0x8a9484 }));
+        g.rotation.x = -Math.PI / 2; g.position.set((BOUNDS.minX + BOUNDS.maxX) / 2, -0.06, (BOUNDS.minZ + BOUNDS.maxZ) / 2); scene.add(g);
+        // axes des chaussées : gris = rue, noir = voie rapide, bleu = en élévation, rouge = en tranchée, vert = piéton / desserte
+        const pos = [], col = [], c = new THREE.Color();
+        for (const r of wd.roads) {
+          for (let i = 0; i < r.points.length - 1; i++) {
+            const e0 = r.ele ? r.ele[i] : 0, e1 = r.ele ? r.ele[i + 1] : 0;
+            const [ax, az] = r.points[i], [bx, bz] = r.points[i + 1];
+            pos.push(ax, baseHeightAt(ax, az) + e0 + 0.05, az, bx, baseHeightAt(bx, bz) + e1 + 0.05, bz);
+            c.set(e0 > 0.5 ? 0x2a6fdb : e0 < -0.5 ? 0xc0392b : r.kind === 'pedestrian' || r.service ? 0x3d8b4f : r.kind === 'motorway' || r.kind === 'trunk' ? 0x111111 : 0x4a4f57);
+            col.push(c.r, c.g, c.b, c.r, c.g, c.b);
+          }
+        }
+        const geo = new THREE.BufferGeometry();
+        geo.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+        geo.setAttribute('color', new THREE.Float32BufferAttribute(col, 3));
+        const lines = new THREE.LineSegments(geo, new THREE.LineBasicMaterial({ vertexColors: true })); lines.frustumCulled = false; scene.add(lines);
+        const point = (n) => (n ? { x: n.x, z: n.z, yaw: n.yaw, road: n.road, y: baseHeightAt(n.x, n.z) + (n.ele || 0), dist: n.dist } : null);
+        return {
+          update() {}, roadAt: () => null,
+          nearestRoadPoint: (x, z, y) => point(roads.nearest(x, z, 3000, (r) => r.kind !== 'pedestrian' && !r.service, Number.isFinite(y) ? y - baseHeightAt(x, z) : 0)),
+          randomRoadPoint: () => point(roads.nearest(BOUNDS.minX + Math.random() * (BOUNDS.maxX - BOUNDS.minX), BOUNDS.minZ + Math.random() * (BOUNDS.maxZ - BOUNDS.minZ), 3000)),
+        };
+      },
+      monuments(ctx) {
+        const mat = new THREE.MeshStandardMaterial({ color: 0xc98b6b });
+        for (const l of LANDMARKS) {
+          if (l.hidden) continue;
+          const m = new THREE.Mesh(new THREE.BoxGeometry(l.radius * 0.7, 18, l.radius * 0.5), mat);
+          m.position.set(l.x, heightAt(l.x, l.z) + 9, l.z); m.rotation.y = l.rot || 0; scene.add(m);
+        }
+        return { update() {} };
+      },
+      traffic: () => ({ update() {}, setDensity() {} }),
+      audio: () => ({ update() {}, play() {} }),
+    };
+
+    const ORDER = ['env', 'world', 'monuments', 'vehicles', 'player', 'traffic', 'gameplay', 'net', 'ui', 'audio'];
+    const FACTORY = { env: 'createEnvironment', world: 'createWorld', monuments: 'createMonuments', vehicles: 'createVehicles', player: 'createPlayer', traffic: 'createTraffic', gameplay: 'createGameplay', net: 'createNet', ui: 'createUI', audio: 'createAudio' };
+    const UPDATE = ['player', 'vehicles', 'traffic', 'gameplay', 'net', 'world', 'monuments', 'env', 'audio', 'ui'];
+
+    async function boot() {
+      const f = CITY.files;
+      let data = null;
+      try { data = await loadJSON(f.roads); } catch { console.warn(`[${CITY.id}] ${f.roads} absent, paris.sample.json`); data = await loadJSON('/shared/world/paris.sample.json'); }
+      data.buildings = null; data.pois = null; data.buildingsMeta = null; data.buildingsMetaBin = null; data.terrain = null;
+      if (f.terrain) { try { data.terrain = await loadJSON(f.terrain); setHeightmap(data.terrain); } catch { /* relief plat */ } }
+      ctx.worldData = data;
+      for (const name of ORDER) {
+        let create = null;
+        if (!forced.has(name)) {
+          try { create = (await import(`/src/${name}/index.js`))[FACTORY[name]]; }
+          catch (e) { console.warn(`[banc] module ${name} indisponible (${String(e.message).slice(0, 120)})`); }
+        }
+        try { if (create) ctx[name] = (await create(ctx)) || {}; }
+        catch (e) { console.warn(`[banc] init ${name} : ${String(e.message).slice(0, 160)}`); create = null; }
+        if (!create) {
+          if (!STUBS[name]) throw new Error(`module ${name} indisponible et sans bouchon`);
+          ctx[name] = STUBS[name](ctx); ctx.stubs.push(name);
+        }
+      }
+      const tp = params.get('tp');
+      if (tp && LANDMARK_BY_ID[tp]) {
+        const l = LANDMARK_BY_ID[tp];
+        const r = ctx.world.nearestRoadPoint?.(l.x + l.radius + 25, l.z + l.radius + 25);
+        ctx.player.teleport?.(r?.x ?? l.x + l.radius + 25, r?.z ?? l.z + l.radius + 25, Math.atan2(-(l.x - (r?.x ?? l.x)), -(l.z - (r?.z ?? l.z - 1))), r?.y);
+      }
+      bus.emit('boot:done');
+      if (params.get('autostart')) bus.emit('intent:login', { name: params.get('name') || 'Test', room: params.get('room') || CITY.id });
+      addEventListener('resize', () => { renderer.setSize(innerWidth, innerHeight); camera.aspect = innerWidth / innerHeight; camera.updateProjectionMatrix(); });
+      let last = performance.now(), acc = 0, frames = 0;
+      renderer.setAnimationLoop((now) => {
+        const dt = Math.min((now - last) / 1000, 0.05); last = now;
+        ctx.time += dt; acc += dt; frames++;
+        if (acc >= 0.5) { ctx.fps = frames / acc; acc = 0; frames = 0; }
+        for (const name of UPDATE) { try { ctx[name].update?.(dt); } catch (e) { if (!ctx[name]._err) { ctx[name]._err = true; console.error(`[update] ${name}`, e); } } }
+        if (ctx.env.render) ctx.env.render(dt); else renderer.render(scene, camera);
+      });
+    }
+    boot();
+  </script>
+</body>
+</html>
