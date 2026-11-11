@@ -32,13 +32,15 @@ export function initDamage(v) {
 export function updateMechanics(v) {
   const z = v.damageZones, d = v.dmg, eng = REAR_ENGINE[v.typeId] ? z.rear : z.front;
   const worst = Math.max(...d.corners);
+  // Réglage voulu par le commanditaire : les dégâts se VOIENT mais la voiture reste toujours fonctionnelle.
+  // Les pénalités sont donc légères et bornées, et le moteur ne cale jamais.
   v.phys.fxm = {
-    power: v.wrecked ? 0 : clamp(1 - 0.45 * eng * eng - 0.15 * v.damage, 0.3, 1),
-    brake: clamp(1 - 0.45 * v.damage, 0.5, 1),
-    grip: clamp(1 - 0.28 * clamp((worst - 0.45) * 2, 0, 1), 0.7, 1),
-    steerBias: clamp(d.steerBias, -0.07, 0.07),
-    wobble: clamp((worst - 0.4) * 1.6, 0, 1),
-    drag: worst > 0.85 ? 1.6 : 0,     // pneu crevé / roue qui frotte
+    power: clamp(1 - 0.12 * eng * eng - 0.05 * v.damage, 0.85, 1),
+    brake: clamp(1 - 0.1 * v.damage, 0.9, 1),
+    grip: clamp(1 - 0.08 * clamp((worst - 0.45) * 2, 0, 1), 0.92, 1),
+    steerBias: clamp(d.steerBias * 0.25, -0.015, 0.015),
+    wobble: clamp((worst - 0.6) * 0.5, 0, 0.2),
+    drag: 0,
     engine: eng,
   };
 }
@@ -242,7 +244,7 @@ export function applyDamage(v, hit) {
     if (zone === 'front' || zone === 'rear') d.corners[fi + (1 - si)] = clamp(d.corners[fi + (1 - si)] + e * (1 - off) * 0.5, 0, 1);
     if (lz < 0 && e > 0.08 && !hit.soft) d.steerBias += (lx < 0 ? -1 : 1) * e * 0.07 * (0.3 + off); // train avant faussé : tire du côté touché
   }
-  if (v.damage >= 1 && !v.wrecked) { v.wrecked = true; }
+  // plus d'épave : même à dégâts maximum la voiture roule (v.wrecked reste false)
 
   // ---- déformation locale
   const depth = Math.min(0.6, 0.42 * Math.pow(e, 0.6)), radius = 0.38 + 0.5 * Math.sqrt(Math.min(e, 4));
