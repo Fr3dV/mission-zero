@@ -1,0 +1,205 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8" />
+  <title>Mission Zéro — debug trafic (vue de dessus)</title>
+  <style>
+    html,body{margin:0;height:100%;overflow:hidden;background:#0b0e14;font-family:ui-monospace,Menlo,monospace}
+    #game{position:fixed;inset:0;width:100%;height:100%;display:block}
+    #hud{position:fixed;left:8px;top:8px;color:#e8f0ff;font-size:12px;line-height:1.45;background:rgba(0,0,0,.55);padding:6px 9px;border-radius:6px;white-space:pre}
+  </style>
+  <script type="importmap">
+  { "imports": { "three": "/vendor/three/build/three.module.js", "three/addons/": "/vendor/three/examples/jsm/", "@shared/": "/shared/" } }
+  </script>
+</head>
+<body>
+  <canvas id="game"></canvas>
+  <div id="hud"></div>
+  <script type="module">
+    // Page de test isolée du module trafic. Caméra aérienne qui suit un point (flèches / ZQSD pour le déplacer,
+    // +/- pour l'altitude). Lignes de debug : axe des arêtes (jaune), voies + chevrons de sens (cyan),
+    // trottoirs (vert).
+    // Paramètres : x, z | tp=<monument> ; h=<altitude> ; speed=<accélération du temps> ; quality ; traffic=<densité> ;
+    //   time=<heure> (émet env:time) ; obstacle=1 (voiture « joueur » arrêtée sur la chaussée, pour tester freinage et klaxon) ;
+    //   sample=1 (force paris.sample.json) ; lines=0 (masque les lignes) ; ring=min,max (anneau d'apparition des voitures) ;
+    //   boxes=1 (véhicules de repli en boîtes).
+    import * as THREE from 'three';
+    import { bus } from '/src/core/bus.js';
+    import { store } from '/src/core/store.js';
+    import { collision } from '/src/core/collision.js';
+    import { heightAt, WATER_LEVEL } from '@shared/terrain.js';
+    import { LANDMARKS, LANDMARK_BY_ID } from '@shared/landmarks.js';
+    import { BOUNDS } from '@shared/geo.js';
+    import { VEHICLE_BY_ID } from '@shared/catalog.js';
+    import { createTraffic } from '/src/traffic/index.js';
+
+    const params = new URLSearchParams(location.search);
+    const num = (k, d) => (params.get(k) != null && isFinite(+params.get(k)) ? +params.get(k) : d);
+    const canvas = document.getElementById('game'), hud = document.getElementById('hud');
+    const renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
+    renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+    renderer.setSize(innerWidth, innerHeight);
+    const scene = new THREE.Scene();
+    scene.background = new THREE.Color(0x10141c);
+    scene.add(new THREE.HemisphereLight(0xffffff, 0x556070, 1.6));
+    const sun = new THREE.DirectionalLight(0xffffff, 1.6); sun.position.set(200, 500, 100); scene.add(sun);
+    const camera = new THREE.PerspectiveCamera(60, innerWidth / innerHeight, 1, 9000);
+
+    async function loadJSON(url) { const r = await fetch(url); if (!r.ok) throw new Error(url + ' ' + r.status); return r.json(); }
+    let worldData;
+    try { if (params.get('sample')) throw 0; worldData = await loadJSON('/shared/world/paris.json'); }
+    catch { worldData = await loadJSON('/shared/world/paris.sample.json'); }
+
+    const ctx = {
+      THREE, renderer, scene, camera, canvas, bus, store, collision, params, uiRoot: document.body,
+      heightAt, WATER_LEVEL, LANDMARKS, LANDMARK_BY_ID, BOUNDS, quality: params.get('quality') || 'high', worldData, time: 0, fps: 60,
+    };
+    window.__game = ctx;
+
+    // Module véhicules réel si disponible, sinon de simples boîtes (les autres modules sont en cours d'écriture).
+    try {
+      if (params.get('boxes')) throw new Error('boîtes demandées');
+      ctx.vehicles = await (await import('/src/vehicles/index.js')).createVehicles(ctx);
+      if (!ctx.vehicles.spawn) throw new Error('contrat incomplet');
+    } catch (e) {
+      console.warn('véhicules de repli (boîtes) :', e.message);
+      const list = [];
+      ctx.vehicles = {
+        list,
+        spawn(typeId, x, z, yaw = 0, opts = {}) {
+          const spec = VEHICLE_BY_ID[typeId] || VEHICLE_BY_ID.citadine, color = opts.color || spec.colors[0];
+          const group = new THREE.Group();
+          const body = new THREE.Mesh(new THREE.BoxGeometry(spec.width, spec.height * 0.6, spec.length), new THREE.MeshStandardMaterial({ color }));
+          body.position.y = spec.height * 0.5; group.add(body);
+          const nose = new THREE.Mesh(new THREE.BoxGeometry(spec.width * 0.8, 0.2, 0.6), new THREE.MeshBasicMaterial({ color: 0xffffff }));
+          nose.position.set(0, spec.height * 0.85, -spec.length / 2 + 0.4); group.add(nose);
+          const v = { id: 'v' + list.length, typeId: spec.id, spec, color, group, pos: { x, y: 0, z }, yaw, speed: 0, driver: null, remote: !!opts.remote, controls: {},
+            setControls() {}, update() {},
+            setTransform(nx, nz, ny, sp = 0) { v.pos.x = nx; v.pos.z = nz; v.yaw = ny; v.speed = sp; v.pos.y = heightAt(nx, nz); group.position.set(nx, v.pos.y, nz); group.rotation.y = ny; } };
+          v.setTransform(x, z, yaw, 0); scene.add(group); list.push(v); return v;
+        },
+        remove(v) { scene.remove(v.group); const i = list.indexOf(v); if (i >= 0) list.splice(i, 1); },
+        update() {},
+      };
+    }
+
+    // Point suivi par la caméra = faux joueur à pied.
+    const tp = LANDMARK_BY_ID[params.get('tp')];
+    const player = { pos: { x: num('x', tp ? tp.x + tp.radius + 25 : 0), y: 0, z: num('z', tp ? tp.z + tp.radius + 25 : 0) }, yaw: 0, speed: 0, mode: 'foot', vehicle: null, enabled: true };
+    ctx.player = player;
+    let camH = num('h', 150);
+    const timeScale = num('speed', 1);
+
+    // ---- décor minimal : sol + chaussées
+    const ground = new THREE.Mesh(new THREE.PlaneGeometry(20000, 20000), new THREE.MeshBasicMaterial({ color: 0x1b222c }));
+    ground.rotation.x = -Math.PI / 2; ground.position.y = -0.1; scene.add(ground);
+
+    const traffic = (ctx.traffic = createTraffic(ctx));
+    const G = traffic.graph;
+    // ring=min,max : anneau d'apparition resserré (et test « hors champ » désactivé) pour tout voir de près
+    if (params.get('ring') && traffic._debug) {
+      const [a, b] = params.get('ring').split(',').map(Number), T = traffic._debug.T;
+      T.SPAWN_MIN = a; T.SPAWN_MAX = b; T.DESPAWN = b + 40; T.PED_RADIUS = Math.min(150, b); T.inView = () => false;
+    }
+
+    {
+      const pos = [], idx = [];
+      for (let e = 0; e < G.edgeCount; e++) {
+        const h = 2 * e, w = G.hWidth[h] / 2, len = G.hLen[h], b = pos.length / 3;
+        for (const [s, o] of [[0, -w], [0, w], [len, w], [len, -w]]) pos.push(G.pointX(h, s, o), 0, G.pointZ(h, s, o));
+        idx.push(b, b + 1, b + 2, b, b + 2, b + 3);
+      }
+      const g = new THREE.BufferGeometry();
+      g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3)); g.setIndex(idx);
+      scene.add(new THREE.Mesh(g, new THREE.MeshBasicMaterial({ color: 0x39404b, side: THREE.DoubleSide })));
+      // disques aux nœuds pour boucher les coins
+      const disc = new THREE.CircleGeometry(1, 12); disc.rotateX(-Math.PI / 2);
+      const inst = new THREE.InstancedMesh(disc, new THREE.MeshBasicMaterial({ color: 0x39404b }), G.nodeCount);
+      const m = new THREE.Matrix4();
+      for (let i = 0; i < G.nodeCount; i++) {
+        let r = 0;
+        for (let k = G.outStart[i]; k < G.outStart[i + 1]; k++) r = Math.max(r, G.hWidth[G.outList[k]] / 2);
+        m.makeScale(r, 1, r); m.setPosition(G.nx[i], 0.005, G.nz[i]); inst.setMatrixAt(i, m);
+      }
+      scene.add(inst);
+    }
+    if (params.get('lines') !== '0') {
+      const axis = [], lanes = [], walks = [];
+      const seg = (arr, h, s0, o0, s1, o1, y) => arr.push(G.pointX(h, s0, o0), y, G.pointZ(h, s0, o0), G.pointX(h, s1, o1), y, G.pointZ(h, s1, o1));
+      for (let h = 0; h < G.hCount; h++) {
+        const len = G.hLen[h];
+        if (!(h & 1)) seg(axis, h, 0, 0, len, 0, 0.05);
+        seg(walks, h, 0, G.hWalk[h], len, G.hWalk[h], 0.05);
+        if (!G.hDrive[h]) continue;
+        for (let i = 0; i < G.hLanes[h]; i++) {
+          const o = G.hOff0[h] + i * G.hLaneW[h], mid = len / 2;
+          seg(lanes, h, 0, o, len, o, 0.06);
+          if (len > 6) { seg(lanes, h, mid - 1.5, o - 0.9, mid, o, 0.06); seg(lanes, h, mid - 1.5, o + 0.9, mid, o, 0.06); } // chevron = sens
+        }
+      }
+      const add = (arr, color) => { const g = new THREE.BufferGeometry(); g.setAttribute('position', new THREE.Float32BufferAttribute(arr, 3)); scene.add(new THREE.LineSegments(g, new THREE.LineBasicMaterial({ color }))); };
+      add(axis, 0xd8b021); add(lanes, 0x2fb7c9); add(walks, 0x3fa34d);
+      // carrefours à verrou
+      const jg = new THREE.RingGeometry(0.85, 1, 20); jg.rotateX(-Math.PI / 2);
+      let nJ = 0; for (let i = 0; i < G.nodeCount; i++) if (G.nodeJunction[i]) nJ++;
+      const rings = new THREE.InstancedMesh(jg, new THREE.MeshBasicMaterial({ color: 0xc94f7c }), Math.max(1, nJ));
+      const m = new THREE.Matrix4(); let k = 0;
+      for (let i = 0; i < G.nodeCount; i++) if (G.nodeJunction[i]) { const r = G.nodeRadius[i] + 1.5; m.makeScale(r, 1, r); m.setPosition(G.nx[i], 0.07, G.nz[i]); rings.setMatrixAt(k++, m); }
+      rings.count = k; scene.add(rings);
+    }
+    // repère du point suivi
+    const marker = new THREE.Mesh(new THREE.CylinderGeometry(0.5, 0.5, 2, 10), new THREE.MeshBasicMaterial({ color: 0xff3355 }));
+    scene.add(marker);
+
+    if (params.get('time') != null) bus.emit('env:time', { hour: num('time', 12), night: num('time', 12) < 7 || num('time', 12) > 20 });
+    let honks = 0; bus.on('traffic:honk', () => honks++);
+    window.__honks = () => honks;
+
+    // voiture « joueur » arrêtée en travers de la voie la plus proche (test freinage / klaxon)
+    if (params.get('obstacle')) {
+      const o = { e: 0, s: 0, x: 0, z: 0 };
+      for (let i = 0; i < 200 && !G.randomEdgeNear(player.pos.x, player.pos.z, 0, 60, o, 8); i++);
+      let h = 2 * o.e; if (!G.hDrive[h]) h ^= 1;
+      const s = h & 1 ? G.hLen[h] - o.s : o.s, off = G.hOff0[h];
+      const v = ctx.vehicles.spawn('porsche_911', G.pointX(h, s, off), G.pointZ(h, s, off), G.yawOf(G.hUx[h], G.hUz[h]), {});
+      v.driver = 'local'; player.vehicle = v; player.mode = 'vehicle';
+      player.pos.x = v.pos.x; player.pos.z = v.pos.z;
+    }
+
+    const keys = new Set();
+    addEventListener('keydown', (e) => keys.add(e.code)); addEventListener('keyup', (e) => keys.delete(e.code));
+    addEventListener('resize', () => { renderer.setSize(innerWidth, innerHeight); camera.aspect = innerWidth / innerHeight; camera.updateProjectionMatrix(); });
+
+    let last = performance.now(), acc = 0, frames = 0;
+    renderer.setAnimationLoop((now) => {
+      const real = Math.min((now - last) / 1000, 0.1); last = now;
+      acc += real; frames++; if (acc >= 0.5) { ctx.fps = frames / acc; acc = 0; frames = 0; }
+      const mv = camH * 0.9 * real;
+      if (!player.vehicle) {
+        if (keys.has('ArrowUp') || keys.has('KeyW')) player.pos.z -= mv;
+        if (keys.has('ArrowDown') || keys.has('KeyS')) player.pos.z += mv;
+        if (keys.has('ArrowLeft') || keys.has('KeyA')) player.pos.x -= mv;
+        if (keys.has('ArrowRight') || keys.has('KeyD')) player.pos.x += mv;
+      }
+      if (keys.has('Equal') || keys.has('NumpadAdd')) camH = Math.max(20, camH * (1 - real));
+      if (keys.has('Minus') || keys.has('NumpadSubtract')) camH = Math.min(3000, camH * (1 + real));
+      camera.position.set(player.pos.x, camH, player.pos.z + 0.01);
+      camera.up.set(0, 0, -1); camera.lookAt(player.pos.x, 0, player.pos.z);
+      camera.updateMatrixWorld();
+      marker.position.set(player.pos.x, 1, player.pos.z); marker.visible = !player.vehicle;
+      // pas de simulation fixes (≤ 1/30 s), accélérés par `speed`
+      let left = Math.min(real, 0.05) * timeScale;
+      while (left > 1e-5) {
+        const dt = Math.min(left, 1 / 30); left -= dt; ctx.time += dt;
+        ctx.vehicles.update?.(dt);
+        traffic.update(dt);
+      }
+      const s = traffic.stats;
+      hud.textContent = `trafic — ${worldData.meta?.source || '?'}  nœuds ${G.nodeCount}  arêtes ${G.edgeCount}  orienté: ${G.directed}\n` +
+        `voitures ${s.cars}  garées ${s.parked}  piétons ${s.peds}  klaxons ${honks}\n` +
+        `update ${s.ms.toFixed(2)} ms (max ${s.msMax.toFixed(1)})  fps ${ctx.fps.toFixed(0)}  t=${ctx.time.toFixed(0)} s  x=${player.pos.x.toFixed(0)} z=${player.pos.z.toFixed(0)} h=${camH.toFixed(0)}`;
+      renderer.render(scene, camera);
+    });
+  </script>
+</body>
+</html>

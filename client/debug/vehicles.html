@@ -1,0 +1,107 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8" />
+  <title>Mission Zéro — showroom véhicules</title>
+  <link rel="icon" href="data:," />
+  <style>
+    html,body{margin:0;height:100%;overflow:hidden;background:#15171b;font-family:system-ui,sans-serif;color:#dde}
+    canvas{position:fixed;inset:0;width:100%;height:100%;display:block}
+    #bar{position:fixed;left:10px;top:10px;z-index:2;font-size:12px;background:#000a;padding:8px 10px;border-radius:8px;max-width:70vw;line-height:1.7}
+    #bar a{color:#9cf;margin-right:8px;text-decoration:none}
+    #info{position:fixed;left:10px;bottom:10px;z-index:2;font-size:12px;background:#000a;padding:6px 10px;border-radius:8px}
+  </style>
+  <script type="importmap">
+  { "imports": { "three": "/vendor/three/build/three.module.js", "three/addons/": "/vendor/three/examples/jsm/", "@shared/": "/shared/" } }
+  </script>
+</head>
+<body>
+  <div id="bar"></div>
+  <div id="info"></div>
+  <canvas id="c"></canvas>
+  <script type="module">
+    // Showroom : ?id=porsche_911 | ?all=1 ; &view=front|side|rear|top|back34|low ; &color=#rrggbb|index ; &night=1 ; &lod=1 ; &lights=1 ; &steer=0.4 ; &ui=0
+    import * as THREE from 'three';
+    import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+    import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
+    import { VEHICLES, VEHICLE_BY_ID } from '@shared/catalog.js';
+    import { createMesh } from '/src/vehicles/models.js';
+
+    const q = new URLSearchParams(location.search);
+    const all = q.get('all') === '1', night = q.get('night') === '1';
+    const id = VEHICLE_BY_ID[q.get('id')] ? q.get('id') : 'porsche_911';
+    const canvas = document.getElementById('c');
+    const renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
+    renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+    renderer.setSize(innerWidth, innerHeight);
+    renderer.toneMapping = THREE.ACESFilmicToneMapping; renderer.toneMappingExposure = night ? 0.5 : 1.0;
+    renderer.shadowMap.enabled = true; renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+    const scene = new THREE.Scene();
+    scene.background = new THREE.Color(night ? 0x05060a : 0x8d949c);
+    const pm = new THREE.PMREMGenerator(renderer);
+    scene.environment = pm.fromScene(new RoomEnvironment(), 0.03).texture;
+    scene.environmentIntensity = night ? 0.12 : 0.9;
+    const camera = new THREE.PerspectiveCamera(32, innerWidth / innerHeight, 0.1, 500);
+    const key = new THREE.DirectionalLight(0xfff4e6, night ? 0.15 : 2.2); key.position.set(6, 10, -5); key.castShadow = true;
+    key.shadow.mapSize.set(2048, 2048); Object.assign(key.shadow.camera, { left: -40, right: 40, top: 12, bottom: -12, near: 1, far: 40 }); key.shadow.bias = -0.0004; key.shadow.normalBias = 0.02;
+    scene.add(key);
+    const ground = new THREE.Mesh(new THREE.PlaneGeometry(200, 200), new THREE.MeshStandardMaterial({ color: night ? 0x1a1b1e : 0x6d7278, roughness: 0.55, metalness: 0.0 }));
+    ground.rotation.x = -Math.PI / 2; ground.receiveShadow = true; scene.add(ground);
+
+    const cars = [];
+    const list = all ? VEHICLES.map((v) => v.id) : [id];
+    const lit = night || q.get('lights') === '1';
+    list.forEach((tid, i) => {
+      const spec = VEHICLE_BY_ID[tid];
+      const cq = q.get('color');
+      const color = cq == null ? spec.colors[0] : /^\d+$/.test(cq) ? spec.colors[+cq % spec.colors.length] : cq;
+      const t0 = performance.now();
+      const g = createMesh(tid, color);
+      g.userData.buildMs = performance.now() - t0;
+      g.position.x = (i - (list.length - 1) / 2) * 3.1;
+      g.userData.setLights(lit ? { head: 1, brake: q.get('brake') === '1' ? 1 : 0, reverse: q.get('reverse') === '1' ? 1 : 0, blinkL: 1, blinkR: 1 } : {});
+      if (q.get('steer')) g.userData.setSteer(+q.get('steer'));
+      if (q.get('lod') === '1') g.userData.setLOD(true);
+      scene.add(g); cars.push(g);
+    });
+
+    const span = all ? list.length * 3.1 : 0;
+    const view = q.get('view') || 'front34';
+    const d = all ? span * 1.05 + 6 : +(q.get("d") || VEHICLE_BY_ID[id].length * 1.32);
+    const VIEWS = {
+      front34: [-0.62 * d, 0.28 * d, -0.78 * d], side: [-d * 1.05, 0.12 * d, 0], rear34: [0.62 * d, 0.28 * d, 0.78 * d], back34: [-0.62 * d, 0.28 * d, 0.78 * d],
+      front: [0, 0.12 * d, -d], rear: [0, 0.12 * d, d], top: [0.001, d * 1.2, 0], low: [-0.55 * d, 0.07 * d, -0.7 * d],
+    };
+    if (all && view === 'front34') camera.position.set(-span * 0.25, 7.5, -span * 0.75 - 4); else camera.position.set(...(VIEWS[view] || VIEWS.front34));
+    const controls = new OrbitControls(camera, canvas);
+    controls.target.set(+(q.get("tx") || 0), +(q.get("ty") || (all ? 0.4 : 0.6)), +(q.get("tz") || 0)); controls.enableDamping = true; controls.update();
+
+    if (q.get('ui') !== '0') {
+      document.getElementById('bar').innerHTML = `<a href="?all=1">tous</a>` + VEHICLES.map((v) => `<a href="?id=${v.id}">${v.name}</a>`).join('') +
+        '<br>' + ['front34', 'side', 'rear34', 'front', 'rear', 'top', 'low'].map((v) => `<a href="?id=${id}&view=${v}">${v}</a>`).join('') + `<a href="?id=${id}&night=1">nuit</a><a href="?id=${id}&lod=1">LOD</a>`;
+    } else document.getElementById('bar').style.display = 'none';
+    const info = document.getElementById('info');
+    window.__show = { scene, camera, cars, renderer };
+    addEventListener('resize', () => { renderer.setSize(innerWidth, innerHeight); camera.aspect = innerWidth / innerHeight; camera.updateProjectionMatrix(); });
+    let t = 0;
+    renderer.setAnimationLoop(() => {
+      t += 1 / 60; controls.update();
+      if (q.get('spin') === '1') for (const c of cars) c.userData.spinWheels(0.1);
+      if (q.get('sheet') === '1') {
+        const W = innerWidth, H = innerHeight, names = ['front34', 'side', 'rear34', q.get('v4') || 'front'];
+        renderer.setScissorTest(true);
+        names.forEach((n, i) => {
+          const x = (i % 2) * W / 2, y = (1 - Math.floor(i / 2)) * H / 2;
+          renderer.setViewport(x, y, W / 2, H / 2); renderer.setScissor(x, y, W / 2, H / 2);
+          const v = VIEWS[n]; camera.position.set(v[0], v[1], v[2]); camera.lookAt(0, 0.45, 0); camera.aspect = W / H; camera.updateProjectionMatrix();
+          renderer.render(scene, camera);
+        });
+      } else
+      renderer.render(scene, camera);
+      const r = renderer.info.render;
+      const box = new THREE.Box3().setFromObject(cars[0]); const s = box.getSize(new THREE.Vector3());
+      info.textContent = `${list.length} véhicule(s) — ${r.calls} draw calls — ${r.triangles} triangles — ${cars[0].userData.typeId} : ${s.z.toFixed(2)} × ${s.x.toFixed(2)} × ${s.y.toFixed(2)} m (L×l×h) — construction ${cars[0].userData.buildMs.toFixed(0)} ms`;
+    });
+  </script>
+</body>
+</html>

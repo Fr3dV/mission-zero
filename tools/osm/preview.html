@@ -1,0 +1,48 @@
+<!doctype html>
+<html lang="fr"><head><meta charset="utf-8"><title>Aperçu des données OSM</title>
+<style>html,body{margin:0;background:#e9e5dc}canvas{display:block}</style></head>
+<body><canvas id="c"></canvas>
+<script type="module">
+// Rendu 2D de contrôle de shared/world/paris.json (+ buildings.json). Paramètres : ?cx=&cz=&span= (mètres) pour zoomer.
+import { BOUNDS } from '/shared/geo.js';
+import { LANDMARKS } from '/shared/landmarks.js';
+const q = new URLSearchParams(location.search);
+const W = innerWidth, H = innerHeight;
+const cv = document.getElementById('c'); cv.width = W; cv.height = H;
+const g = cv.getContext('2d');
+const data = await (await fetch('/shared/world/paris.json')).json();
+const bres = await fetch('/shared/world/buildings.json'); const bld = bres.ok ? (await bres.json()).buildings : null;
+const m = 220;
+let x0 = BOUNDS.minX - m, x1 = BOUNDS.maxX + m, z0 = BOUNDS.minZ - m, z1 = BOUNDS.maxZ + m;
+if (q.has('span')) { const cx = +q.get('cx') || 0, cz = +q.get('cz') || 0, s = +q.get('span'); x0 = cx - s / 2; x1 = cx + s / 2; z0 = cz - (s * H / W) / 2; z1 = cz + (s * H / W) / 2; }
+const k = Math.min(W / (x1 - x0), H / (z1 - z0));
+const X = (x) => (x - x0) * k, Z = (z) => (z - z0) * k;
+const poly = (p, fill, stroke) => { g.beginPath(); p.forEach(([x, z], i) => (i ? g.lineTo(X(x), Z(z)) : g.moveTo(X(x), Z(z)))); g.closePath(); if (fill) { g.fillStyle = fill; g.fill(); } if (stroke) { g.strokeStyle = stroke; g.lineWidth = 1; g.stroke(); } };
+for (const p of data.plazas) poly(p.polygon, '#d9cfbd');
+for (const p of data.parks) poly(p.polygon, '#a9d18e');
+for (const p of data.river.polygons) poly(p, '#7fb2e5', '#3d7fc4');
+for (const i of data.river.islands || []) poly(i.polygon, '#f1ecd9', '#b59b5b');
+if (bld) {
+  g.fillStyle = 'rgba(120,100,90,0.55)';
+  for (let i = 0; i < bld.length; i += 6) {
+    const [cx, cz, w, d, rot] = bld.slice(i, i + 5);
+    g.save(); g.translate(X(cx), Z(cz)); g.rotate(-rot * Math.PI / 180); // rotation.y positive = sens antihoraire vu de dessus
+    g.fillRect(-w * k / 2, -d * k / 2, w * k, d * k); g.restore();
+  }
+}
+const inGraph = new Set(data.graph.edges.map((e) => e[2]));
+const col = { avenue: '#d9534f', boulevard: '#e08a1e', street: '#555', quay: '#1f6fb5', pedestrian: '#2aa198' };
+for (const pass of [0, 1]) for (const r of data.roads) {
+  const major = r.kind !== 'street' && r.kind !== 'pedestrian';
+  if ((pass === 1) !== major) continue;
+  g.beginPath(); r.points.forEach(([x, z], i) => (i ? g.lineTo(X(x), Z(z)) : g.moveTo(X(x), Z(z))));
+  g.lineWidth = Math.max(0.6, r.width * k * (q.has('span') ? 1 : 0.6)); g.strokeStyle = col[r.kind] || '#000';
+  if (r.kind !== 'pedestrian' && !inGraph.has(r.id)) g.strokeStyle = '#ff00ff'; // carrossable mais hors graphe
+  g.globalAlpha = r.bridge ? 1 : 0.8; g.stroke(); g.globalAlpha = 1;
+}
+if (q.has('span')) { g.fillStyle = '#000'; for (const [x, z] of data.graph.nodes) g.fillRect(X(x) - 1.5, Z(z) - 1.5, 3, 3); }
+g.strokeStyle = '#000'; g.lineWidth = 1; g.setLineDash([6, 4]); g.strokeRect(X(BOUNDS.minX), Z(BOUNDS.minZ), (BOUNDS.maxX - BOUNDS.minX) * k, (BOUNDS.maxZ - BOUNDS.minZ) * k); g.setLineDash([]);
+g.font = 'bold 13px sans-serif';
+for (const l of LANDMARKS) { g.beginPath(); g.arc(X(l.x), Z(l.z), l.radius * k, 0, 7); g.strokeStyle = '#7b1fa2'; g.lineWidth = 2; g.stroke(); g.fillStyle = '#4a0072'; g.fillText(l.name, X(l.x) + l.radius * k + 3, Z(l.z) + 4); }
+document.title = 'ok';
+</script></body></html>

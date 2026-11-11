@@ -1,6 +1,6 @@
 // Capture d'écran headless du jeu (utilise le Chrome installé, WebGL activé).
 // Usage : node tools/shot.mjs <url> <sortie.png> [--wait 4000] [--w 1280] [--h 720]
-//                              [--keys "KeyW:2000,KeyF:100"] [--eval "js à exécuter avant la capture"]
+//                              [--keys "KeyW:2000,KeyF:100"] [--pre "js avant les touches"] [--eval "js à exécuter avant la capture"]
 // Affiche les erreurs console/page sur stdout. Code de sortie 1 s'il y a des erreurs JS.
 import { chromium } from 'playwright-core';
 import { mkdirSync } from 'node:fs';
@@ -10,7 +10,7 @@ const args = process.argv.slice(2);
 const url = args[0], out = args[1] || 'tools/out/shot.png';
 const opt = (n, d) => { const i = args.indexOf('--' + n); return i >= 0 ? args[i + 1] : d; };
 const wait = +opt('wait', 4000), w = +opt('w', 1280), h = +opt('h', 720);
-const keys = opt('keys', ''), ev = opt('eval', '');
+const keys = opt('keys', ''), ev = opt('eval', ''), pre = opt('pre', '');
 if (!url) { console.error('url manquante'); process.exit(2); }
 
 const browser = await chromium.launch({
@@ -25,6 +25,7 @@ page.on('requestfailed', (r) => errors.push('requestfailed: ' + r.url()));
 page.on('response', (r) => { if (r.status() >= 400) errors.push(`http ${r.status()}: ${r.url()}`); });
 await page.goto(url, { waitUntil: 'load' });
 await page.waitForTimeout(wait);
+if (pre) { try { console.log('pre ->', JSON.stringify(await page.evaluate(pre))); } catch (e) { errors.push('pre: ' + e.message); } await page.waitForTimeout(300); }
 for (const k of keys.split(',').filter(Boolean)) {
   const [code, ms] = k.split(':');
   await page.keyboard.down(code); await page.waitForTimeout(+ms || 100); await page.keyboard.up(code);

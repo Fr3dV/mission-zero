@@ -1,0 +1,122 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8" /><link rel="icon" href="data:,">
+  <title>Mission Zéro — test monuments</title>
+  <style>html,body{margin:0;height:100%;overflow:hidden;background:#0b0e14;font-family:system-ui,sans-serif}#game{position:fixed;inset:0;width:100%;height:100%;display:block}
+  #hud{position:fixed;left:8px;top:8px;color:#fff;font:12px/1.4 monospace;background:#0008;padding:6px 8px;border-radius:6px;white-space:pre}</style>
+  <script type="importmap">
+  { "imports": { "three": "/vendor/three/build/three.module.js", "three/addons/": "/vendor/three/examples/jsm/", "@shared/": "/shared/" } }
+  </script>
+</head>
+<body>
+  <canvas id="game"></canvas>
+  <div id="hud"></div>
+  <script type="module">
+  // Monument isolé avec caméra orbitale. Paramètres :
+  //   id=eiffel (ou all), time=H, quality, az (degrés, 0 = face à la façade), el, dist, ty (hauteur visée),
+  //   lod=far (force la version lointaine), col=1 (affiche les collisions), env=0 (éclairage simple), sparkle=1/0, hud=0
+  import * as THREE from 'three';
+  import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+  import { bus } from '/src/core/bus.js';
+  import { store } from '/src/core/store.js';
+  import { collision } from '/src/core/collision.js';
+  import { heightAt } from '@shared/terrain.js';
+  import { LANDMARKS, LANDMARK_BY_ID } from '@shared/landmarks.js';
+  import { createMonuments } from '/src/monuments/index.js';
+
+  const params = new URLSearchParams(location.search);
+  const id = params.get('id') || 'eiffel';
+  const canvas = document.getElementById('game');
+  const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, powerPreference: 'high-performance' });
+  renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+  renderer.setSize(innerWidth, innerHeight);
+  const scene = new THREE.Scene();
+  const camera = new THREE.PerspectiveCamera(+(params.get('fov') || 45), innerWidth / innerHeight, 0.5, 12000);
+
+  // collisions : on enregistre les formes pour pouvoir les afficher
+  const shapes = [];
+  const col = { ...collision,
+    addBox(o) { shapes.push({ kind: 'box', ...o }); return collision.addBox(o); },
+    addCircle(o) { shapes.push({ kind: 'circle', ...o }); return collision.addCircle(o); } };
+
+  const ctx = { THREE, renderer, scene, camera, canvas, bus, store, collision: col, params, quality: params.get('quality') || 'high', time: 0, fps: 60,
+    heightAt, LANDMARKS, LANDMARK_BY_ID, worldData: { parks: [] } };
+  window.__game = ctx;
+
+  // sol (suit le relief de la butte)
+  const L = LANDMARK_BY_ID[id] || LANDMARKS[0];
+  const gg = new THREE.PlaneGeometry(6000, 6000, 150, 150); gg.rotateX(-Math.PI / 2);
+  const gp = gg.attributes.position;
+  for (let i = 0; i < gp.count; i++) gp.setY(i, heightAt(gp.getX(i) + L.x, gp.getZ(i) + L.z) - 0.03);
+  gg.computeVertexNormals();
+  const ground = new THREE.Mesh(gg, new THREE.MeshStandardMaterial({ color: 0x8b8d86, roughness: 0.92 }));
+  ground.position.set(L.x, 0, L.z); ground.receiveShadow = true; scene.add(ground);
+
+  // éclairage : module env réel si possible (même rendu que le jeu), sinon repli simple
+  let env = null;
+  if (params.get('env') !== '0') {
+    try { const { createEnvironment } = await import('/src/env/index.js'); env = await createEnvironment(ctx); ctx.env = env; }
+    catch (e) { console.warn('env indisponible, éclairage de secours', e); env = null; }
+  }
+  let sun = env?.sun;
+  if (!env) {
+    renderer.shadowMap.enabled = true; renderer.shadowMap.type = THREE.PCFSoftShadowMap; renderer.toneMapping = THREE.ACESFilmicToneMapping; renderer.toneMappingExposure = 0.7;
+    const t = parseFloat(params.get('time')), night = Number.isFinite(t) && (t < 6.5 || t > 20.5);
+    scene.background = new THREE.Color(night ? 0x0a1020 : 0x9cc4ec);
+    scene.add(new THREE.HemisphereLight(0xcfe2ff, 0x6b6253, night ? 0.25 : 1.3));
+    sun = new THREE.DirectionalLight(0xfff0d8, night ? 0.3 : 4.5); sun.castShadow = true; sun.shadow.mapSize.set(4096, 4096); sun.shadow.bias = -0.0003; sun.shadow.normalBias = 0.2;
+    scene.add(sun, sun.target);
+    store.timeOfDay = Number.isFinite(t) ? t : 14;
+    ctx.env = { isNight: () => night };
+  }
+
+  const only = id === 'all' ? undefined : id;
+  const t0 = performance.now();
+  const mon = createMonuments(ctx, { only, lodDist: params.get('lod') === 'far' ? 0 : params.get('lod') === 'near' ? 1e9 : undefined });
+  const buildMs = performance.now() - t0;
+  ctx.monuments = mon;
+  const item = mon.get(L.id);
+
+  // caméra orbitale : az = 0 face à la façade
+  const R = L.radius, H = item?.height || 50;
+  const az = (+(params.get('az') ?? 25)) * Math.PI / 180, el = (+(params.get('el') ?? 12)) * Math.PI / 180, dist = +(params.get('dist') || Math.max(R * 2.6, H * 1.9));
+  const yaw = (item?.yaw || 0) + az, y0 = heightAt(L.x, L.z);
+  const target = new THREE.Vector3(L.x, y0 + +(params.get('ty') ?? H * 0.42), L.z);
+  camera.position.set(target.x + Math.sin(yaw) * Math.cos(el) * dist, target.y + Math.sin(el) * dist, target.z + Math.cos(yaw) * Math.cos(el) * dist);
+  const controls = new OrbitControls(camera, canvas); controls.target.copy(target); controls.update();
+
+  if (params.get('col')) {
+    const mat = new THREE.MeshBasicMaterial({ color: 0xff2060, wireframe: true });
+    for (const s of shapes) {
+      const top = Math.min(s.top ?? 60, y0 + 60), bot = Math.max(s.bottom ?? 0, y0), h = Math.max(0.5, top - bot);
+      const g = s.kind === 'box' ? new THREE.BoxGeometry(s.hw * 2, h, s.hd * 2) : new THREE.CylinderGeometry(s.r, s.r, h, 16);
+      const me = new THREE.Mesh(g, mat); me.position.set(s.x, bot + h / 2, s.z); me.rotation.y = s.rot || 0; scene.add(me);
+    }
+  }
+
+  const hud = document.getElementById('hud'); if (params.get('hud') === '0') hud.style.display = 'none';
+  const lightDir = new THREE.Vector3(0.45, 0.75, 0.5).normalize();
+  let last = performance.now(), acc = 0, frames = 0;
+  addEventListener('resize', () => { renderer.setSize(innerWidth, innerHeight); camera.aspect = innerWidth / innerHeight; camera.updateProjectionMatrix(); bus.emit('resize', { w: innerWidth, h: innerHeight }); });
+  renderer.info.autoReset = false;
+  renderer.setAnimationLoop((now) => {
+    const dt = Math.min((now - last) / 1000, 0.05); last = now; ctx.time += dt; acc += dt; frames++;
+    if (acc >= 0.5) { ctx.fps = frames / acc; acc = 0; frames = 0; }
+    controls.update();
+    mon.update(dt);
+    if (env) { env.update(dt); lightDir.copy(env.lightDir); }
+    // ombre recentrée sur le monument (la scène de test est plus grande que le rayon d'ombre du jeu)
+    const S = Math.max(R * 1.6, 110), sc = sun.shadow.camera;
+    if (sc.right !== S) { sc.left = -S; sc.right = S; sc.top = S * 1.2; sc.bottom = -S; sc.near = 10; sc.far = 3000; sc.updateProjectionMatrix(); sun.shadow.normalBias = 0.25; }
+    sun.target.position.set(L.x, y0 + Math.min(H, 120) * 0.4, L.z); sun.position.copy(sun.target.position).addScaledVector(lightDir, 1500);
+    sun.target.updateMatrixWorld(); sun.updateMatrixWorld();
+    renderer.info.reset();
+    if (env?.render) env.render(dt); else renderer.render(scene, camera);
+    const s = mon.stats();
+    window.__stats = { ...s, total: mon.stats(false), frameCalls: renderer.info.render.calls, frameTris: renderer.info.render.triangles, buildMs: Math.round(buildMs), fps: Math.round(ctx.fps), shapes: shapes.length };
+    hud.textContent = `${L.name}\nmodule : ${s.calls} draw calls, ${s.tris.toLocaleString()} triangles\nimage : ${renderer.info.render.calls} appels, ${renderer.info.render.triangles.toLocaleString()} tri — ${Math.round(ctx.fps)} fps\nconstruction ${Math.round(buildMs)} ms — collisions ${shapes.length}`;
+  });
+  </script>
+</body>
+</html>

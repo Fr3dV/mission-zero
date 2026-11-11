@@ -1,0 +1,84 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no" />
+  <title>Mission Zéro — banc d'essai interface</title>
+  <link rel="stylesheet" href="/src/ui/ui.css" />
+  <style>html,body{margin:0;height:100%;overflow:hidden;background:#0b0e14;font-family:system-ui,sans-serif}
+  #game{position:fixed;inset:0;background:linear-gradient(180deg,#1b2440 0%,#3a3550 42%,#6b5560 50%,#23262f 51%,#15171d 100%)}
+  #ui-root{position:fixed;inset:0;pointer-events:none}</style>
+  <script type="importmap">
+  { "imports": { "three": "/vendor/three/build/three.module.js", "three/addons/": "/vendor/three/examples/jsm/", "@shared/": "/shared/" } }
+  </script>
+</head>
+<body>
+  <div id="game"></div>
+  <div id="ui-root"></div>
+  <script type="module">
+    // Banc d'essai isolé de l'interface : faux contexte, faux joueur, événements simulés.
+    // Paramètres : autostart=1, drive=1 (en voiture), demo=1 (mission, chat, joueurs, argent), touch=1.
+    import { bus } from '/src/core/bus.js';
+    import { store } from '/src/core/store.js';
+    import { LANDMARKS, LANDMARK_BY_ID } from '@shared/landmarks.js';
+    import { BOUNDS } from '@shared/geo.js';
+    import { VEHICLE_BY_ID } from '@shared/catalog.js';
+    import { PROPERTIES } from '@shared/properties.js';
+    import { createUI } from '/src/ui/index.js';
+    const params = new URLSearchParams(location.search);
+    const json = async (u) => { const r = await fetch(u); if (!r.ok) throw new Error(u); return r.json(); };
+    const ctx = { bus, store, params, uiRoot: document.getElementById('ui-root'), LANDMARKS, LANDMARK_BY_ID, BOUNDS, quality: params.get('quality') || 'high', time: 0, fps: 60 };
+    window.__game = ctx;
+    const drive = params.get('drive') === '1';
+    const veh = { typeId: 'porsche_911', spec: VEHICLE_BY_ID.porsche_911, speed: 0, yaw: 0 };
+    ctx.player = { pos: { x: 0, y: 0, z: 0 }, yaw: 0, speed: 0, mode: drive ? 'vehicle' : 'foot', vehicle: drive ? veh : null, enabled: true };
+    ctx.gameplay = { startMission: (id) => bus.emit('toast', { text: 'Mission démarrée : ' + id, kind: 'info' }), abortMission() {}, dealers: [{ x: -900, z: -380, brand: 'Porsche' }, { x: 700, z: 250, brand: 'Tesla' }] };
+    for (const t of ['intent:login', 'intent:chat', 'intent:buyCar', 'intent:buyProperty', 'intent:sellProperty', 'intent:transfer', 'intent:spawnCar', 'intent:setActiveCar', 'intent:respawn', 'audio:volume'])
+      bus.on(t, (p) => { console.log(t, JSON.stringify(p)); (window.__log ||= []).push([t, p]); });
+    bus.on('intent:login', ({ name, room }) => { store.set({ room, online: true, me: { id: 'me', name } }); setTimeout(() => { bus.emit('net:status', { state: 'online' }); bus.emit('net:welcome', { offline: false }); }, 300); });
+    bus.on('intent:chat', ({ text }) => bus.emit('chat:message', { from: store.me.name, text }));
+    bus.on('intent:buyCar', ({ typeId }) => { const c = VEHICLE_BY_ID[typeId]; store.set({ me: { money: store.me.money - c.price, cars: [...store.me.cars, typeId] } }); bus.emit('money:change', { delta: -c.price, reason: 'buyCar' }); });
+    (async () => {
+      try { ctx.worldData = await json('/shared/world/paris.json'); } catch { ctx.worldData = await json('/shared/world/paris.sample.json'); }
+      store.set({ me: { id: 'me', name: 'Test', money: 128500, properties: [PROPERTIES[0]?.id].filter(Boolean), cars: ['citadine', 'tesla_model3', 'porsche_911'], activeCar: 'porsche_911', stats: { missionsDone: 12, distance: 48200, playTimeSec: 5400, totalEarned: 212000 } }, timeOfDay: 21.6, room: params.get('room') || 'paris' });
+      for (const step of ['env', 'world', 'monuments', 'vehicles', 'player', 'traffic', 'gameplay', 'net']) { bus.emit('boot:progress', { step }); if (!params.get('autostart')) await new Promise((r) => setTimeout(r, 60)); }
+      ctx.ui = createUI(ctx);
+      bus.emit('boot:progress', { step: 'audio' });
+      if (params.get('boot') === '1') return;
+      bus.emit('boot:done');
+      bus.emit('net:status', { state: params.get('offline') ? 'offline' : 'online' });
+      if (params.get('autostart')) bus.emit('intent:login', { name: 'Test', room: params.get('room') || 'paris' });
+      if (params.get('demo') === '1') {
+        store.players.set('a', { id: 'a', name: 'Camille', x: 180, z: -120, mode: 'vehicle', vehicleType: 'tesla_models', money: 342000 });
+        store.players.set('b', { id: 'b', name: 'Léo', x: -260, z: 90, mode: 'foot', money: 18400 });
+        store.players.set('c', { id: 'c', name: 'Inès', x: 900, z: 400, mode: 'vehicle', vehicleType: 'lambo_urus', money: 96000 });
+        store.set({ propertyOwners: { [PROPERTIES[1]?.id]: { id: 'a', name: 'Camille' } } });
+        setTimeout(() => {
+          bus.emit('mission:update', { mission: { title: 'Livraison express', steps: [1, 2, 3] }, stepIndex: 1, stepCount: 3, text: 'Déposez le colis au pied de la Tour Eiffel', timeLeft: 83, distance: 1840 });
+          bus.emit('gps:set', { x: LANDMARK_BY_ID.eiffel.x + 90, z: LANDMARK_BY_ID.eiffel.z, label: 'Tour Eiffel' });
+          bus.emit('player:prompt', { text: 'F — Monter dans la Porsche 911' });
+          bus.emit('net:playerJoin', { id: 'c', name: 'Inès' });
+          bus.emit('chat:message', { from: 'Camille', text: 'Rendez-vous place de la Concorde ?' });
+          bus.emit('chat:message', { from: 'Léo', text: 'J’arrive, je sors la Lambo.' });
+          bus.emit('toast', { text: 'Loyers encaissés : Ƶ 150', kind: 'success' });
+          store.set({ me: { money: store.me.money + 1500 } }); bus.emit('money:change', { delta: 1500, reason: 'mission' });
+        }, 700);
+      }
+      let last = performance.now();
+      const loop = (now) => {
+        const dt = Math.min((now - last) / 1000, 0.05); last = now; ctx.time += dt;
+        const p = ctx.player;
+        if (p.enabled !== false) {
+          p.yaw = Math.sin(ctx.time * 0.25) * 0.9 + 1.1; const sp = drive ? 31 : 2;
+          p.pos.x += -Math.sin(p.yaw) * sp * dt; p.pos.z += -Math.cos(p.yaw) * sp * dt; p.speed = sp;
+          if (p.pos.x < -1500) p.pos.x = 0, p.pos.z = 0;
+          veh.speed = sp + Math.sin(ctx.time) * 6; veh.yaw = p.yaw;
+        }
+        ctx.ui.update(dt);
+        requestAnimationFrame(loop);
+      };
+      requestAnimationFrame(loop);
+    })();
+  </script>
+</body>
+</html>

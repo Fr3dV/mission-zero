@@ -1,16 +1,123 @@
-// STUB — à remplacer par l'agent "ville" en gardant la signature.
+// Module « ville » : sol, chaussées, trottoirs, marquages, Seine + quais + ponts, immeubles haussmanniens,
+// parcs, arbres, lampadaires et mobilier. PROPRIÉTAIRE : agent ville. Contrat : docs/ARCHITECTURE.md.
+//
+// Organisation :
+//   masks.js      masque du sol (Seine / pelouses / allées / places) : texture GPU + requêtes CPU
+//   roadnet.js    index spatial des segments, API roadAt / nearestRoadPoint / randomRoadPoint, carrefours
+//   streets.js    sol, rubans de chaussée, trottoirs à bordure, marquages (géométrie fusionnée par tuile)
+//   river.js      eau (shader), quais, parapets (collisions), ponts à arches
+//   buildings.js  immeubles instanciés + shader de façade procédural
+//   vegetation.js platanes d'alignement et arbres de parc (instanciés, 2 LOD)
+//   props.js      lampadaires instanciés, feux, bancs, colonnes Morris, kiosques, bouches de métro
+import { qualityPreset, TiledSurf, clamp } from './util.js';
+import { createSurfaceTextures } from './textures.js';
+import { createMasks } from './masks.js';
+import { createSurfaceMaterial } from './surface.js';
+import { createRoadNet } from './roadnet.js';
+import { buildGround, buildStreets, Y_WALK } from './streets.js';
+import { buildRiver } from './river.js';
+import { buildBuildings } from './buildings.js';
+import { buildVegetation } from './vegetation.js';
+import { buildProps } from './props.js';
+
+/** Facteur de nuit 0..1 à partir de l'heure (crépuscule ~19h30-21h, aube ~5h30-7h). */
+function nightFromHour(h) {
+  const s = (a, b, x) => { const t = clamp((x - a) / (b - a), 0, 1); return t * t * (3 - 2 * t); };
+  return Math.max(s(19.3, 20.8, h), 1 - s(5.6, 7.2, h));
+}
+
 export function createWorld(ctx) {
-  const { THREE, scene, worldData, BOUNDS } = ctx;
-  const g = new THREE.Mesh(new THREE.PlaneGeometry(BOUNDS.maxX - BOUNDS.minX + 2000, BOUNDS.maxZ - BOUNDS.minZ + 2000), new THREE.MeshStandardMaterial({ color: 0x6f7a6a }));
-  g.rotation.x = -Math.PI / 2; g.position.set((BOUNDS.minX + BOUNDS.maxX) / 2, -0.05, (BOUNDS.minZ + BOUNDS.maxZ) / 2); scene.add(g);
-  const mat = new THREE.MeshStandardMaterial({ color: 0x33363b });
-  for (const r of worldData.roads) for (let i = 0; i < r.points.length - 1; i++) {
-    const [ax, az] = r.points[i], [bx, bz] = r.points[i + 1];
-    const len = Math.hypot(bx - ax, bz - az);
-    const m = new THREE.Mesh(new THREE.PlaneGeometry(r.width, len), mat);
-    m.rotation.set(-Math.PI / 2, 0, Math.atan2(bx - ax, bz - az) * -1, 'YXZ'); m.rotation.order = 'YXZ';
-    m.rotation.y = Math.atan2(bx - ax, bz - az); m.rotation.x = -Math.PI / 2; m.rotation.z = 0;
-    m.position.set((ax + bx) / 2, 0.02, (az + bz) / 2); scene.add(m);
+  const { THREE, scene, bus, heightAt } = ctx;
+  const t0 = performance.now();
+  const timings = {};
+  const lap = (name, t) => { timings[name] = Math.round(performance.now() - t); };
+  const Q = qualityPreset(ctx.quality);
+
+  let t = performance.now();
+  const masks = createMasks(ctx, Q); lap('masques', t);
+  t = performance.now();
+  const net = createRoadNet(ctx); lap('reseau', t);
+
+  // ---------- uniformes partagés (nuit, reflet du ciel)
+  const uniforms = { uNight: { value: 0 }, uLampOn: { value: 0 }, uSky: { value: new THREE.Color(0x9fb8cc) } };
+
+  // ---------- surfaces fusionnées par tuile
+  t = performance.now();
+  const surf = new TiledSurf(1000);
+  buildGround(ctx, surf, masks);
+  const streetInfo = buildStreets(ctx, net, surf, masks); lap('rues', t);
+  t = performance.now();
+  const river = buildRiver(ctx, net, surf, masks); lap('seine', t);
+
+  t = performance.now();
+  const tex = createSurfaceTextures(THREE, ctx.renderer, Q); lap('textures', t);
+  const surfMat = createSurfaceMaterial(THREE, tex, masks, uniforms);
+  const surfMeshes = [];
+  let surfTris = 0;
+  for (const [, b] of surf.map) {
+    const geo = b.build(THREE); if (!geo) continue;
+    surfTris += geo.index.count / 3;
+    const m = new THREE.Mesh(geo, surfMat);
+    m.receiveShadow = true; m.castShadow = false; m.matrixAutoUpdate = false; m.name = 'sol';
+    scene.add(m); surfMeshes.push(m);
   }
-  return { update() {} };
+  surf.map.clear();
+
+
+  t = performance.now();
+  const bld = buildBuildings(ctx, net, masks, Q, uniforms); lap('immeubles', t);
+  t = performance.now();
+  const veg = buildVegetation(ctx, net, masks, river, bld, Q); lap('arbres', t);
+  t = performance.now();
+  const props = buildProps(ctx, net, masks, river, bld, Q, uniforms, streetInfo); lap('mobilier', t);
+  timings.total = Math.round(performance.now() - t0);
+
+  // ---------- cycle jour / nuit
+  let nightTarget = 0, night = -1;
+  const setHour = (hour, isNight) => { nightTarget = typeof hour === 'number' && isFinite(hour) ? nightFromHour(((hour % 24) + 24) % 24) : isNight ? 1 : 0; };
+  bus.on('env:time', (e) => setHour(e?.hour, e?.night));
+  const h0 = ctx.store?.timeOfDay ?? parseFloat(ctx.params?.get?.('time'));
+  if (typeof h0 === 'number' && isFinite(h0)) setHour(h0, false);
+
+  const skyTmp = new THREE.Color();
+  const cam = ctx.camera.position;
+  const world = {
+    /** Route (objet de worldData.roads) sous le point, ou null. */
+    roadAt: (x, z) => net.roadAt(x, z),
+    /** Point de chaussée carrossable le plus proche : {x, z, yaw, road, dist}. opts.drivable=false inclut les rues piétonnes. */
+    nearestRoadPoint: (x, z, opts) => net.nearestRoadPoint(x, z, opts),
+    /** Point aléatoire sur une chaussée carrossable (voie de droite, hors carrefours et ponts) : {x, z, yaw, road}. */
+    randomRoadPoint: () => net.randomRoadPoint(),
+    // --- extras hors contrat (facultatifs pour les autres modules)
+    /** Hauteur du revêtement : heightAt + surélévation du trottoir. */
+    surfaceHeightAt(x, z) {
+      const d = net.edgeDistance(x, z, false);
+      return heightAt(x, z) + (d > 0.05 && d < 5 ? Y_WALK : 0);
+    },
+    isWater: (x, z) => masks.isWater(x, z) && !river.nearDeck(x, z, 0),
+    isPark: (x, z) => masks.isPark(x, z),
+    inBuilding: (x, z, pad) => bld.inBuilding(x, z, pad),
+    stats: { timings, buildings: bld.count, proceduralBuildings: bld.procedural, trees: veg.count, lamps: props.lampCount, props: props.nProps, surfaceTriangles: surfTris, roads: net.roads.length, bridges: river.decks.length, quality: ctx.quality, metros: props.metros.length, kiosks: props.kiosks.length },
+    _debug: { metros: props.metros, kiosks: props.kiosks },
+    update(dt) {
+      // transition douce jour/nuit
+      if (night < 0) night = nightTarget;
+      night += clamp(nightTarget - night, -dt * 0.5, dt * 0.5);
+      uniforms.uNight.value = night;
+      uniforms.uLampOn.value = clamp(night * 1.6, 0, 1);
+      const src = scene.fog?.color || (scene.background?.isColor ? scene.background : null);
+      if (src) skyTmp.copy(src); else skyTmp.setRGB(0.55, 0.68, 0.8).multiplyScalar(1 - night * 0.95);
+      uniforms.uSky.value.lerp(skyTmp, 0.1);
+      river.update(dt, night);
+      bld.update(cam);
+      veg.update(cam);
+      props.update(cam, night);
+      for (const m of surfMeshes) {
+        const s = m.geometry.boundingSphere;
+        m.visible = Math.hypot(s.center.x - cam.x, s.center.z - cam.z) - s.radius < Q.viewDist;
+      }
+    },
+  };
+  console.info('[ville] construite en ' + timings.total + ' ms', JSON.stringify(world.stats));
+  return world;
 }

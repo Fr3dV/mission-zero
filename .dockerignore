@@ -1,0 +1,20 @@
+# Tout ce qui n'est pas nécessaire à l'image (node_modules est réinstallé par npm ci)
+.git
+.gitignore
+.tools
+.data
+.env
+.claude
+node_modules
+docs
+tools
+tools/out
+client/debug
+server/test
+server/testkit.js
+**/*.test.js
+**/.DS_Store
+*.log
+*.md
+Dockerfile
+.dockerignore

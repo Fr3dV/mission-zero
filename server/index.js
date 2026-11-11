@@ -1,33 +1,35 @@
-// Serveur Mission Zéro : fichiers statiques + WebSocket multijoueur (/ws).
-// PROPRIÉTAIRE : agent "serveur/réseau". Ce fichier est un squelette minimal (statique seulement).
-import http from 'node:http';
-import { createReadStream, statSync } from 'node:fs';
-import { extname, join, normalize, resolve } from 'node:path';
-import { fileURLToPath } from 'node:url';
+// Serveur Mission Zéro : fichiers statiques + WebSocket multijoueur (/ws) sur le même port.
+// PROPRIÉTAIRE : agent "serveur/réseau".
+// Variables d'environnement : PORT (8080), STORE (file | memory | firestore), DATA_DIR / DATA_FILE (store fichier),
+// FIRESTORE_PROJECT / FIRESTORE_DATABASE / FIRESTORE_PREFIX (store Firestore), MAX_CONNECTIONS (1000).
+import { startServer } from './app.js';
+import { createStore, MemoryStore } from './store/index.js';
+import { ROOT } from './static.js';
+export { serveStatic } from './static.js';
 
-const ROOT = resolve(fileURLToPath(new URL('..', import.meta.url)));
 const PORT = +(process.env.PORT || 8080);
-const MIME = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.mjs': 'text/javascript; charset=utf-8', '.json': 'application/json; charset=utf-8', '.css': 'text/css; charset=utf-8', '.png': 'image/png', '.jpg': 'image/jpeg', '.svg': 'image/svg+xml', '.ico': 'image/x-icon', '.wasm': 'application/wasm', '.bin': 'application/octet-stream', '.glb': 'model/gltf-binary', '.mp3': 'audio/mpeg', '.ogg': 'audio/ogg', '.woff2': 'font/woff2' };
-const MOUNTS = [['/shared/', join(ROOT, 'shared')], ['/vendor/three/', join(ROOT, 'node_modules/three')], ['/', join(ROOT, 'client')]];
+const kind = process.env.STORE || 'file';
 
-export function serveStatic(req, res) {
-  let path = decodeURIComponent(new URL(req.url, 'http://x').pathname);
-  if (path === '/healthz') { res.writeHead(200).end('ok'); return; }
-  if (path.endsWith('/')) path += 'index.html';
-  for (const [prefix, dir] of MOUNTS) {
-    if (!path.startsWith(prefix)) continue;
-    const file = normalize(join(dir, path.slice(prefix.length)));
-    if (!file.startsWith(dir)) break;
-    try {
-      const st = statSync(file);
-      if (!st.isFile()) continue;
-      res.writeHead(200, { 'Content-Type': MIME[extname(file)] || 'application/octet-stream', 'Content-Length': st.size, 'Cache-Control': 'no-cache' });
-      createReadStream(file).pipe(res);
-      return;
-    } catch { /* essayer le montage suivant */ }
-  }
-  res.writeHead(404).end('not found');
+let store;
+try { store = await createStore({ kind, root: ROOT, port: PORT }); }
+catch (e) {
+  if (kind === 'firestore') throw e; // en production, pas de repli silencieux vers un stockage volatil
+  console.error(`[store] ${kind} indisponible (${e.message}) — repli en mémoire, rien ne sera conservé`);
+  store = new MemoryStore();
 }
 
-const server = http.createServer(serveStatic);
-server.listen(PORT, () => console.log(`Mission Zéro sur http://localhost:${PORT}`));
+const app = await startServer({ port: PORT, store, log: console.log });
+console.log(`Mission Zéro sur http://localhost:${app.port}  (stockage : ${store.kind})`);
+
+let stopping = false;
+async function stop(signal) {
+  if (stopping) return;
+  stopping = true;
+  console.log(`${signal} : sauvegarde et arrêt…`);
+  const force = setTimeout(() => { try { store.flushSync?.(); } catch { /* tant pis */ } process.exit(1); }, 8000);
+  try { await app.close(); } catch (e) { console.error('[arrêt]', e); process.exitCode = 1; }
+  clearTimeout(force);
+  process.exit();
+}
+process.on('SIGTERM', () => stop('SIGTERM'));
+process.on('SIGINT', () => stop('SIGINT'));

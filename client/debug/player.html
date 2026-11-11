@@ -1,0 +1,88 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8" />
+  <title>Mission Zéro — test personnages</title>
+  <style>html,body{margin:0;height:100%;overflow:hidden;background:#1b2330;font-family:system-ui,sans-serif;color:#fff}canvas{display:block}
+  #info{position:fixed;left:12px;top:8px;font-size:13px;opacity:.85}.lab{position:fixed;font-size:13px;font-weight:600;transform:translate(-50%,0);text-shadow:0 1px 3px #000}</style>
+  <script type="importmap">
+  { "imports": { "three": "/vendor/three/build/three.module.js", "three/addons/": "/vendor/three/examples/jsm/", "@shared/": "/shared/" } }
+  </script>
+</head>
+<body>
+<div id="info"></div>
+<script type="module">
+// Page de test : rangées de personnages variés dans chaque animation.
+// Paramètres : ?n=80 (test de charge, piétons lod), ?lod=1, ?cam=close|side
+import * as THREE from 'three';
+import { createCharacter, CHARACTER_ANIMS } from '/src/player/character.js';
+
+const params = new URLSearchParams(location.search);
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.shadowMap.enabled = true; renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+document.body.appendChild(renderer.domElement);
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x8fb4d9);
+scene.fog = new THREE.Fog(0x8fb4d9, 30, 90);
+const camera = new THREE.PerspectiveCamera(40, innerWidth / innerHeight, 0.1, 500);
+scene.add(new THREE.HemisphereLight(0xcfe3ff, 0x6b6257, 1.1));
+const sun = new THREE.DirectionalLight(0xfff1dd, 2.6);
+sun.position.set(6, 12, -8); sun.castShadow = true; sun.shadow.mapSize.set(2048, 2048);
+Object.assign(sun.shadow.camera, { left: -16, right: 16, top: 16, bottom: -16, near: 1, far: 50 });
+scene.add(sun);
+const ground = new THREE.Mesh(new THREE.PlaneGeometry(200, 200), new THREE.MeshStandardMaterial({ color: 0x77736b, roughness: 0.95 }));
+ground.rotation.x = -Math.PI / 2; ground.receiveShadow = true; scene.add(ground);
+
+const ctx = { THREE, scene };
+const chars = [];
+const NAMES = ['Zoé', 'Karim', 'Léa', 'Hugo', 'Inès', 'Paul', 'Aya', 'Marc'];
+const n = +params.get('n') || 0;
+const lod = params.get('lod') === '1';
+if (n) {
+  // test de charge : n personnages qui marchent / courent
+  for (let i = 0; i < n; i++) {
+    const c = createCharacter(ctx, { name: 'pieton' + i, lod: lod || i > 12 });
+    c.group.position.set((i % 16) * 1.3 - 10, 0, -Math.floor(i / 16) * 2.2);
+    c.group.rotation.y = Math.PI;
+    c.setState({ anim: i % 3 === 0 ? 'run' : i % 3 === 1 ? 'walk' : 'idle', speed: i % 3 === 0 ? 6 : 1.5 });
+    scene.add(c.group); chars.push(c);
+  }
+  camera.position.set(0, 5, 14); camera.lookAt(0, 0.8, -3);
+} else {
+  CHARACTER_ANIMS.forEach((anim, row) => {
+    NAMES.forEach((name, col) => {
+      const c = createCharacter(ctx, { name: name + (params.get('seed') || ''), lod: lod || (col === NAMES.length - 1), color: col === 0 ? '#3a86ff' : undefined });
+      c.group.position.set((col - (NAMES.length - 1) / 2) * 1.25, anim === 'jump' || anim === 'fall' ? 0.5 : 0, -row * 2.4);
+      c.group.rotation.y = Math.PI + (params.has('rot') ? +params.get('rot') * Math.PI / 180 : 0.35); // tournés vers la caméra
+      c.setState({ anim, speed: anim === 'run' ? 6.5 : 1.6 });
+      scene.add(c.group); chars.push(c);
+    });
+    const lab = document.createElement('div'); lab.className = 'lab'; lab.textContent = anim; lab.dataset.row = row; document.body.appendChild(lab);
+  });
+  const cam = params.get('cam');
+  if (cam === 'close') { const r = +(params.get('row') || 0), cx = +(params.get('cx') || -1.2); camera.position.set(cx, 1.4, 3.4 - r * 2.4); camera.lookAt(cx, 0.95, -r * 2.4); }
+  else if (cam === 'sit') { camera.position.set(2.5, 1.2, -7.2 + 3.2); camera.lookAt(0, 0.7, -7.2); }
+  else { camera.position.set(7.5, 6.2, 9.5); camera.lookAt(0, 0.6, -5.4); }
+}
+const v = new THREE.Vector3();
+const clock = new THREE.Clock();
+let fpsT = 0, fpsN = 0;
+window.__chars = chars;
+renderer.setAnimationLoop(() => {
+  const dt = Math.min(clock.getDelta(), 0.05);
+  for (const c of chars) c.update(dt);
+  renderer.render(scene, camera);
+  fpsT += dt; fpsN++;
+  if (fpsT > 0.5) { document.getElementById('info').textContent = `${chars.length} personnages — ${Math.round(fpsN / fpsT)} fps — ${renderer.info.render.calls} draw calls — ${renderer.info.render.triangles} triangles`; window.__fps = fpsN / fpsT; fpsT = 0; fpsN = 0; }
+  for (const lab of document.querySelectorAll('.lab')) {
+    v.set(-5.6, 0.2, -lab.dataset.row * 2.4).project(camera);
+    lab.style.left = ((v.x + 1) / 2 * innerWidth) + 'px'; lab.style.top = ((1 - v.y) / 2 * innerHeight) + 'px';
+  }
+});
+addEventListener('resize', () => { renderer.setSize(innerWidth, innerHeight); camera.aspect = innerWidth / innerHeight; camera.updateProjectionMatrix(); });
+</script>
+</body>
+</html>

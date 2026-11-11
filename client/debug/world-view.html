@@ -1,0 +1,101 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8" />
+  <title>Mission Zéro — test du module ville</title>
+  <style>html,body{margin:0;height:100%;overflow:hidden;background:#0b0e14;font-family:system-ui,sans-serif}#game{position:fixed;inset:0;width:100%;height:100%;display:block}#hud{position:fixed;left:8px;top:8px;color:#fff;font:12px monospace;background:#0008;padding:4px 8px;white-space:pre}</style>
+  <script type="importmap">
+  { "imports": { "three": "/vendor/three/build/three.module.js", "three/addons/": "/vendor/three/examples/jsm/", "@shared/": "/shared/" } }
+  </script>
+</head>
+<body>
+  <canvas id="game"></canvas>
+  <div id="hud"></div>
+  <!--
+    Page de test isolée du module ville (aucun autre module).
+    Paramètres : cam=x,y,z  look=x,y,z  time=heure  quality=low|medium|high  sample=1 (force paris.sample.json)
+                 nobuildings=1 (ignore buildings.json)  shadows=0
+    Souris : glisser = tourner, molette = avancer ; ZQSD/WASD = se déplacer, Maj = vite.
+  -->
+  <script type="module">
+    import * as THREE from 'three';
+    import { collision } from '/src/core/collision.js';
+    import { heightAt, WATER_LEVEL } from '@shared/terrain.js';
+    import { LANDMARKS, LANDMARK_BY_ID } from '@shared/landmarks.js';
+    import { BOUNDS } from '@shared/geo.js';
+    import { createWorld } from '/src/world/index.js';
+
+    const params = new URLSearchParams(location.search);
+    const canvas = document.getElementById('game');
+    const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, powerPreference: 'high-performance' });
+    renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+    renderer.setSize(innerWidth, innerHeight);
+    renderer.toneMapping = THREE.ACESFilmicToneMapping; renderer.toneMappingExposure = 1.0;
+    renderer.shadowMap.enabled = params.get('shadows') !== '0'; renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+    const scene = new THREE.Scene();
+    const camera = new THREE.PerspectiveCamera(60, innerWidth / innerHeight, 0.3, 9000);
+    const num = (s, d) => (s ? s.split(',').map(Number) : d);
+    const cp = num(params.get('cam'), [60, 40, 160]), lk = num(params.get('look'), [0, 5, 0]);
+    camera.position.set(...cp); camera.lookAt(...lk);
+
+    const listeners = {};
+    const bus = { on(n, f) { (listeners[n] ||= []).push(f); }, emit(n, d) { (listeners[n] || []).forEach((f) => f(d)); } };
+    const hour = parseFloat(params.get('time') || '14');
+    const night = hour < 6.3 || hour > 20.3;
+    const sky = night ? new THREE.Color(0x0a1020) : new THREE.Color(0xa9c9e8);
+    scene.background = sky; scene.fog = new THREE.Fog(sky.getHex(), 300, night ? 2500 : 5200);
+    scene.add(new THREE.HemisphereLight(night ? 0x26324d : 0xcfe2ff, night ? 0x0a0a0c : 0x6b6455, night ? 0.5 : 1.1));
+    const sun = new THREE.DirectionalLight(night ? 0x8fa6d8 : 0xfff0d8, night ? 0.25 : 3.0);
+    sun.castShadow = renderer.shadowMap.enabled; sun.shadow.mapSize.set(4096, 4096);
+    const SH = 260; Object.assign(sun.shadow.camera, { left: -SH, right: SH, top: SH, bottom: -SH, near: 10, far: 1600 });
+    sun.shadow.bias = -0.0004; sun.shadow.normalBias = 0.06;
+    scene.add(sun, sun.target);
+
+    async function loadJSON(url) { const r = await fetch(url); if (!r.ok) throw new Error(url + ' ' + r.status); return r.json(); }
+    let data;
+    try { if (params.get('sample')) throw 0; data = await loadJSON('/shared/world/paris.json'); } catch { data = await loadJSON('/shared/world/paris.sample.json'); }
+    try { if (params.get('nobuildings') || params.get('sample')) throw 0; data.buildings = (await loadJSON('/shared/world/buildings.json')).buildings; } catch { data.buildings = null; }
+
+    const ctx = { THREE, renderer, scene, camera, canvas, bus, collision, params, store: { timeOfDay: hour }, heightAt, WATER_LEVEL, LANDMARKS, LANDMARK_BY_ID, BOUNDS,
+      quality: params.get('quality') || 'high', worldData: data, time: 0, fps: 60 };
+    window.__game = ctx;
+    const tBuild = performance.now();
+    ctx.world = await createWorld(ctx);
+    window.__buildMs = performance.now() - tBuild;
+    bus.emit('env:time', { hour, night });
+
+    // caméra libre
+    const keys = new Set(); let yaw = 0, pitch = 0, drag = false;
+    { const d = new THREE.Vector3(); camera.getWorldDirection(d); yaw = Math.atan2(-d.x, -d.z); pitch = Math.asin(d.y); }
+    addEventListener('keydown', (e) => keys.add(e.code)); addEventListener('keyup', (e) => keys.delete(e.code));
+    canvas.addEventListener('mousedown', () => (drag = true)); addEventListener('mouseup', () => (drag = false));
+    addEventListener('mousemove', (e) => { if (drag) { yaw -= e.movementX * 0.004; pitch = Math.max(-1.5, Math.min(1.5, pitch - e.movementY * 0.004)); } });
+    addEventListener('wheel', (e) => { const d = new THREE.Vector3(); camera.getWorldDirection(d); camera.position.addScaledVector(d, -e.deltaY * 0.2); });
+    addEventListener('resize', () => { renderer.setSize(innerWidth, innerHeight); camera.aspect = innerWidth / innerHeight; camera.updateProjectionMatrix(); });
+    window.__setCam = (x, y, z, tx, ty, tz) => { camera.position.set(x, y, z); camera.lookAt(tx, ty, tz); const d = new THREE.Vector3(); camera.getWorldDirection(d); yaw = Math.atan2(-d.x, -d.z); pitch = Math.asin(d.y); };
+
+    // mesure du coût réel d'une image (ms) : n rendus puis synchronisation GPU
+    window.__bench = (n = 40) => { const gl = renderer.getContext(), px = new Uint8Array(4); renderer.render(scene, camera); gl.readPixels(0, 0, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, px);
+      const t = performance.now(); for (let i = 0; i < n; i++) { ctx.world.update(0.016); renderer.render(scene, camera); } gl.readPixels(0, 0, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, px); return +((performance.now() - t) / n).toFixed(2); };
+    const hud = document.getElementById('hud');
+    let last = performance.now(), acc = 0, frames = 0;
+    renderer.setAnimationLoop((now) => {
+      const dt = Math.min((now - last) / 1000, 0.05); last = now; ctx.time += dt; acc += dt; frames++;
+      const sp = (keys.has('ShiftLeft') ? 200 : 40) * dt;
+      const f = (keys.has('KeyW') || keys.has('KeyZ') ? 1 : 0) - (keys.has('KeyS') ? 1 : 0), s = (keys.has('KeyD') ? 1 : 0) - (keys.has('KeyA') || keys.has('KeyQ') ? 1 : 0);
+      camera.rotation.set(pitch, yaw, 0, 'YXZ');
+      camera.position.x += (-Math.sin(yaw) * f + Math.cos(yaw) * s) * sp; camera.position.z += (-Math.cos(yaw) * f - Math.sin(yaw) * s) * sp;
+      camera.position.y += ((keys.has('KeyE') ? 1 : 0) - (keys.has('KeyC') ? 1 : 0)) * sp;
+      // le soleil suit la caméra (ombres)
+      sun.target.position.set(camera.position.x, 0, camera.position.z); sun.position.set(camera.position.x + 320, 520, camera.position.z + 240);
+      ctx.world.update(dt);
+      renderer.render(scene, camera);
+      if (acc >= 0.5) {
+        ctx.fps = frames / acc; acc = 0; frames = 0;
+        window.__stats = { fps: Math.round(ctx.fps), calls: renderer.info.render.calls, tris: renderer.info.render.triangles, geometries: renderer.info.memory.geometries, textures: renderer.info.memory.textures, buildMs: Math.round(window.__buildMs) };
+        hud.textContent = `fps ${window.__stats.fps}  draw calls ${window.__stats.calls}  tris ${(window.__stats.tris / 1e6).toFixed(2)} M  build ${window.__stats.buildMs} ms\n` + JSON.stringify(ctx.world.stats.timings);
+      }
+    });
+  </script>
+</body>
+</html>
