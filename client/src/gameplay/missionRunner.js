@@ -261,7 +261,7 @@ export function createMissionRunner(g) {
     const v = a.vehicle || ctx.player?.vehicle;
     if (!v || e.vehicle !== v) return;
     const impact = Math.abs(+e.impact || 0);
-    if (impact > 1.5) a.crashSum += impact;
+    if (impact > 4) a.crashSum += impact - 4; // même seuil que le modèle de dégâts des véhicules
   });
 
   // ---------------------------------------------------------------- boucle

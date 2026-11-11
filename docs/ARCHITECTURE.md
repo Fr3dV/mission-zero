@@ -176,3 +176,9 @@ Unités : `impact` = vitesse de fermeture en **m/s** le long de la normale ; `da
 - Les voitures IA ont un conducteur visible : `vehicle.occupant` (personnage créé par le trafic, posture `sit`).
 - Le joueur peut prendre une voiture conduite par l'IA (touche F, à ≤ 4 m, vitesse de la voiture ≤ ~15 km/h — les voitures IA freinent quand le joueur se met devant) : le module joueur appelle `ctx.traffic.ejectDriver(vehicle, { side: 'left'|'right' }) -> bool`, qui relâche la voiture (`driver = null`, `remote = false`), retire `vehicle.occupant` et fait apparaître le conducteur éjecté à côté de la portière (il titube, proteste puis s'enfuit ou reste à regarder). Puis `player.enterVehicle(vehicle)`. Événement `vehicle:carjack { vehicle, by: 'local' }`.
 - Les voitures conduites par d'autres joueurs ne peuvent pas être volées.
+
+## Relief local (contrat v4)
+
+`shared/terrain.js` exporte `baseHeightAt(x, z)` (relief pur : plat + butte Montmartre) et `setHeightLayer(fn)`.
+`ctx.heightAt` = `baseHeightAt` + la couche enregistrée par le module ville (`fn(x, z, base) -> hauteur | undefined`).
+Tous les modules (joueur, véhicules, trafic, piétons, monuments, gameplay) lisent déjà `ctx.heightAt` : une berge en contrebas ou une rampe déclarée par la ville est donc praticable sans autre changement. La couche doit être très rapide.

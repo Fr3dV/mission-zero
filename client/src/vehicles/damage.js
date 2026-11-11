@@ -7,8 +7,10 @@ const clamp = (v, a, b) => (v < a ? a : v > b ? b : v);
 const hash = (i) => { const s = Math.sin(i * 12.9898) * 43758.5453; return s - Math.floor(s); };
 
 /** Seuil (m/s) sous lequel un choc ne laisse aucune trace, et énergie normalisée d'un impact. */
-export const IMPACT_MIN = 2;
-export const impactEnergy = (impact) => { const d = Math.max(0, impact - IMPACT_MIN); return d * d * 0.0064; };
+// Réglage « solide » : rien sous ~15 km/h, un choc à 50 km/h marque sans handicaper,
+// il faut ~110 km/h de face (ou plusieurs gros chocs) pour approcher l'épave.
+export const IMPACT_MIN = 4;
+export const impactEnergy = (impact) => { const d = Math.max(0, impact - IMPACT_MIN); return d * d * 0.0022; };
 
 // Modèles à moteur central/arrière : c'est la zone arrière qui abîme le moteur.
 const REAR_ENGINE = { porsche_911: 1, lambo_huracan: 1, lambo_aventador: 1 };
@@ -31,7 +33,7 @@ export function updateMechanics(v) {
   const z = v.damageZones, d = v.dmg, eng = REAR_ENGINE[v.typeId] ? z.rear : z.front;
   const worst = Math.max(...d.corners);
   v.phys.fxm = {
-    power: v.wrecked ? 0 : clamp(1 - 0.65 * Math.pow(eng, 1.5) - 0.2 * v.damage, 0.15, 1),
+    power: v.wrecked ? 0 : clamp(1 - 0.45 * eng * eng - 0.15 * v.damage, 0.3, 1),
     brake: clamp(1 - 0.45 * v.damage, 0.5, 1),
     grip: clamp(1 - 0.28 * clamp((worst - 0.45) * 2, 0, 1), 0.7, 1),
     steerBias: clamp(d.steerBias, -0.07, 0.07),
