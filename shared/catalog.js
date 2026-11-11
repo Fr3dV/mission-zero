@@ -17,5 +17,5 @@ export const VEHICLES = [
   { id: 'lambo_urus', name: 'Lamborghini Urus', brand: 'Lamborghini', price: 240000, maxSpeed: 85, accel: 14, brake: 20, grip: 1.25, length: 5.11, width: 2.02, height: 1.64, electric: false, colors: ['#f4d000', '#0b0b0b', '#3a86ff'] },
 ];
 
-export const VEHICLE_BY_ID = Object.fromEntries(VEHICLES.map((v) => [v.id, v]));
+export const VEHICLE_BY_ID = Object.assign(Object.create(null), Object.fromEntries(VEHICLES.map((v) => [v.id, v])));
 export const STARTER_VEHICLE = 'citadine';

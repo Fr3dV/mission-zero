@@ -80,5 +80,5 @@ export const PROPERTIES = [
   P('penthouse_vendome', 'Suite-penthouse place Vendôme', 'penthouse', 5000000, 26000, 48.8672, 2.3302, { address: 'Place Vendôme, 1er' }),
 ];
 
-export const PROPERTY_BY_ID = Object.fromEntries(PROPERTIES.map((p) => [p.id, p]));
+export const PROPERTY_BY_ID = Object.assign(Object.create(null), Object.fromEntries(PROPERTIES.map((p) => [p.id, p])));
 export const SELL_BACK_RATIO = 0.7;

@@ -594,4 +594,4 @@ function finalize(raw) {
 }
 
 export const MISSIONS = RAW.map(finalize);
-export const MISSION_BY_ID = Object.fromEntries(MISSIONS.map((m) => [m.id, m]));
+export const MISSION_BY_ID = Object.assign(Object.create(null), Object.fromEntries(MISSIONS.map((m) => [m.id, m])));
