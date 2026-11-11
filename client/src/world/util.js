@@ -22,9 +22,9 @@ export const tileOrigin = (key) => ({ x: (Math.floor(key / 1024) - 512) * TILE, 
 
 /** Réglages par niveau de qualité. */
 export function qualityPreset(q) {
-  if (q === 'low') return { texSize: 256, maskSize: 1024, viewDist: 1300, detailDist: 250, treeDist: 500, treeNear: 90, lampDist: 400, propDist: 300, treeDensity: 0.5, lampStep: 44, aniso: 2, chimneys: false, shadows: false };
-  if (q === 'medium') return { texSize: 512, maskSize: 2048, viewDist: 2600, detailDist: 450, treeDist: 900, treeNear: 140, lampDist: 650, propDist: 450, treeDensity: 0.8, lampStep: 34, aniso: 4, chimneys: true, shadows: true };
-  return { texSize: 512, maskSize: 4096, viewDist: 9000, detailDist: 700, treeDist: 1500, treeNear: 220, lampDist: 1000, propDist: 700, treeDensity: 1, lampStep: 30, aniso: 8, chimneys: true, shadows: true };
+  if (q === 'low') return { texSize: 256, maskSize: 1024, viewDist: 1300, detailDist: 250, treeDist: 500, treeNear: 90, lampDist: 400, propDist: 300, treeDensity: 0.5, lampStep: 44, aniso: 2, chimneys: false, shadows: false, relief: false, detailLod: [-2, -1] };
+  if (q === 'medium') return { texSize: 512, maskSize: 2048, viewDist: 2600, detailDist: 450, treeDist: 900, treeNear: 140, lampDist: 650, propDist: 450, treeDensity: 0.8, lampStep: 34, aniso: 4, chimneys: true, shadows: true, relief: true, detailLod: [60, 85] };
+  return { texSize: 512, maskSize: 4096, viewDist: 9000, detailDist: 700, treeDist: 1500, treeNear: 220, lampDist: 1000, propDist: 700, treeDensity: 1, lampStep: 30, aniso: 8, chimneys: true, shadows: true, relief: true, detailLod: [100, 130] };
 }
 
 /**

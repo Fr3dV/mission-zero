@@ -39,7 +39,7 @@ export function createWorld(ctx) {
   const net = createRoadNet(ctx); lap('reseau', t);
 
   // ---------- uniformes partagés (nuit, reflet du ciel)
-  const uniforms = { uNight: { value: 0 }, uLampOn: { value: 0 }, uSky: { value: new THREE.Color(0x9fb8cc) } };
+  const uniforms = { uNight: { value: 0 }, uLampOn: { value: 0 }, uSky: { value: new THREE.Color(0x9fb8cc) }, uSunDir: { value: new THREE.Vector3(0.4, 0.8, 0.3).normalize() }, uSunK: { value: 1 } };
 
   // ---------- surfaces fusionnées par tuile
   t = performance.now();
@@ -79,7 +79,7 @@ export function createWorld(ctx) {
   const h0 = ctx.store?.timeOfDay ?? parseFloat(ctx.params?.get?.('time'));
   if (typeof h0 === 'number' && isFinite(h0)) setHour(h0, false);
 
-  const skyTmp = new THREE.Color();
+  const skyTmp = new THREE.Color(), sunTmp = new THREE.Vector3();
   const cam = ctx.camera.position;
   const world = {
     /** Route (objet de worldData.roads) sous le point, ou null. */
@@ -108,6 +108,13 @@ export function createWorld(ctx) {
       const src = scene.fog?.color || (scene.background?.isColor ? scene.background : null);
       if (src) skyTmp.copy(src); else skyTmp.setRGB(0.55, 0.68, 0.8).multiplyScalar(1 - night * 0.95);
       uniforms.uSky.value.lerp(skyTmp, 0.1);
+      // soleil de l'environnement → ombres propres analytiques des façades
+      const sun = ctx.env?.sun;
+      if (sun?.isDirectionalLight) {
+        sunTmp.copy(sun.position).sub(sun.target.position);
+        if (sunTmp.lengthSq() > 1e-6) uniforms.uSunDir.value.copy(sunTmp.normalize());
+        uniforms.uSunK.value = clamp(sun.intensity / 1.2, 0, 1) * clamp(uniforms.uSunDir.value.y * 8, 0, 1) * (sun.visible ? 1 : 0);
+      } else uniforms.uSunK.value = 1 - night;
       river.update(dt, night);
       bld.update(cam);
       veg.update(cam);

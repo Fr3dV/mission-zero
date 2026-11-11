@@ -57,7 +57,7 @@
     try { if (params.get('nobuildings') || params.get('sample')) throw 0; data.buildings = (await loadJSON('/shared/world/buildings.json')).buildings; } catch { data.buildings = null; }
 
     const ctx = { THREE, renderer, scene, camera, canvas, bus, collision, params, store: { timeOfDay: hour }, heightAt, WATER_LEVEL, LANDMARKS, LANDMARK_BY_ID, BOUNDS,
-      quality: params.get('quality') || 'high', worldData: data, time: 0, fps: 60 };
+      quality: params.get('quality') || 'high', worldData: data, time: 0, fps: 60, env: { sun } };
     window.__game = ctx;
     const tBuild = performance.now();
     ctx.world = await createWorld(ctx);
@@ -77,6 +77,8 @@
     // mesure du coût réel d'une image (ms) : n rendus puis synchronisation GPU
     window.__bench = (n = 40) => { const gl = renderer.getContext(), px = new Uint8Array(4); renderer.render(scene, camera); gl.readPixels(0, 0, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, px);
       const t = performance.now(); for (let i = 0; i < n; i++) { ctx.world.update(0.016); renderer.render(scene, camera); } gl.readPixels(0, 0, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, px); return +((performance.now() - t) / n).toFixed(2); };
+    const sp = num(params.get('sun'), [37, 53]); // azimut (0 = nord, 90 = est), élévation en degrés
+    const SUN = [Math.sin(sp[0] * Math.PI / 180) * Math.cos(sp[1] * Math.PI / 180) * 650, Math.sin(sp[1] * Math.PI / 180) * 650, -Math.cos(sp[0] * Math.PI / 180) * Math.cos(sp[1] * Math.PI / 180) * 650];
     const hud = document.getElementById('hud');
     let last = performance.now(), acc = 0, frames = 0;
     renderer.setAnimationLoop((now) => {
@@ -87,7 +89,7 @@
       camera.position.x += (-Math.sin(yaw) * f + Math.cos(yaw) * s) * sp; camera.position.z += (-Math.cos(yaw) * f - Math.sin(yaw) * s) * sp;
       camera.position.y += ((keys.has('KeyE') ? 1 : 0) - (keys.has('KeyC') ? 1 : 0)) * sp;
       // le soleil suit la caméra (ombres)
-      sun.target.position.set(camera.position.x, 0, camera.position.z); sun.position.set(camera.position.x + 320, 520, camera.position.z + 240);
+      sun.target.position.set(camera.position.x, 0, camera.position.z); sun.position.set(camera.position.x + SUN[0], SUN[1], camera.position.z + SUN[2]);
       ctx.world.update(dt);
       renderer.render(scene, camera);
       if (acc >= 0.5) {

@@ -58,7 +58,7 @@ export class GeoBuilder {
     if (matrix) _nm.getNormalMatrix(matrix);
     _c.set(style.color ?? 0xffffff);
     const cr = _c.r, cg = _c.g, cb = _c.b; // Color.set convertit le sRGB en linéaire
-    const rough = style.rough ?? 0.6, metal = style.metal ?? 0, ch = style.ch ?? 0;
+    const rough = style.rough ?? 0.6, metal = style.metal ?? 0, ch = style.ch ?? 0, fx = style.fx ?? 0;
     const flip = matrix ? matrix.determinant() < 0 : false;
     const n = p.count;
     for (let t = 0; t < n; t += 3) {
@@ -70,9 +70,12 @@ export class GeoBuilder {
         else this.nor.push(0, 1, 0);
         if (style.uv === 'keep' && guv) this.uv.push(guv.getX(i), guv.getY(i));
         else if (style.uv?.rect && guv) { const r = style.uv.rect; this.uv.push(lerp(r[0], r[2], guv.getX(i)), lerp(r[1], r[3], guv.getY(i))); }
+        else if (style.uv === 'xz') { _v.fromBufferAttribute(p, i); if (matrix) _v.applyMatrix4(matrix); this.uv.push(_v.x, _v.z); }
+        else if (style.uv === 'xy') { _v.fromBufferAttribute(p, i); if (matrix) _v.applyMatrix4(matrix); this.uv.push(_v.x, _v.y); }
+        else if (style.uv === 'zy') { _v.fromBufferAttribute(p, i); if (matrix) _v.applyMatrix4(matrix); this.uv.push(_v.z, _v.y); }
         else if (Array.isArray(style.uv)) this.uv.push(style.uv[0], style.uv[1]);
         else this.uv.push(UV_WHITE[0], UV_WHITE[1]);
-        this.col.push(cr, cg, cb); this.pbr.push(rough, metal); this.lch.push(ch);
+        this.col.push(cr, cg, cb); this.pbr.push(rough, metal, fx); this.lch.push(ch);
       }
     }
     if (g !== geom) g.dispose();
@@ -86,7 +89,7 @@ export class GeoBuilder {
       this.pos.push(p[k * 3], p[k * 3 + 1], p[k * 3 + 2]);
       this.nor.push(n[k * 3], n[k * 3 + 1], n[k * 3 + 2]);
       if (uvs) this.uv.push(uvs[k * 2], uvs[k * 2 + 1]); else this.uv.push(UV_WHITE[0], UV_WHITE[1]);
-      this.col.push(_c.r, _c.g, _c.b); this.pbr.push(style.rough ?? 0.6, style.metal ?? 0); this.lch.push(style.ch ?? 0);
+      this.col.push(_c.r, _c.g, _c.b); this.pbr.push(style.rough ?? 0.6, style.metal ?? 0, style.fx ?? 0); this.lch.push(style.ch ?? 0);
     }
   }
 
@@ -101,7 +104,7 @@ export class GeoBuilder {
     g.setAttribute('normal', new THREE.Float32BufferAttribute(this.nor, 3));
     if (attrs.includes('uv')) g.setAttribute('uv', new THREE.Float32BufferAttribute(this.uv, 2));
     if (attrs.includes('color')) g.setAttribute('color', new THREE.Float32BufferAttribute(this.col, 3));
-    if (attrs.includes('pbr')) g.setAttribute('pbr', new THREE.Float32BufferAttribute(this.pbr, 2));
+    if (attrs.includes('pbr')) g.setAttribute('pbr', new THREE.Float32BufferAttribute(this.pbr, 3));
     if (attrs.includes('lch')) g.setAttribute('lch', new THREE.Float32BufferAttribute(this.lch, 1));
     g.computeBoundingSphere(); g.computeBoundingBox();
     return g;

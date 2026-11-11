@@ -1,7 +1,7 @@
 // Module « joueur » : entrées, personnage animé, contrôleur à pied, montée/descente de véhicule, caméra 3e personne.
 // Contrat : voir docs/ARCHITECTURE.md (ctx.player + export createCharacter).
 import { STARTER_VEHICLE } from '@shared/catalog.js';
-import { createCharacter } from './character.js';
+import { createCharacter, SIT_ROOT_Y } from './character.js';
 import { createInput } from './input.js';
 import { createCameraRig, CAMERA_VIEWS } from './camera.js';
 
@@ -27,7 +27,7 @@ export function createPlayer(ctx) {
     if (rp && Number.isFinite(rp.x) && Number.isFinite(rp.z)) start = { x: rp.x, z: rp.z, yaw: rp.yaw || 0 };
   } catch { /* monde pas prêt : position par défaut */ }
 
-  let character = createCharacter(ctx, { name: params?.get?.('name') || 'Joueur', color: '#2f6fdd' });
+  let character = createCharacter(ctx, { name: params?.get?.('name') || 'Joueur', lod: false });
   scene.add(character.group);
 
   const p = {
@@ -81,30 +81,32 @@ export function createPlayer(ctx) {
   function nearestFreeVehicle() {
     return ctx.vehicles?.nearest?.(p.pos.x, p.pos.z, ENTER_DIST, (v) => !v.driver && !v.remote) || null;
   }
-  /** Position du siège conducteur (repère du véhicule). */
-  function seatOf(v) {
-    const s = v.seat || v.spec?.seat;
-    const spec = v.spec || {};
-    const h = spec.height || 1.45, w = spec.width || 1.8;
-    const hs = character.look.height;
-    const hips = s?.y ?? clamp(h * 0.62 - 0.46, 0.2, 0.7);
-    return { x: s?.x ?? -w * 0.2, y: hips - 0.48 * hs, z: s?.z ?? 0.12 };
-  }
+  /** Installe le personnage dans le siège conducteur (vehicle.seat = {x, y = hauteur du bassin, z} si fourni). */
   function seatCharacter(v) {
-    const s = seatOf(v);
+    const st = v.seat || v.spec?.seat, spec = v.spec || {};
+    const h = spec.height || 1.45, w = spec.width || 1.8, sc = character.scale || 1;
+    let hips = st?.y ?? clamp(h * 0.62 - 0.46, 0.2, 0.7);
+    // garde au toit : on incline le dossier (et on abaisse un peu le bassin) si la tête dépasserait
+    const torso = 0.87 * sc, room = h - 0.05 - hips;
+    let recline = 0.3;
+    if (room < torso * Math.cos(recline)) recline = Math.min(0.72, Math.acos(clamp(room / torso, 0.3, 1)));
+    if (room < torso * Math.cos(recline)) hips -= Math.min(0.12, torso * Math.cos(recline) - room);
+    const gy = hips - SIT_ROOT_Y * sc;
     v.group.add(character.group);
-    character.group.position.set(s.x, s.y, s.z);
+    character.group.position.set(st?.x ?? -w * 0.2, gy, st?.z ?? 0.12);
     character.group.rotation.set(0, 0, 0);
-    character.setState({ anim: 'sit', speed: 0 });
+    // volant : même convention que le module véhicules (0,36 m devant et au-dessus du bassin)
+    const wh = v.wheelPos || { x: 0, y: (st?.y ?? hips) + 0.36 - gy, z: -0.36 - 0.02, r: 0.175 };
+    character.setState({ anim: 'sit', speed: 0, recline, wheel: wh, steer: 0 });
     character.snap();
-    character.mesh.castShadow = false;
+    character.setShadow(false);
   }
   function unseatCharacter() {
     scene.add(character.group);
     character.group.rotation.set(0, p.yaw, 0);
     character.group.visible = true;
-    character.mesh.castShadow = true;
-    character.setState({ anim: 'idle', speed: 0 });
+    character.setShadow(true);
+    character.setState({ anim: 'idle', speed: 0, wheel: null });
     character.snap();
   }
 
@@ -228,7 +230,7 @@ export function createPlayer(ctx) {
   bus.on('vehicle:crash', (e) => { if (e?.vehicle && e.vehicle === p.vehicle) cam.shake(clamp((e.impact || 5) / 25, 0.15, 0.9)); });
   bus.on('net:welcome', () => {
     const me = ctx.store?.me;
-    if (me?.name && character.group.name !== 'personnage:' + me.name) setAppearance({ name: me.name, color: me.color || '#2f6fdd', skin: me.skin });
+    if (me?.name && character.group.name !== 'personnage:' + me.name) setAppearance({ name: me.name, color: me.color, skin: me.skin, lod: false });
   });
 
   // ------------------------------------------------------------------ boucle
@@ -310,6 +312,7 @@ export function createPlayer(ctx) {
     v.setControls?.({ throttle: st.throttle, brake: st.brake, steer: st.steer, handbrake: !!st.handbrake });
     p.pos.x = v.pos.x; p.pos.y = v.pos.y ?? heightAt(v.pos.x, v.pos.z); p.pos.z = v.pos.z;
     p.yaw = v.yaw; p.speed = v.speed || 0; p.anim = 'sit';
+    character.setState({ steer: v.controls?.steer ?? st.steer });
   }
 
   function updatePrompt(dt) {

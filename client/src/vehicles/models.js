@@ -3,7 +3,7 @@ import * as THREE from 'three';
 import { VEHICLE_BY_ID } from '@shared/catalog.js';
 import { DEFS } from './defs.js';
 import { buildCar } from './body.js';
-import { getPaint, getMisc, createLightsMaterial, CH } from './materials.js';
+import { getPaint, getMisc, getGlass, createLightsMaterial, CH } from './materials.js';
 
 const cache = new Map();
 
@@ -18,11 +18,12 @@ export function getCarGeometry(typeId) {
   // points d'ancrage utiles aux effets (phares, feux, roues)
   const P = hi.P;
   const info = {
-    wheelbase: (def.axleR - def.axleF) * spec.length,
-    cgToFront: (0.5 - def.axleF) * spec.length, cgToRear: (def.axleR - 0.5) * spec.length,
+    wheelbase: P.axles[1].z - P.axles[0].z,
+    cgToFront: -P.axles[0].z, cgToRear: P.axles[1].z,
     wheelR: def.wheelR, track: Math.abs(hi.wheels[0].x) * 2,
     noseZ: -spec.length / 2, tailZ: spec.length / 2,
     headY: Math.min(P.belt(0.03) - 0.03, 0.9),
+    seat: { ...P.seat },
   };
   c = { spec, def, hi, lo, info };
   cache.set(typeId, c);
@@ -51,6 +52,8 @@ export function createMesh(typeId, color) {
   const bodyLo = mk(lo.paint, paintMat, true), miscLo = mk(lo.misc, misc, true);
   const lights = mk(hi.lights, lightsMat, false);
   bodyLo.visible = miscLo.visible = false;
+  const glassHi = mk(hi.glass, getGlass(), false);
+  glassHi.receiveShadow = false; glassHi.renderOrder = 3;
 
   const wheels = hi.wheels.map((w) => {
     const m = new THREE.Mesh(hi.wheelGeo, misc);
@@ -82,7 +85,7 @@ export function createMesh(typeId, color) {
     setLOD(on) {
       if (on === lodOn) return;
       lodOn = on;
-      bodyHi.visible = miscHi.visible = !on; bodyLo.visible = miscLo.visible = on;
+      bodyHi.visible = miscHi.visible = glassHi.visible = !on; bodyLo.visible = miscLo.visible = on;
       for (const w of wheels) w.visible = !on;
     },
     dispose() { lightsMat.dispose(); group.removeFromParent(); },

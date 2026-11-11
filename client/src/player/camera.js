@@ -62,7 +62,7 @@ export function createCameraRig(ctx, player, input) {
         const k = input.locked ? 0.9 : 1.7;
         rig.yaw = dampAngle(rig.yaw, player.yaw, k * Math.min(1, player.speed / 2), dt);
       }
-      target.set(player.pos.x, player.pos.y + 1.52 * (player.character?.look?.height || 1), player.pos.z);
+      target.set(player.pos.x, player.pos.y + 0.855 * (player.character?.look?.height || 1.78), player.pos.z);
       dist = rig.footDist;
       const cp = Math.cos(rig.pitch), sp = Math.sin(rig.pitch);
       const dx = Math.sin(rig.yaw) * cp, dy = sp, dz = Math.cos(rig.yaw) * cp;

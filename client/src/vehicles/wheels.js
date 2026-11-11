@@ -47,10 +47,24 @@ export function addWheel(b, o, matrix) {
 
   // pneu
   const sh = Math.min(0.03, (R - rimR) * 0.45);
-  b.add(lathe([
-    [rimR, -hw * 0.9], [rimR + 0.012, -hw], [R - sh, -hw], [R - sh * 0.25, -hw * 0.84], [R, -hw * 0.62],
-    [R, hw * 0.62], [R - sh * 0.25, hw * 0.84], [R - sh, hw], [rimR + 0.012, hw], [rimR, hw * 0.9],
-  ], seg), M(), TIRE);
+  const prof = [[rimR, -hw * 0.9], [rimR + 0.012, -hw], [R - sh, -hw], [R - sh * 0.25, -hw * 0.84], [R, -hw * 0.66]];
+  if (!o.lod) for (const g of [-0.36, 0, 0.36]) { const a = g * hw, gw = Math.min(0.009, hw * 0.07); prof.push([R, a - gw * 1.6], [R - 0.009, a - gw], [R - 0.009, a + gw], [R, a + gw * 1.6]); } // rainures
+  prof.push([R, hw * 0.66], [R - sh * 0.25, hw * 0.84], [R - sh, hw], [rimR + 0.012, hw], [rimR, hw * 0.9]);
+  b.add(lathe(prof, seg), M(), TIRE);
+  if (!o.lod) {
+    // flanc extérieur avec marquages (motif procédural fx = 3, uv polaire)
+    const r0 = rimR + 0.012, r1 = R - sh, n = 40, x = hw + 0.0015;
+    for (let k = 0; k < n; k++) {
+      const a0 = (k / n) * Math.PI * 2, a1 = ((k + 1) / n) * Math.PI * 2;
+      const P = (a, r) => { const v = new THREE.Vector3(x, Math.cos(a) * r, Math.sin(a) * r); if (matrix) v.applyMatrix4(matrix); return v; };
+      const A = P(a0, r0), B = P(a1, r0), C = P(a1, r1), D = P(a0, r1);
+      const nrm = new THREE.Vector3(1, 0, 0); if (matrix) nrm.transformDirection(matrix);
+      const N = [nrm.x, nrm.y, nrm.z, nrm.x, nrm.y, nrm.z, nrm.x, nrm.y, nrm.z];
+      const st = { color: 0x141415, rough: 0.85, metal: 0, fx: 3 };
+      b.tri([A.x, A.y, A.z, C.x, C.y, C.z, B.x, B.y, B.z], N, st, [k / n, 0, (k + 1) / n, 1, (k + 1) / n, 0]);
+      b.tri([A.x, A.y, A.z, D.x, D.y, D.z, C.x, C.y, C.z], N, st, [k / n, 0, k / n, 1, (k + 1) / n, 1]);
+    }
+  }
 
   if (o.lod) {
     // version simplifiée : flasque de jante plein
@@ -66,27 +80,28 @@ export function addWheel(b, o, matrix) {
   b.add(new THREE.RingGeometry(discR * 0.42, discR, 24), M(mat(hw * 0.12, 0, 0, 0, Math.PI / 2, 0)), { color: 0x8d9094, rough: 0.38, metal: 1 });
   b.add(new THREE.CylinderGeometry(discR * 0.44, discR * 0.44, hw * 0.5, 16), M(mat(hw * 0.25, 0, 0, 0, 0, Math.PI / 2)), { color: 0x2a2b2e, rough: 0.5, metal: 0.8 });
 
-  const xo = hw * 0.8; // plan de la face de jante
+  const xo = hw * 0.84; // plan de la face de jante
+  const dish = o.dish ?? 0.045; // creux des branches vers le moyeu
   const hubR = rimR * 0.2;
   const spoke = (ang, r0, r1, w0, w1, e, x0, x1, st = rim) => b.add(spokeGeo(r0, r1, w0, w1, e, x0, x1), M(mat(0, 0, 0, ang, 0, 0)), st);
   const style = o.style || 'five';
   const rEnd = rimR * 0.965;
   if (style === 'five') {
-    for (let i = 0; i < 5; i++) spoke((i / 5) * Math.PI * 2, hubR * 0.6, rEnd, rimR * 0.34, rimR * 0.2, 0.03, xo - 0.005, xo + 0.004);
+    for (let i = 0; i < 5; i++) spoke((i / 5) * Math.PI * 2, hubR * 0.6, rEnd, rimR * 0.34, rimR * 0.2, 0.03, xo - dish, xo + 0.002);
   } else if (style === 'twin5') {
     for (let i = 0; i < 5; i++) for (const s of [-1, 1]) {
-      b.add(spokeGeo(hubR * 0.6, rEnd, rimR * 0.09, rimR * 0.075, 0.03, xo - 0.012, xo + 0.004), M(mat(0, 0, 0, (i / 5) * Math.PI * 2 + s * 0.13, 0, 0).multiply(mat(0, 0, s * rimR * 0.06))), rim);
+      b.add(spokeGeo(hubR * 0.6, rEnd, rimR * 0.09, rimR * 0.075, 0.03, xo - dish, xo + 0.002), M(mat(0, 0, 0, (i / 5) * Math.PI * 2 + s * 0.13, 0, 0).multiply(mat(0, 0, s * rimR * 0.06))), rim);
     }
   } else if (style === 'multi') {
-    for (let i = 0; i < 10; i++) spoke((i / 10) * Math.PI * 2, hubR * 0.7, rEnd, rimR * 0.1, rimR * 0.13, 0.028, xo - 0.02, xo + 0.004);
+    for (let i = 0; i < 10; i++) spoke((i / 10) * Math.PI * 2, hubR * 0.7, rEnd, rimR * 0.1, rimR * 0.13, 0.028, xo - dish, xo + 0.002);
   } else if (style === 'mesh') {
-    for (let i = 0; i < 14; i++) spoke((i / 14) * Math.PI * 2, hubR * 0.7, rEnd, rimR * 0.06, rimR * 0.06, 0.024, xo - 0.02, xo + 0.004);
+    for (let i = 0; i < 14; i++) spoke((i / 14) * Math.PI * 2, hubR * 0.7, rEnd, rimR * 0.06, rimR * 0.06, 0.024, xo - dish, xo + 0.002);
   } else if (style === 'y5') {
     for (let i = 0; i < 5; i++) {
       const a = (i / 5) * Math.PI * 2;
-      spoke(a, hubR * 0.5, rimR * 0.52, rimR * 0.2, rimR * 0.13, 0.03, xo - 0.025, xo - 0.006);
+      spoke(a, hubR * 0.5, rimR * 0.52, rimR * 0.2, rimR * 0.13, 0.03, xo - dish, xo - dish * 0.45);
       for (const s of [-1, 1]) {
-        b.add(spokeGeo(0, rimR * 0.52, rimR * 0.085, rimR * 0.07, 0.028, xo - 0.006, xo + 0.004),
+        b.add(spokeGeo(0, rimR * 0.52, rimR * 0.085, rimR * 0.07, 0.028, xo - dish * 0.45, xo + 0.002),
           M(mat(0, 0, 0, a, 0, 0).multiply(mat(0, rimR * 0.5, 0, s * 0.42, 0, 0))), rim);
       }
     }
@@ -101,7 +116,11 @@ export function addWheel(b, o, matrix) {
     b.add(new THREE.CircleGeometry(rimR * 0.97, 30), M(mat(xo - 0.015, 0, 0, 0, Math.PI / 2, 0)), { color: 0x9da1a6, rough: 0.4, metal: 0.8 });
     for (let i = 0; i < 8; i++) spoke((i / 8) * Math.PI * 2, hubR, rEnd, rimR * 0.2, rimR * 0.26, 0.012, xo - 0.006, xo, { color: 0xc4c7cb, rough: 0.35, metal: 0.9 });
   }
-  // moyeu / cache central
-  b.add(new THREE.CylinderGeometry(hubR, hubR * 1.15, 0.035, 16), M(mat(xo - 0.004, 0, 0, 0, 0, -Math.PI / 2)), style === 'aero' || style === 'cyber' ? { color: 0x1b1c1f, rough: 0.4, metal: 0.6 } : rim);
-  b.add(new THREE.CircleGeometry(hubR * 0.6, 12), M(mat(xo + 0.0145, 0, 0, 0, Math.PI / 2, 0)), { color: 0x111214, rough: 0.3, metal: 0.5 });
+  // moyeu / cache central + écrous
+  const flat = style === 'aero' || style === 'cyber' || style === 'cap';
+  const hx = flat ? xo - 0.004 : xo - dish - 0.004;
+  b.add(new THREE.CylinderGeometry(hubR, hubR * 1.15, 0.035, 16), M(mat(hx, 0, 0, 0, 0, -Math.PI / 2)), flat ? { color: 0x1b1c1f, rough: 0.4, metal: 0.6 } : rim);
+  b.add(new THREE.CircleGeometry(hubR * 0.6, 12), M(mat(hx + 0.0185, 0, 0, 0, Math.PI / 2, 0)), { color: 0x111214, rough: 0.3, metal: 0.5 });
+  if (!flat) for (let i = 0; i < 5; i++) { const a = (i / 5) * Math.PI * 2 + 0.3; b.add(new THREE.CylinderGeometry(0.011, 0.011, 0.02, 6), M(mat(hx + 0.012, Math.cos(a) * hubR * 1.5, Math.sin(a) * hubR * 1.5, 0, 0, Math.PI / 2)), { color: 0x9a9da1, rough: 0.3, metal: 1 }); }
+  if (!flat) b.add(new THREE.CylinderGeometry(hubR * 2.1, hubR * 2.1, 0.012, 18), M(mat(hx - 0.012, 0, 0, 0, 0, Math.PI / 2)), rim);
 }

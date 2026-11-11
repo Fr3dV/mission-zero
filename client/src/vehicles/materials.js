@@ -47,7 +47,20 @@ export function getAtlas() {
 
 // ---------------------------------------------------------------------------------------------
 // Textures de normales procédurales : paillettes (peinture métallisée) et brossage (inox).
-let _flakes = null, _brushed = null;
+let _flakes = null, _brushed = null, _peel = null;
+// peau d'orange du vernis : bruit lisse basse fréquence
+function peelTexture() {
+  const size = 64, c = document.createElement('canvas'); c.width = c.height = size;
+  const g = c.getContext('2d'); const img = g.createImageData(size, size); const d = img.data;
+  const hgt = new Float32Array(size * size);
+  for (let k = 0; k < 5; k++) { const fx = 1 + ((k * 3) % 5), fy = 1 + ((k * 2 + 1) % 5), ph = k * 1.7; for (let y = 0; y < size; y++) for (let x = 0; x < size; x++) hgt[y * size + x] += Math.sin((x / size) * fx * 6.2832 + ph) * Math.cos((y / size) * fy * 6.2832 + ph * 1.3); }
+  for (let y = 0; y < size; y++) for (let x = 0; x < size; x++) {
+    const i = y * size + x, dx = hgt[y * size + ((x + 1) % size)] - hgt[i], dy = hgt[((y + 1) % size) * size + x] - hgt[i];
+    d[i * 4] = 128 + dx * 90; d[i * 4 + 1] = 128 + dy * 90; d[i * 4 + 2] = 255; d[i * 4 + 3] = 255;
+  }
+  g.putImageData(img, 0, 0);
+  const t = new THREE.CanvasTexture(c); t.wrapS = t.wrapT = THREE.RepeatWrapping; return t;
+}
 function noiseNormalTexture(size, stretch) {
   const c = document.createElement('canvas'); c.width = c.height = size;
   const g = c.getContext('2d'); const img = g.createImageData(size, size); const d = img.data;
@@ -86,17 +99,20 @@ export function getPaint(color, finish = 'metal') {
   const col = new THREE.Color(color);
   const hsl = col.getHSL({});
   if (finish === 'steel') {
+    // inox brossé : métal pur, reflets étirés (anisotropie le long de la caisse) + micro-stries
     _brushed ||= noiseNormalTexture(256, true);
-    m = new THREE.MeshPhysicalMaterial({ color: col, metalness: 1, roughness: 0.34, normalMap: _brushed, normalScale: new THREE.Vector2(0.07, 0.07), clearcoat: 0 });
+    m = new THREE.MeshPhysicalMaterial({ color: col, metalness: 1, roughness: 0.3, normalMap: _brushed, normalScale: new THREE.Vector2(0.06, 0.06), clearcoat: 0 });
   } else {
     _flakes ||= noiseNormalTexture(256, false);
+    _peel ||= peelTexture();
     // couleurs vives/claires : moins de métal pour garder la saturation ; sombres : plus de profondeur
     const vivid = hsl.s > 0.55 && hsl.l > 0.3, light = hsl.l > 0.75;
-    const metal = finish === 'solid' ? 0.05 : light ? 0.25 : vivid ? 0.35 : 0.7;
+    const metal = finish === 'solid' ? 0.0 : finish === 'pearl' ? 0.3 : light ? 0.25 : vivid ? 0.4 : 0.75;
     m = new THREE.MeshPhysicalMaterial({
-      color: col, metalness: metal, roughness: finish === 'solid' ? 0.5 : 0.42,
-      clearcoat: 1, clearcoatRoughness: 0.035,
-      normalMap: _flakes, normalScale: new THREE.Vector2(0.16, 0.16),
+      color: col, metalness: metal, roughness: finish === 'solid' ? 0.5 : finish === 'matte' ? 0.6 : 0.34,
+      clearcoat: finish === 'matte' ? 0.15 : 1, clearcoatRoughness: finish === 'matte' ? 0.6 : 0.03,
+      normalMap: _flakes, normalScale: new THREE.Vector2(finish === 'solid' ? 0.02 : finish === 'pearl' ? 0.1 : 0.075, finish === 'solid' ? 0.02 : 0.075),
+      clearcoatNormalMap: _peel, clearcoatNormalScale: new THREE.Vector2(0.012, 0.012),
     });
   }
   m.envMapIntensity = 1;
@@ -109,22 +125,80 @@ export function getPaint(color, finish = 'metal') {
 // Matériau "divers" : couleur, rugosité et métal portés par les sommets → une seule passe pour
 // vitrage, plastiques, chromes, pneus, jantes, plaques.
 let _misc = null;
+// pbr = (rugosité, métal, fx) ; fx : 1 = grille nid d'abeille, 2 = carbone sergé, 3 = flanc de pneu (inscriptions)
+const MISC_FRAG = /* glsl */`
+#ifdef USE_MAP
+  vec4 sampledDiffuseColor = texture2D( map, vPbr.z > 0.5 ? vec2(0.03, 0.97) : vMapUv );
+  diffuseColor *= sampledDiffuseColor;
+#endif
+  float mzRoughAdd = 0.0;
+  if (vPbr.z > 0.5 && vPbr.z < 1.5) {
+    vec2 p = vMapUv * 62.0; vec2 r = vec2(1.0, 1.7320508); vec2 hh = r * 0.5;
+    vec2 a = mod(p, r) - hh; vec2 b = mod(p - hh, r) - hh;
+    vec2 g = dot(a, a) < dot(b, b) ? a : b;
+    float d = max(abs(g.x), dot(abs(g), normalize(r)));
+    float web = smoothstep(0.33, 0.42, d);
+    float fw = clamp((fwidth(p.x) + fwidth(p.y)) * 1.2 - 0.3, 0.0, 1.0);
+    web = mix(web, 0.35, fw);
+    diffuseColor.rgb *= mix(0.06, 1.0, web);
+  } else if (vPbr.z > 1.5 && vPbr.z < 2.5) {
+    vec2 p = vMapUv * 210.0; vec2 c = floor(p); vec2 f = fract(p);
+    float t = mod(c.x + c.y, 4.0) < 2.0 ? 1.0 : 0.0;
+    float sh = t > 0.5 ? 0.55 + 0.45 * sin(f.y * 3.1416) : 0.16 + 0.22 * sin(f.x * 3.1416);
+    float fw = clamp((fwidth(p.x) + fwidth(p.y)) * 0.9 - 0.3, 0.0, 1.0);
+    diffuseColor.rgb *= mix(0.35 + 1.5 * sh, 0.9, fw);
+  } else if (vPbr.z > 2.5) {
+    // flanc de pneu : uv = (angle/2π, position radiale 0..1) ; lettrage suggéré par blocs
+    float ang = vMapUv.x * 48.0; float cell = floor(ang); float fa = fract(ang);
+    float rnd = fract(sin(cell * 12.9898) * 43758.5453);
+    float inBand = step(0.42, vMapUv.y) * step(vMapUv.y, 0.66);
+    float sector = step(0.5, fract(vMapUv.x * 2.0 + 0.1)) ;
+    float letter = inBand * step(0.18, fa) * step(fa, 0.82) * step(0.25, rnd) * step(fract(vMapUv.x * 2.0 + 0.1), 0.38);
+    float ring = smoothstep(0.02, 0.0, abs(vMapUv.y - 0.3)) + smoothstep(0.02, 0.0, abs(vMapUv.y - 0.78));
+    float fw = clamp(fwidth(ang) * 2.0 - 0.4, 0.0, 1.0);
+    diffuseColor.rgb *= 1.0 + (letter * 1.6 + ring * 0.8) * (1.0 - fw);
+    mzRoughAdd = -0.25 * letter * (1.0 - fw);
+  }
+`;
 export function getMisc() {
   if (_misc) return _misc;
   const m = new THREE.MeshStandardMaterial({ vertexColors: true, map: getAtlas(), roughness: 1, metalness: 1 });
   m.onBeforeCompile = (sh) => {
     sh.vertexShader = sh.vertexShader
-      .replace('#include <common>', '#include <common>\nattribute vec2 pbr;\nvarying vec2 vPbr;')
+      .replace('#include <common>', '#include <common>\nattribute vec3 pbr;\nvarying vec3 vPbr;')
       .replace('#include <begin_vertex>', '#include <begin_vertex>\nvPbr = pbr;');
     sh.fragmentShader = sh.fragmentShader
-      .replace('#include <common>', '#include <common>\nvarying vec2 vPbr;')
-      .replace('#include <roughnessmap_fragment>', '#include <roughnessmap_fragment>\nroughnessFactor = vPbr.x;')
+      .replace('#include <common>', '#include <common>\nvarying vec3 vPbr;')
+      .replace('#include <map_fragment>', MISC_FRAG)
+      .replace('#include <roughnessmap_fragment>', '#include <roughnessmap_fragment>\nroughnessFactor = clamp(vPbr.x + mzRoughAdd, 0.03, 1.0);')
       .replace('#include <metalnessmap_fragment>', '#include <metalnessmap_fragment>\nmetalnessFactor = vPbr.y;');
   };
-  m.customProgramCacheKey = () => 'mz-veh-misc';
+  m.customProgramCacheKey = () => 'mz-veh-misc2';
   registry.add(m);
   if (_fallbackOn) m.envMap = _fallbackEnv;
   return (_misc = m);
+}
+
+// Vitrage transparent teinté : couleur = teinte (sommets), pbr.x = opacité ; les reflets restent francs
+// (l'alpha est remonté là où le spéculaire est fort).
+let _glass = null;
+export function getGlass() {
+  if (_glass) return _glass;
+  const m = new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.04, metalness: 0, transparent: true, depthWrite: false, envMapIntensity: 1.3 });
+  m.onBeforeCompile = (sh) => {
+    sh.vertexShader = sh.vertexShader
+      .replace('#include <common>', '#include <common>\nattribute vec3 pbr;\nvarying vec3 vPbr;')
+      .replace('#include <begin_vertex>', '#include <begin_vertex>\nvPbr = pbr;');
+    sh.fragmentShader = sh.fragmentShader
+      .replace('#include <common>', '#include <common>\nvarying vec3 vPbr;')
+      .replace('#include <opaque_fragment>', `#include <opaque_fragment>
+        vec3 mzSpec = reflectedLight.directSpecular + reflectedLight.indirectSpecular;
+        gl_FragColor.a = clamp(vPbr.x + max(mzSpec.r, max(mzSpec.g, mzSpec.b)) * 1.6, 0.0, 1.0);`);
+  };
+  m.customProgramCacheKey = () => 'mz-veh-glass';
+  registry.add(m);
+  if (_fallbackOn) m.envMap = _fallbackEnv;
+  return (_glass = m);
 }
 
 // Canaux lumineux des optiques.

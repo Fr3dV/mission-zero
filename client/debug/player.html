@@ -4,7 +4,7 @@
   <meta charset="utf-8" />
   <title>Mission Zéro — test personnages</title>
   <style>html,body{margin:0;height:100%;overflow:hidden;background:#1b2330;font-family:system-ui,sans-serif;color:#fff}canvas{display:block}
-  #info{position:fixed;left:12px;top:8px;font-size:13px;opacity:.85}.lab{position:fixed;font-size:13px;font-weight:600;transform:translate(-50%,0);text-shadow:0 1px 3px #000}</style>
+  #info{position:fixed;left:12px;top:8px;font-size:13px;opacity:.9;text-shadow:0 1px 2px #000}#atlas{position:fixed;inset:0;overflow:auto;background:#444}</style>
   <script type="importmap">
   { "imports": { "three": "/vendor/three/build/three.module.js", "three/addons/": "/vendor/three/examples/jsm/", "@shared/": "/shared/" } }
   </script>
@@ -12,74 +12,97 @@
 <body>
 <div id="info"></div>
 <script type="module">
-// Page de test : rangées de personnages variés dans chaque animation.
-// Paramètres : ?n=80 (test de charge, piétons lod), ?lod=1, ?cam=close|side
+// Planche de test des personnages.
+//   ?view=board (défaut) : 12 personnages de face, de trois-quarts et de dos (idle), puis marche / course / assis
+//   ?view=face | hands | body | anim (&i=index du personnage, &rot=degrés)   gros plans
+//   ?n=80 : test de charge (niveau de détail automatique)   ?lod=1 : force la version simplifiée
+//   ?atlas=albedo|normal|rough : affiche l'atlas de textures   ?seed=txt : autre tirage   ?t=secondes : fige l'animation à t
 import * as THREE from 'three';
+import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
 import { createCharacter, CHARACTER_ANIMS } from '/src/player/character.js';
+import { getAtlas } from '/src/player/atlas.js';
 
 const params = new URLSearchParams(location.search);
 const renderer = new THREE.WebGLRenderer({ antialias: true });
 renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
 renderer.setSize(innerWidth, innerHeight);
-renderer.shadowMap.enabled = true; renderer.shadowMap.type = THREE.PCFSoftShadowMap;
-renderer.toneMapping = THREE.ACESFilmicToneMapping;
+renderer.shadowMap.enabled = params.get('shadow') !== '0'; renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+renderer.toneMapping = THREE.ACESFilmicToneMapping; renderer.toneMappingExposure = 0.9;
 document.body.appendChild(renderer.domElement);
 const scene = new THREE.Scene();
-scene.background = new THREE.Color(0x8fb4d9);
-scene.fog = new THREE.Fog(0x8fb4d9, 30, 90);
-const camera = new THREE.PerspectiveCamera(40, innerWidth / innerHeight, 0.1, 500);
-scene.add(new THREE.HemisphereLight(0xcfe3ff, 0x6b6257, 1.1));
-const sun = new THREE.DirectionalLight(0xfff1dd, 2.6);
-sun.position.set(6, 12, -8); sun.castShadow = true; sun.shadow.mapSize.set(2048, 2048);
-Object.assign(sun.shadow.camera, { left: -16, right: 16, top: 16, bottom: -16, near: 1, far: 50 });
+scene.background = new THREE.Color(0x9fb9d4);
+scene.fog = new THREE.Fog(0x9fb9d4, 40, 120);
+scene.environment = new THREE.PMREMGenerator(renderer).fromScene(new RoomEnvironment(), 0.04).texture;
+scene.environmentIntensity = 0.55;
+const camera = new THREE.PerspectiveCamera(32, innerWidth / innerHeight, 0.05, 500);
+const sun = new THREE.DirectionalLight(0xfff1dd, 2.4);
+sun.position.set(5, 11, 9); sun.castShadow = true; sun.shadow.mapSize.set(2048, 2048); sun.shadow.bias = -0.0005; sun.shadow.normalBias = 0.02;
+Object.assign(sun.shadow.camera, { left: -14, right: 14, top: 14, bottom: -14, near: 1, far: 50 });
 scene.add(sun);
-const ground = new THREE.Mesh(new THREE.PlaneGeometry(200, 200), new THREE.MeshStandardMaterial({ color: 0x77736b, roughness: 0.95 }));
+const ground = new THREE.Mesh(new THREE.PlaneGeometry(300, 300), new THREE.MeshStandardMaterial({ color: 0x8a867e, roughness: 0.95 }));
 ground.rotation.x = -Math.PI / 2; ground.receiveShadow = true; scene.add(ground);
 
-const ctx = { THREE, scene };
+const ctx = { THREE, scene, camera };
 const chars = [];
-const NAMES = ['Zoé', 'Karim', 'Léa', 'Hugo', 'Inès', 'Paul', 'Aya', 'Marc'];
+const seed = params.get('seed') || '';
+const NAMES = ['Zoé', 'Karim', 'Léa', 'Hugo', 'Inès', 'Paul', 'Aya', 'Marc', 'Chloé', 'Samir', 'Jeanne', 'Louis', 'Nina', 'Théo', 'Emma', 'Yanis'].map((n) => n + seed);
+const forceLod = params.get('lod') === '1' ? true : params.get('lod') === '0' ? false : undefined;
+const view = params.get('view') || 'board';
 const n = +params.get('n') || 0;
-const lod = params.get('lod') === '1';
-if (n) {
-  // test de charge : n personnages qui marchent / courent
-  for (let i = 0; i < n; i++) {
-    const c = createCharacter(ctx, { name: 'pieton' + i, lod: lod || i > 12 });
-    c.group.position.set((i % 16) * 1.3 - 10, 0, -Math.floor(i / 16) * 2.2);
-    c.group.rotation.y = Math.PI;
-    c.setState({ anim: i % 3 === 0 ? 'run' : i % 3 === 1 ? 'walk' : 'idle', speed: i % 3 === 0 ? 6 : 1.5 });
-    scene.add(c.group); chars.push(c);
-  }
-  camera.position.set(0, 5, 14); camera.lookAt(0, 0.8, -3);
-} else {
-  CHARACTER_ANIMS.forEach((anim, row) => {
-    NAMES.forEach((name, col) => {
-      const c = createCharacter(ctx, { name: name + (params.get('seed') || ''), lod: lod || (col === NAMES.length - 1), color: col === 0 ? '#3a86ff' : undefined });
-      c.group.position.set((col - (NAMES.length - 1) / 2) * 1.25, anim === 'jump' || anim === 'fall' ? 0.5 : 0, -row * 2.4);
-      c.group.rotation.y = Math.PI + (params.has('rot') ? +params.get('rot') * Math.PI / 180 : 0.35); // tournés vers la caméra
-      c.setState({ anim, speed: anim === 'run' ? 6.5 : 1.6 });
-      scene.add(c.group); chars.push(c);
-    });
-    const lab = document.createElement('div'); lab.className = 'lab'; lab.textContent = anim; lab.dataset.row = row; document.body.appendChild(lab);
+const add = (name, x, z, rotDeg, anim, speed, extra = {}) => {
+  const t0 = performance.now();
+  const outfit = {}; for (const k of ['top', 'bottom', 'shoes', 'hair', 'hat', 'bag']) if (params.get(k)) outfit[k] = params.get(k);
+  const c = createCharacter(ctx, { name, lod: forceLod, gender: params.get('gender') || undefined, outfit, ...extra });
+  c.buildMs = performance.now() - t0;
+  c.group.position.set(x, 0, z); c.group.rotation.y = Math.PI + rotDeg * Math.PI / 180;
+  c.setState({ anim, speed, wheel: anim === 'sit' && params.get('wheel') !== '0' ? { x: 0, y: (0.5 + 0.36) * c.scale, z: -0.38, r: 0.175 } : null, steer: +(params.get('steer') || 0) });
+  if (anim === 'sit') for (let k = 0; k < 20; k++) c.setState({ steer: +(params.get('steer') || 0) });
+  scene.add(c.group); chars.push(c); return c;
+};
+let buildFirst = 0;
+if (params.get('atlas')) {
+  const a = getAtlas().canvases[params.get('atlas')] || getAtlas().canvases.albedo;
+  const d = document.createElement('div'); d.id = 'atlas'; a.style.width = '100%'; d.appendChild(a); document.body.appendChild(d);
+} else if (n) {
+  for (let i = 0; i < n; i++) add('pieton' + i + seed, (i % 16) * 1.3 - 9.75, -Math.floor(i / 16) * 2.4, 0, i % 3 === 0 ? 'run' : i % 3 === 1 ? 'walk' : 'idle', i % 3 === 0 ? 6 : 1.4);
+  camera.position.set(0, 5.5, 16); camera.lookAt(0, 0.8, -3);
+} else if (view === 'board') {
+  const N = 12;
+  [['idle', 0, 0], ['idle', 0, 35], ['idle', 0, 180], ['walk', 1.4, 35], ['run', 6.2, 80], ['sit', 0, 60]].forEach(([anim, speed, rot], row) => {
+    if (params.has('row') && +params.get('row') !== row) return;
+    for (let i = 0; i < N; i++) add(NAMES[i], (i - (N - 1) / 2) * 1.05, -row * 2.3, rot, anim, speed);
   });
-  const cam = params.get('cam');
-  if (cam === 'close') { const r = +(params.get('row') || 0), cx = +(params.get('cx') || -1.2); camera.position.set(cx, 1.4, 3.4 - r * 2.4); camera.lookAt(cx, 0.95, -r * 2.4); }
-  else if (cam === 'sit') { camera.position.set(2.5, 1.2, -7.2 + 3.2); camera.lookAt(0, 0.7, -7.2); }
-  else { camera.position.set(7.5, 6.2, 9.5); camera.lookAt(0, 0.6, -5.4); }
+  const r = +(params.get('row') ?? -1);
+  if (r >= 0) { camera.fov = 13; camera.position.set(0, 1.2, 17 - r * 2.3); camera.lookAt(0, 0.9, -r * 2.3); }
+  else { camera.position.set(0, 9.5, 14); camera.lookAt(0, 0.3, -5.2); }
+} else {
+  const i0 = +(params.get('i') || 0), rot = +(params.get('rot') || 0);
+  const count = view === 'face' ? 4 : view === 'hands' ? 2 : view === 'anim' ? 6 : 5;
+  const gap = view === 'face' ? 0.34 : view === 'hands' ? 0.75 : 1.0;
+  for (let i = 0; i < count; i++) add(NAMES[(i0 + i) % NAMES.length], (i - (count - 1) / 2) * gap, 0, view === 'anim' ? 90 : rot, view === 'anim' ? ['walk', 'walk', 'run', 'run', 'sit', 'idle'][i] : params.get('anim') || 'idle', view === 'anim' ? [1.2, 2.2, 4.5, 6.5, 0, 0][i] : +(params.get('speed') || 1.4), { lod: forceLod ?? false });
+  camera.fov = 20;
+  if (view === 'face') { camera.position.set(0, 1.6, 2.6); camera.lookAt(0, 1.57, 0); }
+  else if (view === 'hands') { camera.position.set(0, 0.95, 1.9); camera.lookAt(0, 0.86, 0); }
+  else if (view === 'anim') { camera.fov = 11; camera.position.set(0, 1.1, 13); camera.lookAt(0, 0.9, 0); }
+  else { camera.position.set(0, 1.2, 9.5); camera.lookAt(0, 0.92, 0); }
 }
-const v = new THREE.Vector3();
+camera.updateProjectionMatrix();
+const builds = chars.map((c) => c.buildMs).sort((a, b) => a - b);
+window.__chars = chars; window.__builds = builds;
+const freeze = params.has('t') ? +params.get('t') : null;
+if (freeze != null) for (let i = 0; i < 240; i++) for (const c of chars) c.update(freeze / 240);
 const clock = new THREE.Clock();
 let fpsT = 0, fpsN = 0;
-window.__chars = chars;
 renderer.setAnimationLoop(() => {
   const dt = Math.min(clock.getDelta(), 0.05);
-  for (const c of chars) c.update(dt);
+  if (freeze == null) for (const c of chars) c.update(dt);
   renderer.render(scene, camera);
   fpsT += dt; fpsN++;
-  if (fpsT > 0.5) { document.getElementById('info').textContent = `${chars.length} personnages — ${Math.round(fpsN / fpsT)} fps — ${renderer.info.render.calls} draw calls — ${renderer.info.render.triangles} triangles`; window.__fps = fpsN / fpsT; fpsT = 0; fpsN = 0; }
-  for (const lab of document.querySelectorAll('.lab')) {
-    v.set(-5.6, 0.2, -lab.dataset.row * 2.4).project(camera);
-    lab.style.left = ((v.x + 1) / 2 * innerWidth) + 'px'; lab.style.top = ((1 - v.y) / 2 * innerHeight) + 'px';
+  if (fpsT > 0.5) {
+    window.__fps = fpsN / fpsT;
+    window.__stats = { chars: chars.length, fps: Math.round(window.__fps), calls: renderer.info.render.calls, tris: renderer.info.render.triangles, buildMedian: +(builds[builds.length >> 1] || 0).toFixed(2), buildMax: +(builds[builds.length - 1] || 0).toFixed(2), buildTotal: +builds.reduce((a, b) => a + b, 0).toFixed(1) };
+    document.getElementById('info').textContent = `${chars.length} personnages — ${Math.round(window.__fps)} fps — ${renderer.info.render.calls} draw calls — ${renderer.info.render.triangles} triangles — création : médiane ${window.__stats.buildMedian} ms, max ${window.__stats.buildMax} ms`;
+    fpsT = 0; fpsN = 0;
   }
 });
 addEventListener('resize', () => { renderer.setSize(innerWidth, innerHeight); camera.aspect = innerWidth / innerHeight; camera.updateProjectionMatrix(); });

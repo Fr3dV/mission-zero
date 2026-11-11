@@ -10,7 +10,9 @@ const ROWS = 15;
 const GLASS = { color: 0x2b3038, rough: 0.05, metal: 0.88 };
 const TRIM = { color: 0x08090a, rough: 0.12, metal: 0.3 };
 const DARK = { color: 0x0a0a0b, rough: 0.75, metal: 0 };
-const DEFAULT_PLAN = [[0, 0.58], [0.008, 0.72], [0.03, 0.84], [0.07, 0.925], [0.15, 0.985], [0.3, 1], [0.8, 1], [0.92, 0.975], [0.965, 0.92], [0.99, 0.82], [1, 0.7]];
+const LINER = { color: 0x17181a, rough: 0.9, metal: 0 };
+const GLASS_T = { color: 0x080b0e, rough: 0.7, metal: 0 }; // matériau vitrage : rough = opacité
+const DEFAULT_PLAN = [[0, 0.9], [0.04, 0.955], [0.12, 0.99], [0.3, 1], [0.8, 1], [0.92, 0.985], [1, 0.92]];
 
 /** Normales lissées avec seuil d'arête vive. pos : tableau plat de triangles non indexés. */
 function creasedNormals(pos, cosA) {
@@ -50,7 +52,11 @@ export function makeProfile(spec, def) {
   const beltIn = curve(def.beltIn || [[0, 0.03], [1, 0.03]]);
   const tum = def.tum ?? 0.42, tuck = def.tuck ?? 0.025, roofMin = hw * (def.roofW ?? 0.5), hoodP = def.hoodP ?? 2.2, sideMid = def.sideMid ?? 0.4;
   const R = def.wheelR, tireW = def.tireW, gap = def.archGap ?? 0.05, Ra = R + gap;
-  const zOf = (t) => (t - 0.5) * L, tOf = (z) => z / L + 0.5;
+  // extrémités bombées : les stations 0..1 occupent la longueur moins les deux « dômes » de bouclier
+  const bF = def.noseBulge ?? 0.12, bR = def.tailBulge ?? 0.1, LB = L - bF - bR;
+  const CAP_TH = ((def.capAngle ?? 72) * Math.PI) / 180;
+  const zOf = (t) => -L / 2 + bF + t * LB, tOf = (z) => (z + L / 2 - bF) / LB;
+  const hollow = def.sideHollow ?? 0.012;
   const axles = [def.axleF, def.axleR].map((t) => ({ t, z: zOf(t) }));
   const crestR = Ra + (def.archCrest ?? 0.03);
   // la ligne de caisse passe toujours au-dessus des passages de roue (galbe d'aile automatique)
@@ -85,8 +91,8 @@ export function makeProfile(spec, def) {
     o[4] = Math.max(x1, w - tuck - 0.04); o[5] = yb + 0.012;
     o[6] = w - tuck; o[7] = yb + Math.min(0.09, sh * 0.2);
     o[8] = w; o[9] = yb + sh * sideMid;
-    o[10] = w - ins * 0.12; o[11] = yb + sh * 0.64;
-    o[12] = w - ins * 0.5; o[13] = yb + sh * 0.86;
+    o[10] = w - ins * 0.12 - hollow; o[11] = yb + sh * 0.64;
+    o[12] = w - ins * 0.42; o[13] = yb + sh * 0.86;
     o[14] = wb + ins * 0.1; o[15] = yb + sh * 0.975;
     o[16] = wb; o[17] = ybelt;
     // partie haute : forme « capot » (arche) fondue vers la forme « habitacle » (vitre latérale + pavillon)
@@ -130,8 +136,20 @@ export function makeProfile(spec, def) {
     }
     return best;
   }
-  function inside(t, ax, y) {
-    section(t, S);
+  /** Section généralisée : u ∈ [-1,0[ dôme avant, [0,1] caisse, ]1,2] dôme arrière. */
+  const capKy = def.capKy ?? 0.3;
+  function secU(u, o) {
+    if (u >= 0 && u <= 1) return section(u, o);
+    const end = u < 0 ? 0 : 1, th = (u < 0 ? -u : u - 1) * CAP_TH;
+    section(end, o);
+    const c = Math.cos(th), sx = c, sy = 1 - capKy * (1 - c);
+    const yc = o[1] + 0.45 * (o[ROWS * 2 - 1] - o[1]);
+    for (let j = 0; j < ROWS; j++) { o[j * 2] *= sx; o[j * 2 + 1] = yc + (o[j * 2 + 1] - yc) * sy; }
+    return o;
+  }
+  const zU = (u) => (u < 0 ? zOf(0) - bF * Math.sin(-u * CAP_TH) / Math.sin(CAP_TH) : u > 1 ? zOf(1) + bR * Math.sin((u - 1) * CAP_TH) / Math.sin(CAP_TH) : zOf(u));
+  function inside(u, ax, y) {
+    secU(u, S);
     let c = false;
     for (let j = 0; j < ROWS - 1; j++) {
       const yj = S[j * 2 + 1], yk = S[j * 2 + 3];
@@ -141,16 +159,29 @@ export function makeProfile(spec, def) {
   }
   /** z de la surface vue de face (dir = +1) ou de l'arrière (dir = -1) au point (x, y). */
   function zFace(x, y, dir) {
-    const ax = Math.abs(x), t0 = dir > 0 ? 0 : 1, step = 0.006 * dir;
-    if (inside(t0, ax, y)) return zOf(t0);
-    let t = t0, n = 0;
-    do { t += step; n++; } while (n < 90 && !inside(t, ax, y));
-    if (n >= 90) return null;
-    let lo = t - step, hi = t;
-    for (let k = 0; k < 11; k++) { const m = (lo + hi) / 2; if (inside(m, ax, y)) hi = m; else lo = m; }
-    return zOf(hi);
+    const ax = Math.abs(x), u0 = dir > 0 ? -1 : 2;
+    if (inside(u0, ax, y)) return zU(u0);
+    let u = u0, prev = u0, n = 0, hit = false;
+    while (n++ < 110) {
+      prev = u;
+      const inDome = dir > 0 ? u < -1e-9 : u > 1 + 1e-9;
+      u += dir * (inDome ? 0.125 : 0.006);
+      if (inside(u, ax, y)) { hit = true; break; }
+    }
+    if (!hit) return null;
+    let lo = prev, hi = u;
+    for (let k = 0; k < 12; k++) { const m = (lo + hi) / 2; if (inside(m, ax, y)) hi = m; else lo = m; }
+    return zU(hi);
   }
-  return { L, hw, top, belt, bottom, plan, section, xAt, yTopAt, zFace, zOf, tOf, R, tireW, Ra, axles, def, spec, flare, flareAt };
+  // siège conducteur : bassin sous la ligne de caisse et tête sous le pavillon
+  const cabD = def.cabin;
+  const seatT = def.seatT ?? ((cabD.cowl + Math.min(cabD.rearTop ?? 0.62, 0.66)) / 2 + 0.035);
+  section(seatT, S);
+  const seat = {
+    x: -(def.seatX ?? Math.min(0.4, S[16] * 0.46)), z: zOf(seatT),
+    y: def.seatY ?? Math.max(bottom(seatT) + 0.09, Math.min(belt(seatT) - 0.36, top(seatT) - 0.92)),
+  };
+  return { L, hw, top, belt, bottom, plan, section, secU, zU, xAt, yTopAt, zFace, zOf, tOf, R, tireW, Ra, axles, def, spec, flare, flareAt, seat, CAP_TH };
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -179,13 +210,14 @@ function addDecal(P, d, out) {
     const y = P.yTopAt(P.tOf(b), Math.abs(a)); return y === null ? null : [a, y, b];
   };
   const dir = PROJ_DIR[proj], lift = d.lift ?? 0.006;
-  const target = d.m === 'light' ? out.lights : out.decals;
-  const style = { color: d.c ?? 0x050505, rough: d.r ?? (d.m === 'light' ? 0.2 : 0.6), metal: d.mt ?? 0 };
+  const target = d.m === 'light' ? out.lights : d.m === 'glass' ? out.glassDecals : out.decals;
+  const style = { color: d.c ?? 0x050505, rough: d.r ?? (d.m === 'light' ? 0.2 : 0.6), metal: d.mt ?? 0, fx: d.fx ?? 0 };
+  const fxS = d.fxScale ?? 1;
   const uvRect = d.plate != null ? ATLAS_UV.plates[d.plate % ATLAS_UV.plates.length] : null;
   for (const g of shapeGrids(d)) {
     const { nu, nv } = g, W = nv + 1;
-    const pts = [], nrm = [];
-    for (let i = 0; i <= nu; i++) for (let j = 0; j <= nv; j++) { const [a, b] = g.pt(i / nu, j / nv); pts.push(project(a, b)); nrm.push([0, 0, 0]); }
+    const pts = [], nrm = [], prm = [];
+    for (let i = 0; i <= nu; i++) for (let j = 0; j <= nv; j++) { const [a, b] = g.pt(i / nu, j / nv); pts.push(project(a, b)); nrm.push([0, 0, 0]); prm.push([a, b]); }
     const tris = [];
     for (let i = 0; i < nu; i++) for (let j = 0; j < nv; j++) {
       const a = i * W + j, b = (i + 1) * W + j, c = (i + 1) * W + j + 1, e = i * W + j + 1;
@@ -207,11 +239,12 @@ function addDecal(P, d, out) {
       const st = { ...style, ch: d.ch === 'blink' ? (s > 0 ? CH.BLINK_R : CH.BLINK_L) : d.ch ?? 0 };
       for (const t of tris) {
         const idx = s > 0 ? t : [t[0], t[2], t[1]];
-        const p = [], n = [], uv = uvRect ? [] : null;
+        const p = [], n = [], uv = uvRect || d.fx ? [] : null;
         for (const k of idx) {
           const q = pts[k], m = nrm[k];
           p.push(s * (q[0] + m[0] * lift), q[1] + m[1] * lift, q[2] + m[2] * lift); n.push(s * m[0], m[1], m[2]);
-          if (uv) { const i = Math.floor(k / W), j = k % W; uv.push(lerp(uvRect[0], uvRect[2], i / nu), lerp(uvRect[1], uvRect[3], j / nv)); }
+          if (uvRect) { const i = Math.floor(k / W), j = k % W; uv.push(lerp(uvRect[0], uvRect[2], i / nu), lerp(uvRect[1], uvRect[3], j / nv)); }
+          else if (uv) uv.push(prm[k][0] * fxS, prm[k][1] * fxS);
         }
         target.tri(p, n, st, uv);
       }
@@ -227,8 +260,8 @@ function addDecal(P, d, out) {
 export function buildCar(spec, def, lod = false, shared = null) {
   const P = shared?.P || makeProfile(spec, def);
   const { L, hw, section, zOf, R, tireW, Ra } = P;
-  const paint = new GeoBuilder(), misc = new GeoBuilder();
-  const out = shared?.out || { lights: new GeoBuilder(), decals: new GeoBuilder() };
+  const paint = new GeoBuilder(), misc = new GeoBuilder(), glass = new GeoBuilder();
+  const out = shared?.out || { lights: new GeoBuilder(), decals: new GeoBuilder(), glassDecals: new GeoBuilder() };
   const cab = def.cabin;
 
   // ---- stations longitudinales
@@ -258,6 +291,10 @@ export function buildCar(spec, def, lod = false, shared = null) {
     stList.push({ t: tA, k: tA - 1e-7, inner: false }, { t: tA, k: tA + 1e-7, inner: true }, { t: tB, k: tB - 1e-7, inner: true }, { t: tB, k: tB + 1e-7, inner: false });
   }
   stList.sort((a, b) => a.k - b.k);
+  for (const s of stList) s.u = s.t;
+  const capU = lod ? [0.5, 1] : [0.2, 0.4, 0.6, 0.8, 1];
+  for (const c of capU) { stList.unshift({ t: 0, u: -c, inner: false, cap: true }); stList.push({ t: 1, u: 1 + c, inner: false, cap: true }); }
+  stList.sort((a, b) => a.u - b.u || 0);
   const stations = stList.map((s) => s.t);
   const NS = stations.length;
 
@@ -272,15 +309,15 @@ export function buildCar(spec, def, lod = false, shared = null) {
     return S[16];
   };
   for (let i = 0; i < NS; i++) {
-    section(stations[i], S);
-    const z0 = zOf(stations[i]);
+    P.secU(stList[i].u, S);
+    const z0 = P.zU(stList[i].u);
     let arch = null, dzA = 0;
-    for (const a of P.axles) { const dz = z0 - a.z; if (Math.abs(dz) < Ra - 1e-5 || (stList[i].inner && Math.abs(Math.abs(dz) - Ra) < 1e-4)) { arch = a; dzA = dz; } }
+    if (!stList[i].cap) for (const a of P.axles) { const dz = z0 - a.z; if (Math.abs(dz) < Ra - 1e-5 || (stList[i].inner && Math.abs(Math.abs(dz) - Ra) < 1e-4)) { arch = a; dzA = dz; } }
     const yb = S[1], ybelt = S[17];
     let acc = 0, px = 0, py = 0;
     for (let j = 0; j < ROWS; j++) {
       let x = S[j * 2], y = S[j * 2 + 1];
-      if (j >= 2 && j <= 7) {
+      if (j >= 2 && j <= 7 && !stList[i].cap) {
         if (arch) {
           const yA = R + Math.sqrt(Math.max(0, Ra * Ra - dzA * dzA));
           if (j <= 3) { y = yA; x = xOnSide(yA) + flare - (j === 2 ? 0.03 : 0); }
@@ -298,7 +335,7 @@ export function buildCar(spec, def, lod = false, shared = null) {
   }
 
   // ---- triangles + étiquette matériau
-  const pos = [], uvs = [], tags = [];
+  const pos = [], uvs = [], tags = [], tinf = [];
   const inRange = (t, r) => r && t >= r[0] && t <= r[1];
   const clad = def.clad || [];
   const bandTag = (j, t) => {
@@ -312,8 +349,8 @@ export function buildCar(spec, def, lod = false, shared = null) {
     }
     if (j >= 11) {
       if (t > cab.cowl && t < cab.wsTop) return 'glass';
-      if (cab.rearTop != null && t > cab.rearTop && t < cab.rearBot) return 'glass';
-      if (inRange(t, def.roofGlass)) return 'glass';
+      if (cab.rearTop != null && t > cab.rearTop && t < cab.rearBot) return def.rearGlassOpaque ? 'glassR' : 'glass';
+      if (inRange(t, def.roofGlass)) return 'glassR';
     }
     return 'paint';
   };
@@ -324,8 +361,8 @@ export function buildCar(spec, def, lod = false, shared = null) {
       const a = i * ROWS + j, b = a + ROWS;
       if (j === 1 && inZ[i] && inZ[i + 1]) continue;                               // dessous du passage
       const tag = bandTag(j, tm);
-      pushV(i, j); pushV(i + 1, j); pushV(i + 1, j + 1); tags.push(tag);
-      pushV(i, j); pushV(i + 1, j + 1); pushV(i, j + 1); tags.push(tag);
+      pushV(i, j); pushV(i + 1, j); pushV(i + 1, j + 1); tags.push(tag); tinf.push(tm);
+      pushV(i, j); pushV(i + 1, j + 1); pushV(i, j + 1); tags.push(tag); tinf.push(tm);
     }
   }
   // orientation globale (volume signé positif = normales sortantes)
@@ -345,18 +382,18 @@ export function buildCar(spec, def, lod = false, shared = null) {
       const tag = 'paint';
       if (nz * dirz > 0) { pos.push(0, cy, cz, V[a], V[a + 1], V[a + 2], V[b], V[b + 1], V[b + 2]); uvs.push(0, cy * 7, V[a] * 7, V[a + 1] * 7, V[b] * 7, V[b + 1] * 7); }
       else { pos.push(0, cy, cz, V[b], V[b + 1], V[b + 2], V[a], V[a + 1], V[a + 2]); uvs.push(0, cy * 7, V[b] * 7, V[b + 1] * 7, V[a] * 7, V[a + 1] * 7); }
-      tags.push(tag);
+      tags.push(tag); tinf.push(-9);
     }
   }
   // suppression des triangles dégénérés
-  const fp = [], fuv = [], ftag = [];
+  const fp = [], fuv = [], ftag = [], ft = [];
   for (let t = 0; t < tags.length; t++) {
     const o = t * 9;
     const ax = pos[o + 3] - pos[o], ay = pos[o + 4] - pos[o + 1], az = pos[o + 5] - pos[o + 2], bx = pos[o + 6] - pos[o], by = pos[o + 7] - pos[o + 1], bz = pos[o + 8] - pos[o + 2];
     if (Math.hypot(ay * bz - az * by, az * bx - ax * bz, ax * by - ay * bx) < 1e-9) continue;
     for (let k = 0; k < 9; k++) fp.push(pos[o + k]);
     for (let k = 0; k < 6; k++) fuv.push(uvs[t * 6 + k]);
-    ftag.push(tags[t]);
+    ftag.push(tags[t]); ft.push(tinf[t]);
   }
   // miroir
   const nh = ftag.length;
@@ -364,14 +401,35 @@ export function buildCar(spec, def, lod = false, shared = null) {
     const o = t * 9, u = t * 6;
     fp.push(-fp[o], fp[o + 1], fp[o + 2], -fp[o + 6], fp[o + 7], fp[o + 8], -fp[o + 3], fp[o + 4], fp[o + 5]);
     fuv.push(fuv[u], fuv[u + 1], fuv[u + 4], fuv[u + 5], fuv[u + 2], fuv[u + 3]);
-    ftag.push(ftag[t]);
+    ftag.push(ftag[t]); ft.push(ft[t]);
   }
   const fn = creasedNormals(fp, Math.cos(((def.crease ?? 52) * Math.PI) / 180));
-  const STY = { glass: GLASS, trim: TRIM, dark: DARK };
+  const STY = { glass: GLASS, glassR: GLASS, trim: TRIM, dark: DARK };
+  const cabA = cab.cowl - 0.012, cabB = def.cabEnd ?? cab.rearBot ?? (def.sideGlass ? def.sideGlass[1] + 0.012 : 0.7);
   for (let t = 0; t < ftag.length; t++) {
-    const p = fp.slice(t * 9, t * 9 + 9), n = fn.subarray(t * 9, t * 9 + 9);
-    if (ftag[t] === 'paint') paint.tri(p, n, {}, fuv.slice(t * 6, t * 6 + 6));
-    else misc.tri(p, n, STY[ftag[t]]);
+    const p = fp.slice(t * 9, t * 9 + 9), n = fn.subarray(t * 9, t * 9 + 9), tag = ftag[t];
+    if (tag === 'paint') paint.tri(p, n, {}, fuv.slice(t * 6, t * 6 + 6));
+    else if (tag === 'glass' && !lod) glass.tri(p, n, GLASS_T);
+    else misc.tri(p, n, STY[tag]);
+    // doublure intérieure : la coque vue de l'habitacle (montants, pavillon, contre-portes, plancher)
+    if (!lod && tag !== 'glass' && ft[t] > cabA && ft[t] < cabB) {
+      misc.tri([p[0], p[1], p[2], p[6], p[7], p[8], p[3], p[4], p[5]], [-n[0], -n[1], -n[2], -n[6], -n[7], -n[8], -n[3], -n[4], -n[5]], LINER);
+    }
+  }
+  if (!lod) {
+    // cloisons avant (tablier) et arrière de l'habitacle
+    const SW = new Float64Array(ROWS * 2);
+    for (const [tw, nz] of [[cabA, 1], [cabB, -1]]) {
+      section(tw, SW);
+      const z = zOf(tw), cy = (SW[1] + SW[ROWS * 2 - 1]) / 2;
+      for (let j = 0; j < ROWS - 1; j++) for (const sgn of [1, -1]) {
+        const a = [sgn * SW[j * 2], SW[j * 2 + 1], z], b = [sgn * SW[j * 2 + 2], SW[j * 2 + 3], z];
+        const cr = (a[0]) * (b[1] - cy) - (a[1] - cy) * (b[0]);
+        const q = cr * nz > 0 ? [0, cy, z, ...a, ...b] : [0, cy, z, ...b, ...a];
+        misc.tri(q, [0, 0, nz, 0, 0, nz, 0, 0, nz], LINER);
+      }
+    }
+    addInterior(P, def, misc, cabA, cabB);
   }
 
   // ---- roues (positions) et passages de roue (coquilles sombres)
@@ -416,7 +474,7 @@ export function buildCar(spec, def, lod = false, shared = null) {
 
   // ---- détails projetés (optiques, prises d'air, plaques, joints) — construits une seule fois (partagés avec le LOD)
   if (!shared) {
-    for (const d of def.decals || []) addDecal(P, d, out);
+    for (const d of (typeof def.decals === 'function' ? def.decals(P) : def.decals) || []) addDecal(P, d, out);
     const seam = { color: 0x030303, rough: 0.9, metal: 0 };
     for (const t of def.seams || []) {
       const z = zOf(t), y0 = P.bottom(t) + 0.1, y1 = P.belt(t) - 0.012;
@@ -441,12 +499,14 @@ export function buildCar(spec, def, lod = false, shared = null) {
     };
     if (pl.front != null) plate('front', pl.front, def.plateIdx ?? 0);
     if (pl.rear != null) plate('rear', pl.rear, def.plateIdx ?? 0);
+    autoDetails(P, def, out);
     addExtras(P, def, paint, out);
     out.extraPaint = new GeoBuilder();
     addPaintExtras(P, def, out.extraPaint, out);
   }
   paint.append(out.extraPaint);
   misc.append(out.decals);
+  if (!lod) glass.append(out.glassDecals);
 
   let wheelGeo = null;
   const wopt = { R, W: tireW, ...(def.wheel || {}) };
@@ -458,6 +518,7 @@ export function buildCar(spec, def, lod = false, shared = null) {
     paint: paint.build(['uv']),
     misc: misc.build(['uv', 'color', 'pbr']),
     lights: shared ? null : out.lights.build(['uv', 'color', 'lch']),
+    glass: lod ? null : glass.build(['color', 'pbr']),
   };
 }
 
@@ -510,7 +571,7 @@ function addPaintExtras(P, def, paint, out) {
     const w = def.wing, t = w.t, z = P.zOf(t), span = P.hw * 2 * (w.span ?? 0.82), chord = w.chord ?? 0.26;
     const yBase = P.top(t), y = yBase + (w.h ?? 0.12);
     const target = w.dark ? decals : paint;
-    const st = w.dark ? { color: 0x0b0b0c, rough: 0.35, metal: 0.1 } : {};
+    const st = w.carbon ? { color: 0x2a2b2e, rough: 0.22, metal: 0.2, fx: 2, uv: 'xz' } : w.dark ? { color: 0x0b0b0c, rough: 0.35, metal: 0.1 } : {};
     const g = new THREE.BoxGeometry(span, 0.022, chord, 8, 1, 3);
     const p = g.attributes.position;
     for (let i = 0; i < p.count; i++) {
@@ -525,5 +586,93 @@ function addPaintExtras(P, def, paint, out) {
       const yb = P.yTopAt(t, Math.abs(px)) ?? yBase;
       decals.add(new THREE.BoxGeometry(0.03, Math.max(0.02, y - yb) + 0.02, chord * 0.55), mat(px, (y + yb) / 2 - 0.01, z), { color: 0x0b0b0c, rough: 0.4, metal: 0.1 });
     }
+  }
+}
+
+// ---------------------------------------------------------------------------------------------
+// Détails automatiques : joints de capot/coffre, bas de portes, lécheurs de vitres, essuie-glaces.
+function autoDetails(P, def, out) {
+  const cab = def.cabin, S = new Float64Array(ROWS * 2);
+  const SEAM = { c: 0x030303, r: 0.9, lift: 0.0025 };
+  const wbAt = (t) => P.section(t, S)[16];
+  // capot : deux joints longitudinaux + joint avant
+  if (def.hoodSeam !== false) {
+    const k = def.hoodSeam ?? 0.86, tA = def.hoodFront ?? 0.035, tB = cab.cowl - 0.012, strip = [];
+    for (let i = 0; i <= 10; i++) { const t = lerp(tA, tB, i / 10), x = wbAt(t) * k, z = P.zOf(t); strip.push([x - 0.004, z, x + 0.004, z]); }
+    addDecal(P, { p: 'top', strip, sub: [2, 1], ...SEAM }, out);
+    const xf = wbAt(tA) * k, zf = P.zOf(tA);
+    addDecal(P, { p: 'top', center: true, quad: [[-xf, zf - 0.004], [xf, zf - 0.004], [xf, zf + 0.004], [-xf, zf + 0.004]], sub: [14, 1], ...SEAM }, out);
+  }
+  // coffre / hayon
+  if (def.trunkSeam != null) {
+    const tA = def.trunkSeam, tB = def.trunkEnd ?? 0.985, k = def.trunkK ?? 0.84, strip = [];
+    for (let i = 0; i <= 6; i++) { const t = lerp(tA, tB, i / 6), x = wbAt(t) * k, z = P.zOf(t); strip.push([x - 0.004, z, x + 0.004, z]); }
+    addDecal(P, { p: 'top', strip, sub: [2, 1], ...SEAM }, out);
+    const xf = wbAt(tA) * k, zf = P.zOf(tA);
+    addDecal(P, { p: 'top', center: true, quad: [[-xf, zf - 0.004], [xf, zf - 0.004], [xf, zf + 0.004], [-xf, zf + 0.004]], sub: [14, 1], ...SEAM }, out);
+  }
+  // bas de portes
+  const sm = def.seams || [];
+  if (sm.length >= 2) {
+    const strip = [];
+    for (let i = 0; i <= 8; i++) { const t = lerp(sm[0], sm[sm.length - 1], i / 8), y = P.bottom(t) + 0.105; strip.push([P.zOf(t), y, P.zOf(t), y + 0.008]); }
+    addDecal(P, { p: 'side', strip, sub: [2, 1], ...SEAM }, out);
+  }
+  // lécheurs de vitres (jonc chromé ou noir brillant sous le vitrage latéral)
+  if (def.sideGlass && def.beltTrim !== false) {
+    const strip = [], [g0, g1] = def.sideGlass;
+    for (let i = 0; i <= 14; i++) { const t = lerp(g0 + 0.02, g1, i / 14), y = P.belt(t); strip.push([P.zOf(t), y - 0.02, P.zOf(t), y - 0.004]); }
+    addDecal(P, { p: 'side', strip, sub: [2, 1], c: def.beltTrim === 'chrome' ? 0xd0d3d6 : 0x060607, r: 0.15, mt: def.beltTrim === 'chrome' ? 1 : 0.2, lift: 0.004 }, out);
+  }
+  // essuie-glaces
+  if (def.wipers !== false) {
+    const z = P.zOf(cab.cowl) + (def.wiperDz ?? 0.07), w = wbAt(cab.cowl);
+    for (const [x0, x1] of [[-0.08, -0.72 * w], [0.12 * w + 0.1, 0.62 * w]]) {
+      addDecal(P, { p: 'top', center: true, quad: [[x0, z - 0.012], [x1, z - 0.03], [x1, z - 0.012], [x0, z + 0.012]], sub: [8, 1], c: 0x050505, r: 0.45, lift: 0.014 }, out);
+    }
+  }
+}
+
+// Habitacle : sièges, planche de bord, volant, console, banquette (géométrie simple fusionnée dans « divers »).
+function addInterior(P, def, misc, cabA, cabB) {
+  const io = def.interior || {};
+  const seatC = { color: io.seat ?? 0x26272a, rough: 0.72, metal: 0 }, dashC = { color: io.dash ?? 0x0e0f11, rough: 0.6, metal: 0 };
+  const S = new Float64Array(ROWS * 2);
+  const st = P.seat, sx = -st.x, sy = st.y, sz = st.z, rec = io.recline ?? 0.32;
+  const floorY = P.bottom(P.tOf(sz)) + 0.012;
+  const box = (w, h, d, x, y, z, rx, c) => {
+    // rien ne dépasse sous le plancher
+    const low = y - h / 2 - Math.abs(Math.sin(rx)) * d / 2;
+    if (low < floorY) { const cut = floorY - low; h = Math.max(0.03, h - cut); y += cut / 2; }
+    misc.add(new THREE.BoxGeometry(w, h, d), mat(x, y, z, rx, 0, 0), c);
+  };
+  const seatAt = (x, z, w) => {
+    box(w, 0.13, 0.5, x, sy - 0.12, z - 0.1, -0.08, seatC);
+    box(w, 0.6, 0.12, x, sy + 0.2, z + 0.2 + Math.sin(rec) * 0.26, rec, seatC);
+    box(Math.min(w, 0.25), 0.19, 0.09, x, sy + 0.2 + Math.cos(rec) * 0.42, z + 0.2 + Math.sin(rec) * 0.7, rec * 0.6, seatC);
+  };
+  seatAt(-sx, sz, 0.5); seatAt(sx, sz, 0.5);
+  // planche de bord + combiné + écran
+  const t0 = def.cabin.cowl + 0.008; P.section(t0, S);
+  const wb = S[16], yb = S[17], z0 = P.zOf(t0);
+  box(2 * (wb - 0.05), 0.34, 0.5, 0, Math.min(yb - 0.15, sy + 0.42), z0 + 0.22, -0.12, dashC);
+  const dashTop = Math.min(yb + 0.02, sy + 0.59);
+  box(0.34, 0.1, 0.16, -sx, dashTop + 0.02, z0 + 0.36, -0.2, dashC);
+  if (io.screen) box(0.36, 0.22, 0.02, 0, dashTop + 0.06, z0 + 0.5, -0.15, { color: 0x06090d, rough: 0.08, metal: 0.4 });
+  // volant
+  const wheelZ = sz - 0.36, wheelY = sy + 0.36;
+  misc.add(new THREE.TorusGeometry(0.175, 0.02, 6, 18), mat(-sx, wheelY, wheelZ, -0.42, 0, 0), { color: 0x0a0a0b, rough: 0.5, metal: 0 });
+  box(0.3, 0.05, 0.03, -sx, wheelY, wheelZ, -0.42, { color: 0x0a0a0b, rough: 0.5, metal: 0 });
+  misc.add(new THREE.CylinderGeometry(0.03, 0.04, Math.max(0.1, wheelZ - (z0 + 0.4)), 8), mat(-sx, wheelY - 0.03, (wheelZ + z0 + 0.4) / 2, Math.PI / 2 - 0.25, 0, 0), dashC);
+  // console centrale
+  box(0.2, 0.2, 0.95, 0, sy - 0.04, sz - 0.12, 0, dashC);
+  // banquette arrière
+  const zr = sz + (io.rearDz ?? 0.86);
+  if (io.rear !== false && zr + 0.45 < P.zOf(cabB)) {
+    P.section(P.tOf(zr), S);
+    const w = 2 * Math.max(0.4, S[16] - 0.12);
+    box(w, 0.13, 0.48, 0, sy - 0.1, zr - 0.08, -0.08, seatC);
+    box(w, 0.56, 0.12, 0, sy + 0.2, zr + 0.22 + Math.sin(0.4) * 0.24, 0.4, seatC);
+    for (const s of [-1, 1]) box(0.24, 0.17, 0.09, s * w * 0.27, sy + 0.2 + Math.cos(0.4) * 0.4, zr + 0.22 + Math.sin(0.4) * 0.66, 0.2, seatC);
   }
 }
