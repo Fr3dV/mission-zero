@@ -1,0 +1,92 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8" />
+  <title>Mission Zéro — banc « direction et adhérence »</title>
+  <link rel="icon" href="data:," />
+  <style>html,body{margin:0;background:#15171b;font:12px/1.5 ui-monospace,monospace;color:#dde}pre{padding:12px;margin:0;white-space:pre}</style>
+  <script type="importmap">
+  { "imports": { "three": "/vendor/three/build/three.module.js", "three/addons/": "/vendor/three/examples/jsm/", "@shared/": "/shared/" } }
+  </script>
+</head>
+<body>
+  <pre id="out">mesure…</pre>
+  <canvas id="c" width="64" height="64" style="display:none"></canvas>
+  <script type="module">
+    // Banc « direction et adhérence » : sol plat, sans décor. Pour chaque véhicule et chaque vitesse, mesure
+    //  - mise en virage : temps pour atteindre 90 % du lacet établi après un braquage à fond (touche maintenue) ;
+    //  - virage établi à plein braquage : accélération latérale (g), rayon (m), glissement, dérive de la caisse ;
+    //  - petit coup de volant (appui de 0,15 s) : changement de cap obtenu (réactivité au clavier) ;
+    //  - chicane (gauche 0,5 s, droite 0,5 s, relâché) : lacet résiduel et temps de stabilisation.
+    //   ?ids=citadine,porsche_911   ?kmh=50,90,130,200      résultat dans window.__steer
+    import * as THREE from 'three';
+    import { VEHICLE_BY_ID } from '@shared/catalog.js';
+    import { heightAt } from '@shared/terrain.js';
+    import { bus } from '/src/core/bus.js';
+    import { collision } from '/src/core/collision.js';
+    import { createVehicles } from '/src/vehicles/index.js';
+
+    const q = new URLSearchParams(location.search);
+    const ids = (q.get('ids') || 'citadine,tesla_model3,porsche_911,lambo_aventador').split(',').filter((i) => VEHICLE_BY_ID[i]);
+    const speeds = (q.get('kmh') || '50,90,130,180,250').split(',').map(Number);
+    const canvas = document.getElementById('c');
+    const renderer = new THREE.WebGLRenderer({ canvas });
+    const scene = new THREE.Scene(), camera = new THREE.PerspectiveCamera(40, 1, 0.1, 100);
+    const ctx = { THREE, renderer, scene, camera, canvas, bus, collision, params: q, quality: 'low', time: 0, heightAt, world: null, player: null, env: null };
+    const vehicles = createVehicles(ctx);
+    const dt = 1 / 60, f2 = (x) => +x.toFixed(2);
+    const drive = (id, kmh) => { const v = vehicles.spawn(id, 0, 0, 0, {}); v.driver = 'bench'; v.setTransform(0, 0, 0, kmh / 3.6); v.phys.kinT = -1; return v; };
+    function run(v, secs, ctl) { for (let t = 0; t < secs; t += dt) { ctl(v, t); ctx.time += dt; vehicles.update(dt); } }
+    const hold = (v, kmh) => { v.controls.brake = 0; v.controls.throttle = v.speed * 3.6 < kmh ? 1 : 0.3; };
+
+    const res = {};
+    for (const id of ids) {
+      res[id] = {};
+      for (const kmh of speeds) {
+        if (kmh / 3.6 > VEHICLE_BY_ID[id].maxSpeed) continue;
+        const o = {};
+        // 1) plein braquage maintenu 5 s
+        let v = drive(id, kmh); run(v, 1, (v) => hold(v, kmh));
+        const yr = []; let slipMax = 0, betaMax = 0;
+        run(v, 5, (v, t) => { hold(v, kmh); v.controls.steer = 1; yr.push(Math.abs(v.yawRate)); slipMax = Math.max(slipMax, v.slip);
+          const fx = -Math.sin(v.yaw), fz = -Math.cos(v.yaw), vf = v.vel.x * fx + v.vel.z * fz, vl = v.vel.x * Math.cos(v.yaw) - v.vel.z * Math.sin(v.yaw); betaMax = Math.max(betaMax, Math.abs(Math.atan2(vl, Math.max(vf, 1)))); });
+        const tail = yr.slice(-90), ss = tail.reduce((a, b) => a + b, 0) / tail.length;
+        const t90 = yr.findIndex((y) => y >= 0.9 * ss) * dt;
+        o['virage établi'] = { g: f2((v.speed * ss) / 9.81), rayon: Math.round(v.speed / Math.max(ss, 1e-6)), kmhFin: Math.round(v.speed * 3.6), glisse: f2(slipMax), dérive: f2(betaMax * 57.3) + '°' };
+        o['mise en virage s'] = f2(t90);
+        vehicles.remove(v);
+        // 2) coup de volant bref (0,15 s) : cap obtenu au bout de 1 s
+        v = drive(id, kmh); run(v, 1, (v) => hold(v, kmh)); const y0 = v.yaw;
+        run(v, 1, (v, t) => { hold(v, kmh); v.controls.steer = t < 0.15 ? 1 : 0; });
+        o['appui bref : cap °'] = f2(Math.abs(v.yaw - y0) * 57.3);
+        vehicles.remove(v);
+        // 3) chicane
+        v = drive(id, kmh); run(v, 1, (v) => hold(v, kmh)); let settle = 0, peak = 0; const x0 = v.pos.x;
+        run(v, 6, (v, t) => { hold(v, kmh); v.controls.steer = t < 0.5 ? -1 : t < 1.0 ? 1 : 0; if (t > 1.0) { peak = Math.max(peak, Math.abs(v.yawRate)); if (Math.abs(v.yawRate) > 0.03) settle = t - 1.0; } });
+        o['chicane'] = { 'stabilisé s': f2(settle), 'lacet max': f2(peak), 'kmh fin': Math.round(v.speed * 3.6) };
+        vehicles.remove(v);
+        res[id][kmh + ' km/h'] = o;
+      }
+    }
+    // Essais complémentaires : freinage 130 → 0, frein à main à 90 km/h (lacet pris puis temps de reprise), 0 → 100 km/h.
+    const extra = {};
+    for (const id of ids) {
+      const e = {};
+      let v = drive(id, 130); run(v, 0.5, (v) => hold(v, 130)); const x0 = v.pos.x, z0 = v.pos.z; let tb = 0;
+      run(v, 8, (v, t) => { v.controls.throttle = 0; v.controls.steer = 0; v.controls.brake = v.speed > 0.3 ? 1 : 0; if (v.speed > 0.3) tb = t; });
+      e['freinage 130→0'] = Math.round(Math.hypot(v.pos.x - x0, v.pos.z - z0)) + ' m en ' + f2(tb) + ' s'; vehicles.remove(v);
+      v = drive(id, 90); run(v, 0.5, (v) => hold(v, 90)); const y0 = v.yaw; let rec = 0, slipMax = 0;
+      run(v, 1.0, (v) => { v.controls.throttle = 0.3; v.controls.steer = 1; v.controls.handbrake = true; slipMax = Math.max(slipMax, v.slip); });
+      const yawHb = Math.abs(v.yaw - y0) * 57.3;
+      run(v, 4, (v, t) => { v.controls.handbrake = false; v.controls.steer = 0; v.controls.throttle = 0.5; if (v.slip > 0.15 || Math.abs(v.yawRate) > 0.08) rec = t; });
+      e['frein à main 1 s à 90'] = 'cap +' + Math.round(yawHb) + '° glisse ' + f2(slipMax) + ', reprise en ' + f2(rec) + ' s, cap final ' + Math.round(Math.abs(v.yaw - y0) * 57.3) + '°'; vehicles.remove(v);
+      v = drive(id, 0); let t100 = 0; run(v, 12, (v, t) => { v.controls.throttle = 1; v.controls.steer = 0; if (!t100 && v.speed * 3.6 >= 100) t100 = t; });
+      e['0→100'] = f2(t100) + ' s'; vehicles.remove(v);
+      extra[id] = e;
+    }
+    window.__extra = extra;
+    window.__steer = res;
+    document.getElementById('out').textContent = JSON.stringify(res, null, 1).replace(/[{}"]/g, '').replace(/\n\s*\n/g, '\n');
+  </script>
+</body>
+</html>

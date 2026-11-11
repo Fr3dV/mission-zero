@@ -4,6 +4,13 @@
 import { STEP_UP } from '@shared/terrain.js';
 
 const G = 9.81, MU0 = 1.05;
+// Appui « arcade » : l'adhérence augmente avec la vitesse, sinon le rayon de virage explose comme v² et la voiture
+// devient raide dès 80 km/h. Gain additif, identique pour tous les modèles (une citadine en profite autant qu'une supercar).
+const AERO_GRIP = 0.9;        // adhérence ajoutée à vitesse infinie
+const AERO_V0 = 30;           // vitesse (m/s) où la moitié du gain est acquise (≈ 108 km/h)
+const aeroGrip = (sp) => (AERO_GRIP * sp * sp) / (sp * sp + AERO_V0 * AERO_V0);
+// Direction : marge du débattement au-delà de l'angle géométrique limite, et vitesse (m/s) où le volant devient 2× plus lent.
+const STEER_MARGIN = 2.0, STEER_SLOW_V = 120;
 const LAUNCH = 0.7;           // part de la vitesse ascensionnelle conservée au décollage
 const DROOP = 0.09;          // débattement en détente : sous cet écart au sol, les roues touchent encore
 export const SAFE_DROP_V = 5.4;   // vitesse verticale d'une chute de 1,5 m : en dessous, réception sans dégât
@@ -92,7 +99,7 @@ function substep(v, h, c, ctx) {
   let vf = v.vel.x * fx + v.vel.z * fz, vl = v.vel.x * rx + v.vel.z * rz;
   const w = -v.yawRate;                                      // > 0 : rotation vers la droite
   const fxm = p.fxm;
-  const mu = MU0 * s.grip * (1 + 0.00002 * vf * vf) * (fxm ? fxm.grip : 1);         // léger appui aéro
+  const mu = MU0 * (s.grip + aeroGrip(Math.hypot(vf, vl))) * (fxm ? fxm.grip : 1);   // appui croissant avec la vitesse
   const av = Math.abs(vf);
   const hasDriver = v.driver != null;
 
@@ -264,12 +271,13 @@ export function stepVehicle(v, dt, ctx) {
   // direction : débattement limité par la vitesse (reste proche de la limite d'adhérence), lissage, contre-braquage assisté
   const fx = -Math.sin(v.yaw), fz = -Math.cos(v.yaw);
   const vf = v.vel.x * fx + v.vel.z * fz, vl = v.vel.x * Math.cos(v.yaw) - v.vel.z * Math.sin(v.yaw);
-  const mu = MU0 * s.grip;
-  const dLim = Math.atan((p.L * mu * G) / Math.max(sp0 * sp0, 1)) * 1.6;
+  const mu = MU0 * (s.grip + aeroGrip(sp0));
+  const dLim = Math.atan((p.L * mu * G) / Math.max(sp0 * sp0, 1)) * STEER_MARGIN;
   const dMax = Math.min(0.6, dLim);
   const target = hasDriver ? clamp(+c.steer || 0, -1, 1) : 0;
-  // volant plus progressif à grande vitesse (voie rapide : un appui bref au clavier ne donne qu'une petite correction)
-  const rate = (Math.abs(target) < Math.abs(p.steerN || 0) || target * (p.steerN || 0) < 0 ? 7 : 4.5) * dt / (1 + (sp0 / 50) * (sp0 / 50));
+  // volant à peine plus progressif à grande vitesse : il doit rester vif (un appui bref au clavier corrige franchement le cap)
+  // (le clavier est déjà lissé par le module joueur : ce second lissage reste rapide pour ne pas ajouter de retard)
+  const rate = (Math.abs(target) < Math.abs(p.steerN || 0) || target * (p.steerN || 0) < 0 ? 10 : 8) * dt / (1 + (sp0 / STEER_SLOW_V) * (sp0 / STEER_SLOW_V));
   p.steerN = (p.steerN || 0) + clamp(target - (p.steerN || 0), -rate, rate);
   let d = p.steerN * dMax;
   if (vf > 4) {
