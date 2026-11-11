@@ -9,6 +9,8 @@
     canvas{position:fixed;inset:0;width:100%;height:100%;display:block}
     #bar{position:fixed;left:10px;top:10px;z-index:2;font-size:12px;background:#000a;padding:8px 10px;border-radius:8px;max-width:70vw;line-height:1.7}
     #bar a{color:#9cf;margin-right:8px;text-decoration:none}
+    #metrics{position:fixed;right:8px;bottom:8px;z-index:2;font:11px/1.35 ui-monospace,monospace;background:#fffd;color:#111;padding:6px 8px;border-radius:6px;white-space:pre}
+    #metrics .bad{color:#c00;font-weight:700}
     #info{position:fixed;left:10px;bottom:10px;z-index:2;font-size:12px;background:#000a;padding:6px 10px;border-radius:8px}
   </style>
   <script type="importmap">
@@ -18,6 +20,7 @@
 <body>
   <div id="bar"></div>
   <div id="info"></div>
+  <div id="metrics"></div>
   <canvas id="c"></canvas>
   <script type="module">
     // Showroom : ?id=porsche_911 | ?all=1 ; &view=front|side|rear|top|back34|low ; &color=#rrggbb|index ; &night=1 ; &lod=1 ; &lights=1 ; &steer=0.4 ; &ui=0
@@ -25,7 +28,7 @@
     import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
     import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
     import { VEHICLES, VEHICLE_BY_ID } from '@shared/catalog.js';
-    import { createMesh } from '/src/vehicles/models.js';
+    import { createMesh, getCarGeometry } from '/src/vehicles/models.js';
 
     const q = new URLSearchParams(location.search);
     const all = q.get('all') === '1', night = q.get('night') === '1';
@@ -83,21 +86,58 @@
     const info = document.getElementById('info');
     window.__show = { scene, camera, cars, renderer };
     addEventListener('resize', () => { renderer.setSize(innerWidth, innerHeight); camera.aspect = innerWidth / innerHeight; camera.updateProjectionMatrix(); });
+    // ---- contrôle des proportions : cotes mesurées sur le modèle vs cotes réelles (m)
+    // [empattement, porte-à-faux AV, porte-à-faux AR, Ø roue, garde au sol, ceinture/hauteur, position du sommet de toit (fraction de L)]
+    const TARGETS = {
+      citadine: [2.42, 0.72, 0.56, 0.60, 0.15, 0.60, 0.50], taxi: [2.78, 0.95, 0.97, 0.67, 0.15, 0.60, 0.47],
+      tesla_model3: [2.875, 0.84, 0.975, 0.67, 0.14, 0.60, 0.47], tesla_models: [2.96, 0.93, 1.13, 0.71, 0.13, 0.60, 0.47],
+      tesla_cybertruck: [3.635, 0.90, 1.145, 0.89, 0.41, 0.68, 0.40], porsche_911: [2.45, 1.03, 1.055, 0.70, 0.12, 0.64, 0.45],
+      porsche_taycan: [2.90, 0.93, 1.13, 0.72, 0.13, 0.61, 0.47], porsche_cayenne: [2.895, 0.95, 1.085, 0.78, 0.21, 0.62, 0.50],
+      lambo_huracan: [2.62, 1.07, 0.83, 0.69, 0.125, 0.65, 0.46], lambo_aventador: [2.70, 1.13, 0.97, 0.71, 0.115, 0.65, 0.44],
+      lambo_urus: [3.003, 1.0, 1.107, 0.80, 0.2, 0.62, 0.46],
+    };
+    const NAMES = ['empattement', 'porte-à-faux AV', 'porte-à-faux AR', 'Ø roue', 'garde au sol', 'ceinture/haut.', 'sommet toit /L'];
+    function metricsRows(tid) {
+      const m = getCarGeometry(tid).info.metrics, T = TARGETS[tid];
+      const vals = [m.wheelbase, m.frontOverhang, m.rearOverhang, m.wheelDia, m.clearance, m.beltRatio, m.roofPeak];
+      return vals.map((v, i) => ({ name: NAMES[i], v, t: T[i], bad: Math.abs(v - T[i]) > (i < 3 ? 0.03 : i === 3 ? 0.025 : i === 4 ? 0.03 : 0.04) }));
+    }
+    window.__metrics = () => Object.fromEntries(VEHICLES.map((v) => [v.id, { ...Object.fromEntries(metricsRows(v.id).map((r) => [r.name, `${r.v.toFixed(3)} / ${r.t}${r.bad ? ' !' : ''}`])), tris: getCarGeometry(v.id).info.metrics.tris }]));
+    if (!all && q.get('metrics') !== '0') {
+      const m = getCarGeometry(id).info.metrics;
+      document.getElementById('metrics').innerHTML = `${id}  (mesuré / cible)\n` + metricsRows(id).map((r) => `<span class="${r.bad ? 'bad' : ''}">${r.name.padEnd(16)} ${r.v.toFixed(3)} / ${r.t}</span>`).join('\n') + `\ntriangles HD ${Math.round(m.tris.hi)}  LOD ${Math.round(m.tris.lo)}`;
+    } else document.getElementById('metrics').style.display = 'none';
+
+    // ---- vue orthographique en silhouette (noir sur blanc) : &ortho=1&view=side|front|rear|top
+    const orthoCam = new THREE.OrthographicCamera(-1, 1, 1, -1, 0.1, 100);
+    const black = new THREE.MeshBasicMaterial({ color: 0x000000 });
+    function renderOrtho(v, aspect) {
+      const L = VEHICLE_BY_ID[id].length, half = L * 0.56;
+      orthoCam.left = -half; orthoCam.right = half; orthoCam.top = half / aspect * 1.0 + 0.0; orthoCam.bottom = -half / aspect;
+      const cy = Math.min(0.75, half / aspect - 0.15);
+      if (v === 'front') orthoCam.position.set(0, cy, -20); else if (v === 'rear') orthoCam.position.set(0, cy, 20); else if (v === 'top') orthoCam.position.set(0, 20, 0.001); else orthoCam.position.set(-20, cy, 0);
+      orthoCam.lookAt(0, v === 'top' ? 0 : cy, 0); orthoCam.updateProjectionMatrix();
+      const bg = scene.background, gv = ground.visible;
+      scene.background = new THREE.Color(0xffffff); ground.visible = false; scene.overrideMaterial = black;
+      renderer.render(scene, orthoCam);
+      scene.overrideMaterial = null; scene.background = bg; ground.visible = gv;
+    }
     let t = 0;
     renderer.setAnimationLoop(() => {
       t += 1 / 60; controls.update();
       if (q.get('spin') === '1') for (const c of cars) c.userData.spinWheels(0.1);
       if (q.get('sheet') === '1') {
-        const W = innerWidth, H = innerHeight, names = ['front34', 'side', 'rear34', q.get('v4') || 'front'];
+        const W = innerWidth, H = innerHeight, names = ['front34', 'side', 'rear34', q.get('v4') || 'ortho'];
         renderer.setScissorTest(true);
         names.forEach((n, i) => {
           const x = (i % 2) * W / 2, y = (1 - Math.floor(i / 2)) * H / 2;
           renderer.setViewport(x, y, W / 2, H / 2); renderer.setScissor(x, y, W / 2, H / 2);
+          if (n === 'ortho') { renderOrtho('side', W / H); return; }
           const v = VIEWS[n]; camera.position.set(v[0], v[1], v[2]); camera.lookAt(0, 0.45, 0); camera.aspect = W / H; camera.updateProjectionMatrix();
           renderer.render(scene, camera);
         });
-      } else
-      renderer.render(scene, camera);
+      } else if (q.get('ortho') === '1') renderOrtho(view, innerWidth / innerHeight);
+      else renderer.render(scene, camera);
       const r = renderer.info.render;
       const box = new THREE.Box3().setFromObject(cars[0]); const s = box.getSize(new THREE.Vector3());
       info.textContent = `${list.length} véhicule(s) — ${r.calls} draw calls — ${r.triangles} triangles — ${cars[0].userData.typeId} : ${s.z.toFixed(2)} × ${s.x.toFixed(2)} × ${s.y.toFixed(2)} m (L×l×h) — construction ${cars[0].userData.buildMs.toFixed(0)} ms`;

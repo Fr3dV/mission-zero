@@ -132,7 +132,7 @@ export function createEffects(ctx) {
     const fx = -Math.sin(v.yaw), fz = -Math.cos(v.yaw), nose = v.spec.length * 0.5;
     spot.position.set(v.pos.x + fx * (nose - 0.3), v.pos.y + (info?.headY ?? 0.7), v.pos.z + fz * (nose - 0.3));
     spot.target.position.set(v.pos.x + fx * (nose + 28), v.pos.y - 0.6, v.pos.z + fz * (nose + 28));
-    spot.intensity = 420;
+    spot.intensity = 190;
   }
 
   function update(dt, night) {

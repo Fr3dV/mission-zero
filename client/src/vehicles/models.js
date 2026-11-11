@@ -23,7 +23,20 @@ export function getCarGeometry(typeId) {
     wheelR: def.wheelR, track: Math.abs(hi.wheels[0].x) * 2,
     noseZ: -spec.length / 2, tailZ: spec.length / 2,
     headY: Math.min(P.belt(0.03) - 0.03, 0.9),
-    seat: { ...P.seat },
+    seat: { ...P.seat }, wheelPos: { ...P.wheelPos },
+    // cotes mesurées (contrôle des proportions dans la page de debug)
+    metrics: (() => {
+      let peakT = 0, peakY = 0, clear = 9;
+      for (let i = 0; i <= 200; i++) { const t = i / 200, y = P.top(t); if (y > peakY) { peakY = y; peakT = t; } if (t > 0.3 && t < 0.7) clear = Math.min(clear, P.bottom(t)); }
+      const mid = (P.axles[0].t + P.axles[1].t) / 2;
+      return {
+        length: spec.length, wheelbase: P.axles[1].z - P.axles[0].z, frontOverhang: P.axles[0].z + spec.length / 2, rearOverhang: spec.length / 2 - P.axles[1].z,
+        wheelDia: def.wheelR * 2, trackF: Math.abs(hi.wheels[0].x) * 2, trackR: Math.abs(hi.wheels[2].x) * 2, clearance: clear,
+        beltRatio: P.belt(mid) / peakY, roofPeak: (P.zOf(peakT) + spec.length / 2) / spec.length, height: peakY,
+        tris: { hi: (hi.paint.attributes.position.count + hi.misc.attributes.position.count + hi.lights.attributes.position.count + hi.glass.attributes.position.count + 4 * hi.wheelGeo.attributes.position.count) / 3, lo: (lo.paint.attributes.position.count + lo.misc.attributes.position.count) / 3 },
+      };
+    })(),
+
   };
   c = { spec, def, hi, lo, info };
   cache.set(typeId, c);

@@ -36,6 +36,7 @@ export function createVehicles(ctx) {
       // champs étendus (audio, HUD, gameplay) : rpm 0..1, gear (-1 = R, 0 = N, 1..n), slip 0..1, damage 0..1
       rpm: 0, gear: 0, slip: 0, damage: 0,
       seat: { ...geo.info.seat },   // {x, y (hauteur du bassin), z} dans le repère du véhicule
+      wheelPos: { ...geo.info.wheelPos }, // centre et rayon du volant {x, y, z, r}
       setControls(c) { if (c) Object.assign(v.controls, c); },
       setTransform(nx, nz, nyaw, speed = 0) { setTransform(v, nx, nz, nyaw, speed); },
       update(dt) { simulate(v, dt); },

@@ -47,8 +47,15 @@ export function addWheel(b, o, matrix) {
 
   // pneu
   const sh = Math.min(0.03, (R - rimR) * 0.45);
+  if (o.lod) {
+    // version très légère : cylindre + flasque
+    const g = new THREE.CylinderGeometry(R, R, W, 10, 1, false); g.rotateZ(-Math.PI / 2);
+    b.add(g, M(), TIRE);
+    b.add(new THREE.CircleGeometry(rimR, 10), M(mat(hw + 0.002, 0, 0, 0, Math.PI / 2, 0)), { ...rim, rough: 0.45 });
+    return;
+  }
   const prof = [[rimR, -hw * 0.9], [rimR + 0.012, -hw], [R - sh, -hw], [R - sh * 0.25, -hw * 0.84], [R, -hw * 0.66]];
-  if (!o.lod) for (const g of [-0.36, 0, 0.36]) { const a = g * hw, gw = Math.min(0.009, hw * 0.07); prof.push([R, a - gw * 1.6], [R - 0.009, a - gw], [R - 0.009, a + gw], [R, a + gw * 1.6]); } // rainures
+  for (const g of [-0.36, 0, 0.36]) { const a = g * hw, gw = Math.min(0.009, hw * 0.07); prof.push([R, a - gw * 1.6], [R - 0.009, a - gw], [R - 0.009, a + gw], [R, a + gw * 1.6]); } // rainures
   prof.push([R, hw * 0.66], [R - sh * 0.25, hw * 0.84], [R - sh, hw], [rimR + 0.012, hw], [rimR, hw * 0.9]);
   b.add(lathe(prof, seg), M(), TIRE);
   if (!o.lod) {
@@ -64,12 +71,6 @@ export function addWheel(b, o, matrix) {
       b.tri([A.x, A.y, A.z, C.x, C.y, C.z, B.x, B.y, B.z], N, st, [k / n, 0, (k + 1) / n, 1, (k + 1) / n, 0]);
       b.tri([A.x, A.y, A.z, D.x, D.y, D.z, C.x, C.y, C.z], N, st, [k / n, 0, k / n, 1, (k + 1) / n, 1]);
     }
-  }
-
-  if (o.lod) {
-    // version simplifiée : flasque de jante plein
-    b.add(new THREE.CircleGeometry(rimR, 12), M(mat(hw * 0.86, 0, 0, 0, Math.PI / 2, 0)), { ...rim, rough: 0.45 });
-    return;
   }
 
   // rebord + fût de jante (surface intérieure visible)
