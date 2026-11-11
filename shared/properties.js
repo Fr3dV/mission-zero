@@ -1,4 +1,5 @@
-import { lonLatToXZ } from './geo.js';
+import { geoFor } from './cities.js';
+const { lonLatToXZ } = geoFor('paris'); // contenu de Paris : toujours dans la projection de Paris
 
 // Biens immobiliers achetables. PROPRIÉTAIRE DU FICHIER : agent "gameplay".
 // JS pur (importé par le serveur Node) : aucune dépendance navigateur.

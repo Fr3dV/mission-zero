@@ -182,3 +182,34 @@ Unités : `impact` = vitesse de fermeture en **m/s** le long de la normale ; `da
 `shared/terrain.js` exporte `baseHeightAt(x, z)` (relief pur : plat + butte Montmartre) et `setHeightLayer(fn)`.
 `ctx.heightAt` = `baseHeightAt` + la couche enregistrée par le module ville (`fn(x, z, base) -> hauteur | undefined`).
 Tous les modules (joueur, véhicules, trafic, piétons, monuments, gameplay) lisent déjà `ctx.heightAt` : une berge en contrebas ou une rampe déclarée par la ville est donc praticable sans autre changement. La couche doit être très rapide.
+
+## Multi-villes (contrat v5)
+
+Le jeu propose plusieurs villes (`shared/cities.js` : `CITIES`, aujourd'hui `paris` et `toulouse`). **Une seule ville est chargée à la fois.**
+
+- **Ville courante** : paramètre d'URL `?city=<id>` (défaut `paris`), lu une seule fois au chargement des modules. Changer de ville = recharger la page avec un autre `?city=`. Exposée par `CITY` / `CITY_ID` (`shared/cities.js`) et par `ctx.city` (`{ id, name, tagline, origin, bbox, plate, style, files }`). Sous Node (tests, outils) : variable d'environnement `MZ_CITY`.
+- **Repère** : propre à chaque ville (origine = Concorde à Paris, Capitole à Toulouse). `shared/geo.js` (`lonLatToXZ`, `BOUNDS`…) et `ctx.BOUNDS` sont ceux de la ville courante. Pour une ville précise, quel que soit le contexte : `geoFor(id)` de `shared/cities.js`.
+- **Aucun module ne doit supposer Paris** : pas de nom de rue, de monument, de coordonnée ni de style en dur hors d'une branche explicitement réservée à `ctx.city.id === 'paris'` (ou mieux : d'une table par ville / par `ctx.city.style`).
+- **Données par ville** (`CITY.files`, toutes optionnelles sauf `roads`) :
+  - Paris (inchangé) : `shared/world/paris.json`, `buildings.json`, `buildings-meta.json`, `pois.json`.
+  - Toulouse : `shared/world/toulouse/roads.json` (même format que `paris.json`, champs supplémentaires ci-dessous), `buildings.bin` (Float32Array little-endian, 6 nombres par bâtiment : cx, cz, w, d, rotDeg, h), `buildings-meta.bin` (Uint8Array, `stride` octets par bâtiment, dans le même ordre) + `buildings-meta.json` (légende `{ stride, fields: ['kind','wall','roof','levels'], kinds: [...], walls: [...], roofs: [...] }`), `pois.json`, `terrain.json` (grille d'altitudes, format dans `shared/terrain.js`).
+  - Chargées par `main.js` dans `ctx.worldData` : `roads`, `graph`, `river`, `parks`, `plazas`, … + `buildings` (Array ou Float32Array), `buildingsMeta`, `buildingsMetaBin`, `pois`, `terrain`.
+- **Contenus par ville** : `shared/cities/<ville>/landmarks.js`, `missions.js`, `properties.js`, `places.js` (concessions, parkings, objets à collectionner). Chaque fichier utilise `geoFor('<ville>')`, jamais `shared/geo.js`. Les **ids sont uniques toutes villes confondues** (préfixe `tls_` pour Toulouse). Les modules historiques `shared/landmarks.js`, `shared/missions.js`, `shared/properties.js` exportent le contenu de la **ville courante** sous les mêmes noms qu'avant (`LANDMARKS`, `MISSIONS`, `MISSION_BY_ID`, `PROPERTIES`, `PROPERTY_BY_ID`…), plus les tables toutes villes (`LANDMARKS_BY_CITY`, `MISSIONS_BY_CITY`, `ALL_MISSION_BY_ID`, `PROPERTIES_BY_CITY`, `ALL_PROPERTY_BY_ID`) pour le serveur.
+- **Réseau** : le client envoie sa ville dans `hello` ; une salle appartient à une ville (deux joueurs de villes différentes ne sont jamais dans la même salle, même avec le même code) ; le serveur valide les positions avec `geoFor(ville).BOUNDS`. L'argent et les voitures sont globaux au compte ; les biens sont par salle, donc par ville.
+- **Échelle** : Toulouse couvre ≈ 15 × 15 km (Paris ≈ 5,8 × 5,2 km), avec plusieurs centaines de milliers de bâtiments. Rien ne doit être construit d'un bloc pour toute la ville au démarrage : construction paresseuse par tuile autour du joueur, libération au loin, index spatiaux en tableaux typés.
+
+### Champs supplémentaires des routes (toutes villes, tous optionnels)
+
+`kind` peut aussi valoir `motorway` (autoroute, rocade), `trunk` (voie rapide), `ramp` (bretelle). Autres champs : `ref` (« A620 »), `maxspeed` (km/h), `roundabout` (bool), `tunnel` (bool), `layer` (niveau OSM), `ele` (voir ci-dessous), `busLane`, `cycleway`, `surface`, `sidewalk`, `median`, `treeLined`, `bridgeName`.
+Racine du fichier : `rails: [{ kind: 'tram'|'train'|'metro', name, points, ele? }]`, `waterways: [{ name, kind: 'canal'|'river'|'stream', width, points }]` (cours d'eau étroits décrits par leur axe), `river.polygons` / `river.islands` (plans d'eau larges).
+`pois.areas[].kind` peut aussi valoir `forest`, `farmland`, `industrial`, `commercial`, `residential`, `parking`, `pitch`, `cemetery`, `runway`, `taxiway`, `apron`, `railway`, `construction`.
+
+## Niveaux superposés (contrat v5)
+
+Le sol n'est plus à une seule hauteur par point : un pont passe au-dessus d'une berge ou d'une rocade, une trémie sous une place.
+
+- **Données** : chaque route peut porter `ele: [e0, e1, …]`, une élévation en mètres **par sommet de `points`**, relative au relief de base (0 = au sol ; +6,5 = tablier d'un pont routier ; −6 = trémie). Absent = 0 partout. Les rampes d'accès sont déjà dans `ele` (pente ≤ 8 %). `graph.nodeEle[i]` donne la même élévation pour chaque nœud du graphe (deux routes qui se croisent à des niveaux différents ne partagent pas de nœud). Les ponts sur l'eau restent à `ele` 0 (les quais sont à y = 0, l'eau à `WATER_LEVEL`).
+- **`ctx.heightAt(x, z, y?)`** (`shared/terrain.js`) : `y` = hauteur courante de l'appelant. Règle appliquée par la couche du module ville là où des surfaces se superposent : **avec `y`**, la surface la plus haute située à moins de `STEP_UP` (1,2 m) au-dessus de `y`, sinon la plus basse ; **sans `y`**, la surface la plus proche du relief de base (le niveau de la rue). **Tout ce qui se déplace (joueur, véhicules, voitures IA, piétons, caméra) passe son `y` courant** ; un appel sans `y` ne sert qu'à poser un objet « au niveau de la rue ».
+- **`ctx.collision`** : les appelants passent leur hauteur réelle (`y` des pieds/roues + ~0,5–1 m). Les obstacles propres à un niveau (parapets d'un tablier, piles, murs de trémie, berge) ont `bottom`/`top` ; un bâtiment a `bottom = −∞`.
+- **`ctx.world.nearestRoadPoint(x, z, y?)` / `randomRoadPoint()`** renvoient aussi `y` (hauteur de la chaussée à cet endroit, élévation comprise). Avec `y`, la recherche privilégie les routes proches de cette hauteur. Qui fait apparaître un véhicule ou un personnage sur une route utilise ce `y`.
+- **Trafic** : la hauteur d'une voiture IA vient de `baseHeightAt + ele` interpolée sur son arête (`graph.nodeEle`) ; deux véhicules à plus de ~3 m d'écart vertical ne se voient pas (ni distance de sécurité, ni priorité, ni collision).

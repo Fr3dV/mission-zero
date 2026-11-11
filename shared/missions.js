@@ -1,5 +1,6 @@
-import { LANDMARK_BY_ID as LM } from './landmarks.js';
-import { lonLatToXZ } from './geo.js';
+import { LANDMARK_BY_ID as LM } from './cities/paris/landmarks.js';
+import { geoFor } from './cities.js';
+const { lonLatToXZ } = geoFor('paris'); // contenu de Paris : toujours dans la projection de Paris
 import { VEHICLES, VEHICLE_BY_ID } from './catalog.js';
 
 // Définitions des missions. PROPRIÉTAIRE DU FICHIER : agent "gameplay".

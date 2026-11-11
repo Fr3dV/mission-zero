@@ -4,7 +4,8 @@ import * as THREE from 'three';
 import { bus } from './core/bus.js';
 import { store } from './core/store.js';
 import { collision } from './core/collision.js';
-import { heightAt, WATER_LEVEL } from '@shared/terrain.js';
+import { heightAt, WATER_LEVEL, setHeightmap } from '@shared/terrain.js';
+import { CITY, CITIES } from '@shared/cities.js';
 import { LANDMARKS, LANDMARK_BY_ID } from '@shared/landmarks.js';
 import { BOUNDS } from '@shared/geo.js';
 
@@ -29,12 +30,39 @@ const camera = new THREE.PerspectiveCamera(60, innerWidth / innerHeight, 0.3, 90
 camera.position.set(0, 30, 80);
 
 async function loadJSON(url) { const r = await fetch(url); if (!r.ok) throw new Error(url + ' ' + r.status); return r.json(); }
+// Charge les données de la ville courante (CITY.files). Tout est optionnel sauf les routes :
+// sans fichier de routes, on retombe sur le petit jeu d'essai paris.sample.json.
+async function loadBuildings(url) {
+  if (!url) return null;
+  if (url.endsWith('.bin')) { const r = await fetch(url); if (!r.ok) throw new Error(url + ' ' + r.status); return new Float32Array(await r.arrayBuffer()); }
+  return (await loadJSON(url)).buildings;
+}
+async function loadBytes(url) { const r = await fetch(url); if (!r.ok) throw new Error(url + ' ' + r.status); return new Uint8Array(await r.arrayBuffer()); }
 async function loadWorldData() {
-  let data;
-  try { data = await loadJSON('/shared/world/paris.json'); }
-  catch { console.warn('paris.json absent, utilisation de paris.sample.json'); data = await loadJSON('/shared/world/paris.sample.json'); }
-  try { data.buildings = (await loadJSON('/shared/world/buildings.json')).buildings; } catch { data.buildings = null; }
-  try { data.pois = await loadJSON('/shared/world/pois.json'); } catch { data.pois = null; }
+  const f = CITY.files;
+  const jobs = {
+    roads: () => loadJSON(f.roads),
+    buildings: () => loadBuildings(f.buildings),
+    pois: () => (f.pois ? loadJSON(f.pois) : null),
+    buildingsMeta: () => (f.buildingsMeta ? loadJSON(f.buildingsMeta) : null),
+    buildingsMetaBin: () => (f.buildingsMetaBin ? loadBytes(f.buildingsMetaBin) : null),
+    terrain: () => (f.terrain ? loadJSON(f.terrain) : null),
+  };
+  const names = Object.keys(jobs), out = {};
+  let done = 0;
+  bus.emit('boot:progress', { step: 'data', city: CITY.id, done, total: names.length });
+  await Promise.all(names.map(async (n) => {
+    try { out[n] = await jobs[n](); } catch { out[n] = null; }
+    bus.emit('boot:progress', { step: 'data', city: CITY.id, file: n, done: ++done, total: names.length });
+  }));
+  let data = out.roads;
+  if (!data) { console.warn(`[${CITY.id}] ${f.roads} absent, utilisation de paris.sample.json`); data = await loadJSON('/shared/world/paris.sample.json'); }
+  data.buildings = out.buildings; // tableau plat (Array ou Float32Array) : cx, cz, w, d, rotDeg, h par bâtiment, ou null
+  data.pois = out.pois;
+  data.buildingsMeta = out.buildingsMeta; // légende (et, à Paris, table byIndex)
+  data.buildingsMetaBin = out.buildingsMetaBin; // Uint8Array aligné sur l'ordre des bâtiments, ou null
+  data.terrain = out.terrain;
+  if (out.terrain) setHeightmap(out.terrain); // avant l'init des modules : ctx.heightAt en dépend
   return data;
 }
 
@@ -42,6 +70,7 @@ const ctx = {
   THREE, renderer, scene, camera, canvas, bus, store, collision, params,
   uiRoot: document.getElementById('ui-root'),
   heightAt, WATER_LEVEL, LANDMARKS, LANDMARK_BY_ID, BOUNDS,
+  city: CITY, cities: CITIES, // ville courante (?city=) et registre des villes
   quality: params.get('quality') || 'high', // 'low' | 'medium' | 'high'
   worldData: null,
   time: 0, // secondes écoulées
@@ -58,6 +87,7 @@ const ORDER = [
 const UPDATE = ['player', 'vehicles', 'traffic', 'gameplay', 'net', 'world', 'monuments', 'env', 'audio', 'ui'];
 
 async function boot() {
+  document.title = `Mission Zéro — ${CITY.name}`;
   ctx.worldData = await loadWorldData();
   for (const [name, create] of ORDER) {
     bus.emit('boot:progress', { step: name });
