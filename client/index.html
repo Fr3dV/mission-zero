@@ -15,5 +15,8 @@
   <canvas id="game"></canvas>
   <div id="ui-root"></div>
   <script type="module" src="/src/main.js"></script>
+  <!-- Menu commun du portail gamzu.fr : retour au portail et accès aux autres jeux.
+       data-jeu="mz" tant que le jeu n'est pas servi depuis mz.gamzu.fr ; chargé en async pour ne jamais bloquer le jeu. -->
+  <script src="https://gamzu.fr/gamzu-menu.js" data-position="bas-centre" data-jeu="mz" async></script>
 </body>
 </html>
