@@ -16,7 +16,7 @@ const REF_HEIGHT = 1.78;
 const LOD_FAR = 34, LOD_NEAR = 28;
 /** seuil (m/s) entre simple déséquilibre et chute : ~8 km/h */
 export const KNOCK_SPEED = 2.2; // m (hystérésis)
-const PAL = ['skin', 'top', 'bottom', 'shoes', 'hair', 'bag', 'inner', null, 'sole', null, 'scarf', 'legs', 'hat', 'belt', null, null];
+const PAL = ['skin', 'top', 'bottom', 'shoes', 'hair', 'bag', 'inner', null, 'sole', null, 'scarf', 'legs', 'hat', 'belt', null, null, null, null];
 
 let material = null;
 function getMaterial() {
@@ -27,6 +27,12 @@ function getMaterial() {
     vertexColors: true, roughness: 1, metalness: 0, side: THREE.DoubleSide, shadowSide: THREE.BackSide, alphaTest: 0.5,
   });
   material.name = 'personnages';
+  // peau : teinte chaude ajoutée à la lumière diffuse reçue (diffusion sous-cutanée très simplifiée) ; masque = canal bleu de la rugosité
+  material.onBeforeCompile = (sh) => {
+    sh.fragmentShader = sh.fragmentShader
+      .replace('#include <roughnessmap_fragment>', '#include <roughnessmap_fragment>\n\tfloat mzSkin = 0.0;\n\t#ifdef USE_ROUGHNESSMAP\n\t\tmzSkin = texture2D( roughnessMap, vRoughnessMapUv ).b;\n\t#endif')
+      .replace('#include <opaque_fragment>', 'outgoingLight += mzSkin * vec3( 0.2, 0.05, 0.025 ) * ( reflectedLight.indirectDiffuse + reflectedLight.directDiffuse );\n\t#include <opaque_fragment>');
+  };
   return material;
 }
 
@@ -58,10 +64,10 @@ function disposeGeometry(g) {
   g.dispose();
 }
 function makePalette(look) {
-  const pal = new Float32Array(16 * 3), c = look.colors;
+  const pal = new Float32Array(18 * 3), c = look.colors;
   const put = (i, hex, k = 1) => { _c.set(hex); pal[i * 3] = _c.r * k; pal[i * 3 + 1] = _c.g * k; pal[i * 3 + 2] = _c.b * k; };
   PAL.forEach((name, i) => { if (name) put(i, c[name]); });
-  put(7, '#131316'); put(9, '#ffffff'); put(14, c.skin, 0.72); put(15, '#b9bbc0');
+  put(7, '#131316'); put(9, '#ffffff'); put(14, c.skin, 0.72); put(15, '#b9bbc0'); put(16, '#e4dcd3'); put(17, c.hair, 0.62);
   return pal;
 }
 
@@ -80,10 +86,13 @@ let counter = 0;
  *               défaut : automatique), shadow, gender 'm'|'f', age, height (m), build (−1..1), outfit {top, bottom, shoes, hair, hat, bag, ...} }
  */
 export function createCharacter(ctx, opts = {}) {
-  const look = makeLook(opts);
+  const look = makeLook(opts.weather === undefined && ctx?.env?.weather ? { ...opts, weather: ctx.env.weather } : opts);
   const lodMode = opts.lod === true ? 'lod' : opts.lod === false ? 'full' : 'auto';
   const camera = ctx?.camera || null;
-  const scale = look.height / REF_HEIGHT;
+  // tête : un peu plus forte que le gabarit de base, et relativement plus grosse chez les petits et les enfants
+  const headK = 1.05 * (1 + 0.24 * (look.kid || 0)) * Math.pow(look.height / REF_HEIGHT, -0.55);
+  const scale = look.height / (1.565 + 0.215 * headK);
+  look.gait.att = look.attitude;
   const palette = makePalette(look);
   const id = counter++;
 
@@ -125,8 +134,8 @@ export function createCharacter(ctx, opts = {}) {
   }
   let current = lodMode === 'lod' ? makeMesh('lod', lod0) : makeMesh('full', full0);
   // (après la liaison au squelette) les petites tailles gardent une tête proportionnellement un peu plus grande
-  bones[HD].scale.setScalar(Math.pow(scale, -0.55));
-  bones[LID].scale.y = 0.1;
+  bones[HD].scale.setScalar(headK);
+  bones[LID].scale.y = 0.2;
   function show(kind) {
     const m = meshes[kind] || makeMesh(kind);
     if (m === current) return;
@@ -205,8 +214,8 @@ export function createCharacter(ctx, opts = {}) {
     bones[0].position.set(rest[0][0] + P[DX], rest[0][1] + P[DY], rest[0][2] + P[DZ]);
     // regard vers l'intérieur du virage
     if (yawRate) { bones[HD].rotation.y += Math.max(-0.35, Math.min(0.35, yawRate * 0.12)) * (1 - weights.sit); }
-    const ws = weights.sit;
-    if (ws > 0.02 && wheel) { const a3 = P[H * 3] + P[SP * 3] + P[CH * 3], ry = rest[0][1] + P[DY]; armIK(-1, ws, a3, ry); armIK(1, ws, a3, ry); }
+    const ws = Math.min(1, weights.sit + weights.sit_chair);
+    if (weights.sit > 0.02 && wheel) { const a3 = P[H * 3] + P[SP * 3] + P[CH * 3], ry = rest[0][1] + P[DY]; armIK(-1, weights.sit, a3, ry); armIK(1, weights.sit, a3, ry); }
     if (down > 0.001) {
       const e = down * down * (3 - 2 * down);
       _qU.identity().slerp(qDown, e);
@@ -215,7 +224,7 @@ export function createCharacter(ctx, opts = {}) {
       rig.position.set(0, 0, 0);
       rig.rotation.set(pitchLean * (1 - ws), 0, lean * (1 - ws));
     }
-    bones[LID].scale.y = 0.1 + 0.9 * Math.max(blink, weights.lying * 0.45);
+    bones[LID].scale.y = 0.2 + 0.8 * Math.max(blink, weights.lying * 0.45);
   }
 
   const api = {

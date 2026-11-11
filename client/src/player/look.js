@@ -36,15 +36,18 @@ export function makeLook(opts = {}) {
   const gauss = () => (rnd() + rnd() + rnd() + rnd() - 2) / 1.15; // ≈ N(0, 0.5)
   const o = opts.outfit || {};
   const g = opts.gender ? (opts.gender === 'f' ? 1 : 0) : rnd() < 0.5 ? 1 : 0;
-  const age = opts.age ?? Math.round(18 + Math.pow(rnd(), 1.25) * 58);
+  const teenRoll = rnd();
+  const age = opts.age ?? (teenRoll < 0.07 ? Math.round(13 + rnd() * 4) : Math.round(18 + Math.pow(rnd(), 1.25) * 58));
+  const kid = age < 18 ? Math.max(0, Math.min(1, (18 - age) / 12)) : 0; // 0 adulte .. 1 enfant de 6 ans
+  const rain = opts.weather === 'rain';
   const old = age > 58, young = age < 30;
-  const height = Math.min(1.95, Math.max(1.55, opts.height ?? (g ? 1.65 : 1.78) + gauss() * 0.13));
+  const height = opts.height ?? (kid > 0 ? Math.max(1.1, (g ? 1.63 : 1.72) - kid * 0.62 + gauss() * 0.06) : Math.min(1.95, Math.max(1.55, (g ? 1.65 : 1.78) + gauss() * 0.13)));
   const build = Math.max(-1, Math.min(1, opts.build ?? gauss() * 0.9 + (age > 45 ? 0.2 : -0.05)));
 
   // --- tenue
   let top = o.top || weighted(rnd, g
-    ? { tshirt: 10, shirt: 9, pull: 15, blouson: 10, veste: 10, manteau: 13, trench: 10, doudoune: 7, robe: 14, hoodie: young ? 6 : 1 }
-    : { tshirt: 13, shirt: 14, pull: 15, hoodie: old ? 1 : 10, blouson: 14, veste: 12, manteau: 10, trench: 3, doudoune: 9 });
+    ? { tshirt: rain ? 2 : 10, shirt: rain ? 3 : 9, pull: 15, blouson: 10, veste: kid ? 1 : 10, manteau: rain ? 22 : 13, trench: rain ? 20 : 10, doudoune: rain ? 14 : 7, robe: rain || kid ? 4 : 14, hoodie: young ? (rain ? 14 : 6) : 1 }
+    : { tshirt: rain ? 3 : 13, shirt: rain ? 4 : 14, pull: 15, hoodie: old ? 1 : rain ? 18 : 10, blouson: 14, veste: kid ? 1 : 12, manteau: rain ? 18 : 10, trench: rain ? 8 : 3, doudoune: rain ? 16 : 9 });
   const casual = top === 'tshirt' || top === 'hoodie' || top === 'shirt';
   let bottom = o.bottom || (top === 'robe' ? 'none' : weighted(rnd, g
     ? { jean: 42, pantalon: 26, jupe: top === 'doudoune' ? 6 : 22, short: casual && !old ? 8 : 0 }
@@ -60,9 +63,11 @@ export function makeLook(opts = {}) {
   const tucked = top === 'shirt' && rnd() < 0.4;
 
   // --- cheveux
+  const skin = opts.skin ?? pick(SKINS);
+  const darkSkin = SKINS.indexOf(skin) >= 5 && SKINS.indexOf(skin) <= 8;
   const hair = o.hair || weighted(rnd, g
-    ? { long: 34, milong: 26, chignon: 14, queue: 20, court: 6 }
-    : { court: 52, rase: 14, milong: 8, calvitie: age > 42 ? 22 : 2, chauve: age > 35 ? 6 : 1 });
+    ? { long: 34, milong: 26, chignon: 14, queue: 20, court: 6, afro: darkSkin ? 22 : 2 }
+    : { court: 52, rase: 14, milong: 8, calvitie: age > 42 ? 22 : 2, chauve: age > 35 ? 6 : 1, afro: darkSkin ? 16 : 1 });
   const beard = o.beard ?? (!g && rnd() < 0.3 ? (rnd() < 0.5 ? 2 : 1) : 0);
   const grey = age > 62 ? rnd() < 0.85 : age > 48 ? rnd() < 0.4 : false;
   const hairColor = grey ? pick(GREYS) : pick(HAIRS);
@@ -70,7 +75,7 @@ export function makeLook(opts = {}) {
   // --- accessoires
   const coat = top === 'manteau' || top === 'trench' || top === 'doudoune';
   const hatRoll = rnd();
-  const hat = o.hat ?? (hair === 'chignon' || hair === 'queue' ? 'none' : hatRoll < (coat ? 0.16 : 0.05) ? 'bonnet' : hatRoll > (young && !g ? 0.86 : 0.95) ? 'casquette' : 'none');
+  const hat = o.hat ?? (hair === 'chignon' || hair === 'queue' || hair === 'afro' ? 'none' : hatRoll < (rain ? 0.3 : coat ? 0.16 : 0.05) ? 'bonnet' : hatRoll > (young && !g ? 0.86 : 0.95) ? 'casquette' : 'none');
   const glasses = o.glasses ?? (rnd() < (old ? 0.5 : 0.2) ? 1 : rnd() < 0.06 ? 2 : 0); // 1 = vue, 2 = soleil
   const scarf = o.scarf ?? (rnd() < (coat ? 0.4 : formal ? 0.2 : 0.05));
   const phones = o.headphones ?? (hat === 'none' && age < 40 && rnd() < 0.09);
@@ -80,9 +85,10 @@ export function makeLook(opts = {}) {
   const sober = () => pick(SOBER), acc = () => pick(ACCENT);
   const topColor = opts.color ?? (top === 'trench' ? pick(TRENCH) : coat || top === 'veste' ? pick(COATS) : top === 'blouson' ? (rnd() < 0.5 ? pick(LEATHER) : pick(COATS)) : rnd() < 0.2 ? acc() : sober());
   const bottomColor = bottom === 'jean' || (bottom === 'short' && rnd() < 0.5) ? pick(DENIM) : skirt && rnd() < 0.25 ? acc() : pick(CHINO);
-  const skin = opts.skin ?? pick(SKINS);
+  const ATT = formal ? ['relax', 'relax', 'pockets', 'behind', 'phone', 'crossed'] : ['relax', 'relax', 'pockets', 'pockets', 'phone', 'crossed', 'hip'];
   const look = {
-    name, g, age, height, build,
+    name, g, age, height, build, kid,
+    attitude: opts.attitude || pick(ATT), fringe: !!g && (hair === 'long' || hair === 'milong') && rnd() < 0.4,
     top, bottom, shoes, sleeve, tights, tucked, hair, beard, hat, glasses, scarf, phones, bag,
     turtleneck: top === 'pull' && rnd() < 0.3,
     eye: Math.floor(rnd() * EYES),
@@ -99,7 +105,7 @@ export function makeLook(opts = {}) {
     gait: {
       phase: rnd() * 6.283, cadence: 0.93 + rnd() * 0.14 - (old ? 0.04 : 0), arm: 0.7 + rnd() * 0.6, sway: 0.7 + rnd() * 0.7 + g * 0.25,
       bounce: 0.8 + rnd() * 0.5, stoop: (old ? 0.06 + rnd() * 0.08 : rnd() * 0.04) + (rnd() < 0.15 ? 0.05 : 0), toeOut: 0.04 + rnd() * 0.1,
-      look: 0.6 + rnd() * 0.8,
+      look: 0.6 + rnd() * 0.8, side: rnd() < 0.5 ? -1 : 1, hurry: rnd(),
     },
   };
   // cohérences
@@ -112,5 +118,5 @@ export function makeLook(opts = {}) {
 export function shapeKey(l, lod) {
   const q = (v, s) => Math.round(v / s);
   return [l.g, q(l.build, 0.5), l.top, l.bottom, l.shoes, l.sleeve, l.tucked ? 1 : 0, l.hair, l.beard, l.hat, l.glasses, l.scarf ? 1 : 0, l.phones ? 1 : 0, l.bag,
-    l.turtleneck ? 1 : 0, l.eye, q(l.age, 30), lod ? 1 : 0].join('|');
+    l.turtleneck ? 1 : 0, l.eye, l.age > 60 ? 1 : 0, l.fringe ? 1 : 0, l.attitude === 'phone' ? 1 : 0, lod ? 1 : 0].join('|');
 }

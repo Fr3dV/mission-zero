@@ -3,7 +3,7 @@
 //
 // Seuils (énergie cinétique ½·m·v² nécessaire pour faire céder l'objet) :
 //   banc 4,5 kJ (≈ 11 km/h pour 1 t) · feu tricolore 6 kJ (12,5 km/h) · lampadaire et arbres 6,5 kJ (13 km/h)
-//   colonne Morris, kiosque, bouche de métro, parapet, immeuble, monument : ne cèdent jamais.
+//   table de terrasse 0,25 kJ (absorb 0,015) · colonne Morris, kiosque, bouche de métro, parapet, immeuble, monument : ne cèdent jamais.
 import { createGlowTexture } from './textures.js';
 import { createPropMaterial } from './props.js';
 
@@ -16,7 +16,7 @@ const MAX_DYN = 40, MAX_BROKEN = 60, REPAIR_DIST = 300, REPAIR_AGE = 40;
 const FIXED = Object.freeze({ broke: false, absorb: 1 });
 const GONE = Object.freeze({ broke: true, absorb: 0 });
 
-export function createDamage(ctx, { props, veg, uniforms }) {
+export function createDamage(ctx, { props, veg, uniforms, terraces }) {
   const { THREE, scene, collision, bus, heightAt } = ctx;
   const M = new THREE.Matrix4(), M2 = new THREE.Matrix4(), ZERO = new THREE.Matrix4().makeScale(0, 0, 0);
   const V = new THREE.Vector3(), Q1 = new THREE.Quaternion(), Q2 = new THREE.Quaternion(), S1 = new THREE.Vector3(1, 1, 1), AX = new THREE.Vector3();
@@ -313,6 +313,17 @@ export function createDamage(ctx, { props, veg, uniforms }) {
         if (speed > 1.2) { wobble(d, grp.near, d.j, dir, 0.012 * (0.4 + E / Eb), 0); emit(0, d.x, top, d.z, 8, 6 * d.scale, 0, 0, 0); hitEvent(tag, e, E); }
         res = FIXED;
       }
+    } else if (d.type === 'terrasse') {
+      // mobilier de terrasse : très léger, il valse sans ralentir la voiture
+      const T = terraces; if (!T || !T.mTables) return FIXED;
+      if (E >= 250) {
+        T.setBroken(d, true);
+        const mesh = new THREE.Mesh(T.tGeo, deadMat);
+        for (const o of [-0.42, 0.42]) { const c = new THREE.Mesh(T.cGeo, deadMat); c.position.set(o, 0, 0.36); c.rotation.set(o * 2, 0, o); mesh.add(c); }
+        const obj = spawn(mesh, d, dir, { tumble: true, rest: 0.3, chip: 4, vx: dir.dirX * speed * 0.7, vz: dir.dirZ * speed * 0.7, vy: 2 + Math.min(3, speed * 0.2), w: Math.min(8, 1 + speed * 0.7) });
+        register(d, s, tag, obj, () => T.setBroken(d, false), 0.8, e, E);
+        res = { broke: true, absorb: 0.015 };
+      } else res = { broke: false, absorb: Math.min(1, E / 250) };
     } else if (d.geo && d.geo.mesh) {
       // mobilier fusionné : feu tricolore, banc (cèdent) ; colonne Morris, kiosque (se cabossent, ne cèdent pas)
       const Eb = BREAK_ENERGY[d.type];

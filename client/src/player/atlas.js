@@ -24,13 +24,14 @@ export function getAtlas() {
   const X = (u) => u * TS, Y = (v) => (1 - v) * TS;
 
   /** Dessine une tuile : fn(a, h) reçoit les contextes albedo et hauteur, origine en haut à gauche de la tuile (256 px). */
-  function tile(i, rough, base, fn) {
+  function tile(i, rough, base, fn, skin = 0) {
     const tx = (i % ATLAS_COLS) * TS, ty = Math.floor(i / ATLAS_COLS) * TS;
     for (const c of [A, Hc]) { c.save(); c.beginPath(); c.rect(tx, ty, TS, TS); c.clip(); c.translate(tx, ty); }
     if (base) { A.fillStyle = base; A.fillRect(0, 0, TS, TS); }
     if (fn) fn(A, Hc);
     A.restore(); Hc.restore();
-    R.fillStyle = `rgb(0,${Math.round(rough * 255)},0)`; R.fillRect(tx / 4, ty / 4, TS / 4, TS / 4);
+    R.fillStyle = `rgb(0,${Math.round(rough * 255)},${skin ? 255 : 0})`; R.fillRect(tx / 4, ty / 4, TS / 4, TS / 4);
+    return [tx / 4, ty / 4];
   }
   // --- motifs de base
   const line = (c, x0, y0, x1, y1, w, style) => { c.strokeStyle = style; c.lineWidth = w; c.beginPath(); c.moveTo(x0, y0); c.lineTo(x1, y1); c.stroke(); };
@@ -74,8 +75,8 @@ export function getAtlas() {
   const shade = (a, x, y, rx, ry, color) => { const g = a.createRadialGradient(x, y, 0, x, y, 1); g.addColorStop(0, color); g.addColorStop(1, color.replace(/[\d.]+\)$/, '0)')); a.save(); a.translate(x, y); a.scale(rx, ry); a.translate(-x, -y); a.fillStyle = g; a.beginPath(); a.arc(x, y, 1, 0, 7); a.fill(); a.restore(); };
 
   // ------------------------------------------------------------------ peau, visages, mains, yeux, cheveux
-  tile(TILE.SKIN, 0.6, '#ebebeb', (a, h) => speckle(a, h, 700, 0.03));
-  const face = (fem) => (a, h) => {
+  tile(TILE.SKIN, 0.7, '#ebebeb', (a, h) => { speckle(a, h, 900, 0.035); for (let i = 0; i < 40; i++) shade(a, rnd() * TS, rnd() * TS, 10 + rnd() * 16, 10 + rnd() * 16, 'rgba(200,120,100,0.05)'); }, 1);
+  const face = (fem, old) => (a, h) => {
     speckle(a, h, 500, 0.025);
     const PX = (x) => faceU(x) * TS, PY = (y) => Y(faceV(y));
     const sx = Math.abs(PX(0.01) - PX(0)) * 100; // px par mètre au centre
@@ -87,7 +88,7 @@ export function getAtlas() {
       // sourcil
       const bw = fem ? 2.6 : 4.4;
       for (const c of [a, h]) {
-        c.strokeStyle = c === a ? (fem ? 'rgba(45,30,22,0.8)' : 'rgba(38,26,20,0.88)') : 'rgba(255,255,255,0.5)'; c.lineWidth = bw; c.lineCap = 'round';
+        c.strokeStyle = c === a ? 'rgba(60,40,30,0.16)' : 'rgba(255,255,255,0.5)'; c.lineWidth = bw; c.lineCap = 'round';
         c.beginPath(); c.moveTo(PX(s * 0.0125), PY(1.6895)); c.quadraticCurveTo(PX(s * 0.03), PY(fem ? 1.699 : 1.6965), PX(s * 0.05), PY(1.6905)); c.stroke(); c.lineCap = 'butt';
       }
       // pli de paupière + narine
@@ -112,20 +113,37 @@ export function getAtlas() {
     lips(h, 'rgba(255,255,255,0.35)');
     for (const c of [a, h]) { c.strokeStyle = c === a ? 'rgba(70,25,28,0.85)' : 'rgba(0,0,0,0.8)'; c.lineWidth = 1.5; c.beginPath(); c.moveTo(PX(-mw), PY(my)); c.quadraticCurveTo(PX(0), PY(my - 0.0016), PX(mw), PY(my)); c.stroke(); }
     if (!fem) shade(a, PX(0), PY(1.585), sx * 0.06, sx * 0.04, 'rgba(70,60,60,0.1)'); // ombre de barbe
+    // teintes : nez et oreilles plus rouges, sillon nasogénien, paupière inférieure
+    shade(a, PX(0), PY(1.64), sx * 0.014, sx * 0.014, 'rgba(225,110,95,0.2)');
+    for (const s of [-1, 1]) {
+      shade(a, PX(s * 0.074), PY(1.662), sx * 0.02, sx * 0.03, 'rgba(225,110,95,0.22)');
+      a.strokeStyle = `rgba(95,55,45,${old ? 0.5 : 0.2})`; a.lineWidth = old ? 1.6 : 1.2; a.beginPath(); a.moveTo(PX(s * 0.014), PY(1.63)); a.quadraticCurveTo(PX(s * 0.027), PY(1.618), PX(s * 0.029), PY(1.6)); a.stroke();
+      if (old) { // rides : patte d'oie, poche sous l'œil, pli de la joue
+        for (let i = 0; i < 3; i++) line(a, PX(s * 0.048), PY(1.672 + (i - 1) * 0.002), PX(s * 0.058), PY(1.674 + (i - 1) * 0.006), 1, 'rgba(95,55,45,0.4)');
+        a.strokeStyle = 'rgba(95,55,45,0.4)'; a.lineWidth = 1.3; a.beginPath(); a.moveTo(PX(s * 0.018), PY(1.662)); a.quadraticCurveTo(PX(s * 0.031), PY(1.656), PX(s * 0.044), PY(1.663)); a.stroke();
+        a.beginPath(); a.moveTo(PX(s * 0.03), PY(1.597)); a.quadraticCurveTo(PX(s * 0.034), PY(1.585), PX(s * 0.03), PY(1.572)); a.stroke();
+      }
+    }
+    if (old) for (let i = 0; i < 3; i++) { a.strokeStyle = 'rgba(95,55,45,0.32)'; a.lineWidth = 1.2; a.beginPath(); a.moveTo(PX(-0.04), PY(1.708 + i * 0.008)); a.quadraticCurveTo(PX(0), PY(1.711 + i * 0.008), PX(0.04), PY(1.708 + i * 0.008)); a.stroke(); }
   };
-  tile(TILE.FACE_M, 0.58, '#ececec', face(false));
-  tile(TILE.FACE_F, 0.55, '#eeeeee', face(true));
+  const shine = ([rx, ry]) => { // front, nez et pommettes un peu plus brillants
+    for (const [u, v, r] of [[0.5, 0.72, 9], [0.5, 0.42, 4], [0.42, 0.44, 4], [0.58, 0.44, 4]]) { const g = R.createRadialGradient(rx + u * 64, ry + (1 - v) * 64, 0, rx + u * 64, ry + (1 - v) * 64, r); g.addColorStop(0, 'rgba(0,120,255,0.75)'); g.addColorStop(1, 'rgba(0,170,255,0)'); R.fillStyle = g; R.fillRect(rx, ry, 64, 64); }
+  };
+  shine(tile(TILE.FACE_M, 0.68, '#ececec', face(false, false), 1)); shine(tile(TILE.FACE_F, 0.66, '#eeeeee', face(true, false), 1));
+  shine(tile(TILE.FACE_MO, 0.72, '#e9e9e9', face(false, true), 1)); shine(tile(TILE.FACE_FO, 0.7, '#ebebeb', face(true, true), 1));
 
-  tile(TILE.HAND, 0.62, '#ebebeb', (a, h) => {
+  tile(TILE.HAND, 0.7, '#ebebeb', (a, h) => {
+    a.fillStyle = 'rgba(255,255,255,0.5)'; a.fillRect(X(0.55), 0, X(0.4), TS); // paume plus claire
+    for (const u of [0.15, 0.25, 0.35]) shade(a, X(u), Y(0.5), 9, 7, 'rgba(210,110,95,0.25)'); // jointures
     speckle(a, h, 500, 0.03);
     for (const cu of [0.25, 0.75]) {
       for (const du of [-0.1, 0, 0.1]) both(a, h, (c, st) => line(c, X(cu + du), Y(0.0), X(cu + du * 0.92), Y(0.5), 2.4, st), 0.5, -0.9); // sillons entre les doigts
       for (const v of [0.5, 0.33, 0.2]) for (const du of [-0.15, -0.05, 0.05, 0.15]) line(a, X(cu + du - 0.035), Y(v), X(cu + du + 0.035), Y(v), 1, 'rgba(90,50,40,0.28)'); // phalanges
     }
-    for (const du of [-0.15, -0.05, 0.05, 0.15]) { a.fillStyle = 'rgba(255,225,220,0.9)'; a.fillRect(X(0.25 + du) - 7, Y(0.11), 14, 20); a.strokeStyle = 'rgba(120,70,60,0.35)'; a.lineWidth = 1; a.strokeRect(X(0.25 + du) - 7, Y(0.11), 14, 20); } // ongles
-  });
+  }, 1);
 
-  tile(TILE.EYES, 0.12, '#f1eeeb', (a) => {
+
+  tile(TILE.EYES, 0.14, '#efe9e4', (a) => {
     const irises = ['#4a2c17', '#557a96', '#66703c'];
     for (let k = 0; k < 3; k++) {
       const w = TS / 3, x0 = k * w, cx = x0 + w / 2, cy = TS * 0.47;
@@ -148,10 +166,26 @@ export function getAtlas() {
       const wob = (rnd() - 0.5) * 10;
       for (const c of [a, h]) { c.strokeStyle = c === a ? (d > 0.72 ? `rgba(255,255,255,${0.35 * rnd()})` : `rgba(0,0,0,${0.3 * d})`) : (d > 0.5 ? 'rgba(255,255,255,0.5)' : 'rgba(0,0,0,0.5)'); c.lineWidth = w; c.beginPath(); c.moveTo(x, y0); c.quadraticCurveTo(x + wob, y0 + len / 2, x + wob * 0.3, y0 + len); c.stroke(); }
     }
+    // bande de reflet (les mèches accrochent la lumière à mi-hauteur)
+    const g = a.createLinearGradient(0, Y(0.9), 0, Y(0.45)); g.addColorStop(0, 'rgba(255,255,255,0)'); g.addColorStop(0.45, 'rgba(255,255,255,0.3)'); g.addColorStop(1, 'rgba(255,255,255,0)');
+    for (let x = 0; x < TS; x += 3) { a.fillStyle = g; a.globalAlpha = 0.35 + 0.65 * rnd(); a.fillRect(x, Y(0.9) + (rnd() - 0.5) * 16, 3, Y(0.45) - Y(0.9)); } a.globalAlpha = 1;
+    const g2 = a.createLinearGradient(0, Y(0.3), 0, Y(0)); g2.addColorStop(0, 'rgba(0,0,0,0)'); g2.addColorStop(1, 'rgba(0,0,0,0.3)'); a.fillStyle = g2; a.fillRect(0, Y(0.3), TS, Y(0) - Y(0.3));
+    // pointes : dents transparentes en bas de la tuile (bord d'implantation non rectiligne)
+    a.globalCompositeOperation = 'destination-out';
+    for (let x = 0; x < TS; x += 4 + rnd() * 5) { const w = 3 + rnd() * 5, hh = 8 + rnd() * 22; a.beginPath(); a.moveTo(x, TS); a.lineTo(x + w / 2, TS - hh); a.lineTo(x + w, TS); a.fill(); }
+    a.globalCompositeOperation = 'source-over';
   });
 
   // ------------------------------------------------------------------ hauts
-  tile(TILE.COTTON, 0.92, null, (a, h) => weave(a, h, 3));
+  const grain = (a, h, k = 1) => { for (let i = 0; i < 2600; i++) { const x = rnd() * TS, y = rnd() * TS; h.fillStyle = rnd() < 0.5 ? `rgba(255,255,255,${0.1 * k})` : `rgba(0,0,0,${0.1 * k})`; h.fillRect(x, y, 1.5, 1.5); } speckle(a, h, 300, 0.02); };
+  // plis de manche : tension au coude (v ≈ 0,43), sous l'épaule, tassement au poignet
+  const sleeveFolds = (a, h, k = 1) => {
+    for (const [v0, n, amp] of [[0.43, 5, 1], [0.8, 3, 0.6], [0.08, 3, 0.7]]) for (let i = 0; i < n; i++) {
+      const v = v0 + (i - n / 2) * 0.022, u0 = rnd() * 0.5, u1 = u0 + 0.3 + rnd() * 0.3, bend = (rnd() - 0.5) * 0.04;
+      both(a, h, (c, st) => { c.strokeStyle = st; c.lineWidth = 2.2; c.beginPath(); c.moveTo(X(u0), Y(v)); c.quadraticCurveTo(X((u0 + u1) / 2), Y(v + bend), X(u1), Y(v + bend * 0.3)); c.stroke(); }, 0.07 * amp * k, -0.42 * amp * k);
+    }
+  };
+  tile(TILE.COTTON, 0.92, null, (a, h) => { weave(a, h, 3); sleeveFolds(a, h); });
   tile(TILE.TSHIRT, 0.92, null, (a, h) => { weave(a, h, 3); sideSeams(a, h); stitch(a, h, [[0, 0.035], [1, 0.035]], true, 0.2); });
   tile(TILE.SHIRT, 0.82, '#ececec', (a, h) => {
     weave(a, h, 2, 0.7); sideSeams(a, h);
@@ -162,7 +196,7 @@ export function getAtlas() {
     stitch(a, h, [[0, 0.03], [1, 0.03]], false, 0.2);
   });
   tile(TILE.KNIT, 0.97, null, (a, h) => { knit(a, h, 5, 4); ribs(a, h, 0, 0.085, 4); });
-  tile(TILE.KNITS, 0.97, null, (a, h) => { knit(a, h, 5, 4); ribs(a, h, 0, 0.07, 4); });
+  tile(TILE.KNITS, 0.97, null, (a, h) => { knit(a, h, 5, 4); ribs(a, h, 0, 0.07, 4); sleeveFolds(a, h, 0.8); });
   tile(TILE.HOODIE, 0.95, null, (a, h) => {
     felt(a, h, 0.6); weave(a, h, 4, 0.5); sideSeams(a, h); ribs(a, h, 0, 0.075, 4);
     const pk = [[0.36, 0.1], [0.4, 0.3], [0.6, 0.3], [0.64, 0.1]];
@@ -170,12 +204,11 @@ export function getAtlas() {
     both(a, h, (c, st) => { line(c, X(0.365), Y(0.11), X(0.4), Y(0.28), 3, st); line(c, X(0.635), Y(0.11), X(0.6), Y(0.28), 3, st); }, 0.3, -0.6);
     for (const u of [0.475, 0.525]) { line(a, X(u), Y(0.97), X(u + (u - 0.5) * 0.3), Y(0.74), 2.4, 'rgba(0,0,0,0.28)'); line(h, X(u), Y(0.97), X(u + (u - 0.5) * 0.3), Y(0.74), 2.4, 'rgba(255,255,255,0.8)'); }
   });
-  tile(TILE.BLOUSON, 0.46, '#e2e2e2', (a, h) => {
-    speckle(a, h, 600, 0.05, 3); sideSeams(a, h); ribs(a, h, 0, 0.07, 4);
+  tile(TILE.BLOUSON, 0.5, '#e6e6e6', (a, h) => {
+    grain(a, h); sideSeams(a, h); ribs(a, h, 0, 0.07, 4);
     zipper(a, h, 0.5, 0.07, 1);
     for (const s of [-1, 1]) { both(a, h, (c, st) => line(c, X(0.5 + s * 0.1), Y(0.3), X(0.5 + s * 0.14), Y(0.14), 3, st), 0.4, -0.7); seam(a, h, 0.5 + s * 0.06, 0.07, 0.5 + s * 0.06, 0.62, 0.12); seam(a, h, 0.5 + s * 0.02, 0.8, 0.5 + s * 0.22, 0.76, 0.16); }
     seam(a, h, 0, 0.8, 0.22, 0.78, 0.16); seam(a, h, 0.78, 0.78, 1, 0.8, 0.16);
-    for (let i = 0; i < 14; i++) { const x = rnd() * TS, y = rnd() * TS; both(a, h, (c, st) => line(c, x, y, x + (rnd() - 0.5) * 40, y + (rnd() - 0.5) * 16, 1, st), 0.1, -0.35); }
   });
   tile(TILE.COAT, 0.96, null, (a, h) => {
     felt(a, h); twill(a, h, 5, 0.35); sideSeams(a, h);
@@ -194,8 +227,21 @@ export function getAtlas() {
     void g; speckle(a, h, 300, 0.03);
     zipper(a, h, 0.5, 0, 1);
   });
-  tile(TILE.WOOL, 0.96, null, (a, h) => { felt(a, h); twill(a, h, 5, 0.35); seam(a, h, 0.0, 0, 0.0, 1, 0.16); seam(a, h, 1, 0, 1, 1, 0.16); });
-  tile(TILE.LEATHER, 0.42, '#e4e4e4', (a, h) => { speckle(a, h, 800, 0.05, 3); for (let i = 0; i < 26; i++) { const x = rnd() * TS, y = rnd() * TS; both(a, h, (c, st) => line(c, x, y, x + (rnd() - 0.5) * 50, y + (rnd() - 0.5) * 14, 1, st), 0.12, -0.4); } seam(a, h, 0, 0.06, 1, 0.06, 0.2); });
+  tile(TILE.WOOL, 0.95, null, (a, h) => { felt(a, h, 0.5); twill(a, h, 4, 0.4); sleeveFolds(a, h); seam(a, h, 0.0, 0, 0.0, 1, 0.16); seam(a, h, 1, 0, 1, 1, 0.16); for (const u of [0.02, 0.06]) button(a, h, u, 0.05, 2); });
+  // veste de costume : drap fin, pinces, poches à rabat, boutonnage bas, plis de tension à la taille
+  tile(TILE.SUIT, 0.93, null, (a, h) => {
+    felt(a, h, 0.35); twill(a, h, 4, 0.4); sideSeams(a, h);
+    seam(a, h, 0.53, 0, 0.53, 0.56, 0.3); seam(a, h, 0, 0, 0, 0.95, 0.2); seam(a, h, 1, 0, 1, 0.95, 0.2);
+    for (const v of [0.4, 0.52]) button(a, h, 0.505, v, 3.4);
+    for (const s of [-1, 1]) {
+      seam(a, h, 0.5 + s * 0.15, 0.2, 0.5 + s * 0.13, 0.62, 0.12); // pince
+      both(a, h, (c, st) => line(c, X(0.5 + s * 0.1), Y(0.3), X(0.5 + s * 0.2), Y(0.29), 3, st), 0.3, -0.7);
+      stitch(a, h, [[0.5 + s * 0.1, 0.27], [0.5 + s * 0.2, 0.26]], false, 0.18);
+      for (let i = 0; i < 3; i++) both(a, h, (c, st) => line(c, X(0.5 + s * 0.04), Y(0.44 + i * 0.02), X(0.5 + s * 0.2), Y(0.5 + i * 0.03), 1.8, st), 0.05, -0.3);
+    }
+    seam(a, h, 0.58, 0.72, 0.66, 0.72, 0.22); stitch(a, h, [[0, 0.02], [1, 0.02]], false, 0.18);
+  });
+  tile(TILE.LEATHER, 0.5, '#e6e6e6', (a, h) => { grain(a, h); sleeveFolds(a, h, 1.2); seam(a, h, 0, 0.06, 1, 0.06, 0.2); seam(a, h, 0, 0, 0, 1, 0.14); seam(a, h, 1, 0, 1, 1, 0.14); });
   tile(TILE.DRESS, 0.8, null, (a, h) => {
     weave(a, h, 2, 0.6);
     for (let i = 0; i < 14; i++) { const u = (i + 0.5) / 14; const g1 = a.createLinearGradient(0, Y(0.42), 0, Y(0)); g1.addColorStop(0, 'rgba(0,0,0,0)'); g1.addColorStop(1, 'rgba(0,0,0,0.22)'); a.strokeStyle = g1; a.lineWidth = 5; a.beginPath(); a.moveTo(X(u), Y(0.42)); a.lineTo(X(u), Y(0)); a.stroke(); }

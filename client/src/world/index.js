@@ -21,6 +21,8 @@ import { buildVegetation } from './vegetation.js';
 import { buildProps } from './props.js';
 import { createDamage } from './damage.js';
 import { buildSigns } from './signs.js';
+import { buildTerraces } from './terraces.js';
+import { setHeightLayer } from '@shared/terrain.js';
 
 /** Facteur de nuit 0..1 à partir de l'heure (crépuscule ~19h30-21h, aube ~5h30-7h). */
 function nightFromHour(h) {
@@ -74,7 +76,9 @@ export function createWorld(ctx) {
   const props = buildProps(ctx, net, masks, river, bld, Q, uniforms, streetInfo); lap('mobilier', t);
   t = performance.now();
   const signs = buildSigns(ctx, net, bld, Q); lap('plaques', t);
-  const damage = createDamage(ctx, { props, veg, uniforms });
+  t = performance.now();
+  const terraces = buildTerraces(ctx, net, bld, river, masks, Q, uniforms); lap('terrasses', t);
+  const damage = createDamage(ctx, { props, veg, uniforms, terraces });
   timings.total = Math.round(performance.now() - t0);
 
   // ---------- cycle jour / nuit
@@ -96,6 +100,7 @@ export function createWorld(ctx) {
     // --- extras hors contrat (facultatifs pour les autres modules)
     /** Hauteur du revêtement : heightAt + surélévation du trottoir. */
     surfaceHeightAt(x, z) {
+      const bh = river.bergeHeight(x, z); if (bh !== undefined) return bh;
       const d = net.edgeDistance(x, z, false);
       return heightAt(x, z) + (d > 0.05 && d < 5 ? Y_WALK : 0);
     },
@@ -106,10 +111,11 @@ export function createWorld(ctx) {
     propsNear: (x, z, r) => damage.propsNear(x, z, r),
     _damage: damage,
     _maskWater: (x, z) => masks.isWater(x, z),
-    isWater: (x, z) => masks.isWater(x, z) && !river.nearDeck(x, z, 0),
+    _river: river, _terraces: terraces,
+    isWater: (x, z) => masks.isWater(x, z) && !river.nearDeck(x, z, 0) && river.bergeHeight(x, z) === undefined,
     isPark: (x, z) => masks.isPark(x, z),
     inBuilding: (x, z, pad) => bld.inBuilding(x, z, pad),
-    stats: { timings, buildings: bld.count, proceduralBuildings: bld.procedural, trees: veg.count, lamps: props.lampCount, props: props.nProps, surfaceTriangles: surfTris, roads: net.roads.length, bridges: river.decks.length, boats: river.boats, bookstalls: river.bookstalls, plaques: signs.count, quality: ctx.quality, metros: props.metros.length, kiosks: props.kiosks.length },
+    stats: { timings, buildings: bld.count, proceduralBuildings: bld.procedural, trees: veg.count, lamps: props.lampCount, props: props.nProps, surfaceTriangles: surfTris, roads: net.roads.length, bridges: river.decks.length, terraces: terraces.count, terraceTables: terraces.tables || 0, bergeLen: river.bergeLen, ramps: river.ramps, stairs: river.stairs, boats: river.boats, bookstalls: river.bookstalls, plaques: signs.count, quality: ctx.quality, metros: props.metros.length, kiosks: props.kiosks.length },
     _debug: { metros: props.metros, kiosks: props.kiosks },
     update(dt) {
       // transition douce jour/nuit
@@ -132,12 +138,16 @@ export function createWorld(ctx) {
       veg.update(cam);
       props.update(cam, night);
       damage.update(dt, night);
+      terraces.update(dt);
       for (const m of surfMeshes) {
         const s = m.geometry.boundingSphere;
         m.visible = Math.hypot(s.center.x - cam.x, s.center.z - cam.z) - s.radius < Q.viewDist;
       }
     },
   };
+  // Relief local (contrat v4) : les berges basses et leurs rampes deviennent praticables pour tous les modules.
+  // Posée APRÈS la construction : tout le sol de la ville est bâti sur le relief de base.
+  setHeightLayer((x, z) => river.bergeHeight(x, z));
   console.info('[ville] construite en ' + timings.total + ' ms', JSON.stringify(world.stats));
   return world;
 }

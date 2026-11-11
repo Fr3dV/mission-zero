@@ -123,7 +123,10 @@ vec4 leafB = texture2D(map, vTP.zy * 0.083 + 0.3) * tw.x + texture2D(map, vTP.xz
   if (realTrees) {
     const okSpot = (x, z) => Number.isFinite(x) && Number.isFinite(z) && !masks.nearWater(x, z, 3) && !bld.inBuilding(x, z, 1.4) && !nearLandmark(x, z, 4) && net.edgeDistance(x, z, false) > 0.6 && !net.inZone(x, z, 2);
     const stepN = Math.max(1, Math.ceil(pois.trees.length / 2 / 45000));
-    for (let i = 0; i + 1 < pois.trees.length; i += 2 * stepN) { const x = pois.trees[i], z = pois.trees[i + 1]; if (okSpot(x, z)) add(x, z, 0.72 + rnd() * 0.4, heightAt(x, z) + (masks.isPark(x, z) ? 0 : Y_WALK)); }
+    for (let i = 0; i + 1 < pois.trees.length; i += 2 * stepN) { const x = pois.trees[i], z = pois.trees[i + 1];
+      const bh = river.bergeHeight ? river.bergeHeight(x, z) : undefined; // arbres réels plantés sur une berge basse
+      if (bh !== undefined) { if (bh === river.Y_B && river.bergeHeight(x + 1.2, z) === bh && river.bergeHeight(x - 1.2, z) === bh && river.bergeHeight(x, z + 1.2) === bh && river.bergeHeight(x, z - 1.2) === bh) add(x, z, 0.7 + rnd() * 0.3, bh); continue; }
+      if (okSpot(x, z)) add(x, z, 0.72 + rnd() * 0.4, heightAt(x, z) + (masks.isPark(x, z) ? 0 : Y_WALK)); }
     for (const row of Array.isArray(pois.treeRows) ? pois.treeRows : []) {
       const pts = row?.points; if (!Array.isArray(pts)) continue;
       for (let k = 0; k + 1 < pts.length; k++) { const a = pts[k], b = pts[k + 1], L = Math.hypot(b[0] - a[0], b[1] - a[1]), n = Math.max(1, Math.round(L / 9)); for (let j = 0; j < n; j++) { const x = a[0] + ((b[0] - a[0]) * j) / n, z = a[1] + ((b[1] - a[1]) * j) / n; if (okSpot(x, z)) add(x, z, 0.85 + rnd() * 0.25, heightAt(x, z) + Y_WALK); } }

@@ -1,5 +1,5 @@
 // La Seine : eau (shader), quais maçonnés avec parapets, ponts à arches.
-import { L_STONE, L_PLAIN, L_SIDEWALK, createWaterNormal } from './textures.js';
+import { L_STONE, L_PLAIN, L_SIDEWALK, L_PAVE, createWaterNormal } from './textures.js';
 import { Y_GROUND } from './streets.js';
 
 const QUAY = [214, 206, 190], BRIDGE = [232, 222, 202], COPING = [226, 220, 208];
@@ -44,47 +44,208 @@ export function buildRiver(ctx, net, surf, masks) {
     return false;
   }
 
-  // ---------- 2. quais : mur, couronnement, parapet (+ collision)
+  // ---------- 2. quais : mur, couronnement, parapet (+ collision) — et berges basses en contrebas
   const probe = Math.max(3, masks.texel * 1.7);
   const addParapetBox = (ax, az, bx, bz) => {
     const len = Math.hypot(bx - ax, bz - az); if (len < 0.3) return;
     collision.addBox({ x: (ax + bx) / 2, z: (az + bz) / 2, hw: len / 2 + 0.15, hd: 0.32, rot: Math.atan2(-(bz - az), bx - ax), top: PARAPET_H + 0.6, tag: 'parapet' });
   };
+  /** Mur de collision mince entre deux points, actif seulement pour ce qui est sous `top` (berge) ou partout (top = Infinity). */
+  const addWallBox = (ax, az, bx, bz, top, hd = 0.25) => {
+    const len = Math.hypot(bx - ax, bz - az); if (len < 0.2) return;
+    collision.addBox({ x: (ax + bx) / 2, z: (az + bz) / 2, hw: len / 2 + 0.1, hd, rot: Math.atan2(-(bz - az), bx - ax), top, tag: 'parapet' });
+  };
   const B = ctx.BOUNDS, CL = 140;
   const outside = (p) => p[0] < B.minX - CL || p[0] > B.maxX + CL || p[1] < B.minZ - CL || p[1] > B.maxZ + CL;
   const quayPolys = [...masks.riverPolys, ...masks.islands];
+
+  // --- où y a-t-il une berge basse ? tronçons réels (pois.paths riverbank) sinon repli par plages de longitude
+  const Y_B = WATER_LEVEL + 1, BW = 9;                       // niveau et largeur de la promenade basse
+  const mPerLon0 = 111320 * Math.cos((48.8656 * Math.PI) / 180), lonX0 = (lon) => (lon - 2.3212) * mPerLon0;
+  const bankPaths = (Array.isArray(ctx.worldData.pois?.paths) ? ctx.worldData.pois.paths : []).filter((p) => p && p.riverbank && Array.isArray(p.points) && p.points.length >= 2);
+  const bankGrid = new Map(), BG = 40, bgk = (x, z) => (Math.floor(x / BG) + 2048) * 4096 + Math.floor(z / BG) + 2048;
+  for (const p of bankPaths) for (let i = 0; i + 1 < p.points.length; i++) {
+    const a = p.points[i], b = p.points[i + 1], L = Math.hypot(b[0] - a[0], b[1] - a[1]), n = Math.max(1, Math.ceil(L / 6));
+    for (let k = 0; k <= n; k++) { const x = a[0] + ((b[0] - a[0]) * k) / n, z = a[1] + ((b[1] - a[1]) * k) / n, key = bgk(x, z); let arr = bankGrid.get(key); if (!arr) bankGrid.set(key, (arr = [])); arr.push(x, z); }
+  }
+  const RB = [[lonX0(2.3015), lonX0(2.3325)], [lonX0(2.341), lonX0(2.3585)]], LB = [[lonX0(2.3015), lonX0(2.3265)], [lonX0(2.343), lonX0(2.357)]];
+  function wantBank(x, z, nz) {
+    if (bankPaths.length) {
+      for (let ix = -1; ix <= 1; ix++) for (let iz = -1; iz <= 1; iz++) { const arr = bankGrid.get(bgk(x + ix * BG, z + iz * BG)); if (!arr) continue; for (let i = 0; i < arr.length; i += 2) if ((arr[i] - x) ** 2 + (arr[i + 1] - z) ** 2 < 30 * 30) return true; }
+      return false;
+    }
+    const rng = nz < -0.25 ? RB : nz > 0.25 ? LB : []; for (const [a, b] of rng) if (x > a && x < b) return true; return false;
+  }
+
+  // --- pré-passe : pièces de rive (≤ 8 m) dans l'ordre de chaque polygone
+  const polyPieces = [];
   for (const poly of quayPolys) {
+    const pcs = [];
     for (let i = 0; i < poly.length; i++) {
       const a = poly[i], b = poly[(i + 1) % poly.length];
-      if (outside(a) && outside(b)) continue;
-      const L = Math.hypot(b[0] - a[0], b[1] - a[1]); if (L < 0.5) continue;
-      const dx = (b[0] - a[0]) / L, dz = (b[1] - a[1]) / L;
-      const m = Math.max(1, Math.ceil(L / 8));
-      let runA = null, runB = null; // tronçon de parapet en cours (pour fusionner les collisions)
-      const flush = () => { if (runA) addParapetBox(runA[0], runA[1], runB[0], runB[1]); runA = null; };
+      const L = Math.hypot(b[0] - a[0], b[1] - a[1]);
+      if ((outside(a) && outside(b)) || L < 0.5) { pcs.push(null); continue; }
+      const dx = (b[0] - a[0]) / L, dz = (b[1] - a[1]) / L, m = Math.max(1, Math.ceil(L / 8));
       for (let k = 0; k < m; k++) {
         const t0 = k / m, t1 = (k + 1) / m;
         const ax = a[0] + (b[0] - a[0]) * t0, az = a[1] + (b[1] - a[1]) * t0, bx = a[0] + (b[0] - a[0]) * t1, bz = a[1] + (b[1] - a[1]) * t1;
         const mx = (ax + bx) / 2, mz = (az + bz) / 2;
         let nx = -dz, nz = dx;
         const wP = masks.isWater(mx + nx * probe, mz + nz * probe), wM = masks.isWater(mx - nx * probe, mz - nz * probe);
-        if (wP === wM) { flush(); continue; }
+        if (wP === wM) { pcs.push(null); continue; }
         if (wP) { nx = -nx; nz = -nz; } // (nx,nz) pointe vers la terre
-        const bld = surf.at(mx, mz);
-        bld.wall(ax, az, bx, bz, -6.5, Y_QUAY, -6.5, Y_QUAY, -nx, -nz, L_STONE, QUAY, L * t0);
-        // couronnement (déborde un peu sur l'eau, recouvre le bord du sol découpé par le masque)
-        const c0 = -0.45, c1 = 1.7, c2 = 2.4;
-        bld.flatQuad([ax + nx * c0, Y_QUAY, az + nz * c0], [bx + nx * c0, Y_QUAY, bz + nz * c0], [bx + nx * c1, Y_QUAY, bz + nz * c1], [ax + nx * c1, Y_QUAY, az + nz * c1], L_PLAIN, 6, COPING);
-        bld.flatQuad([ax + nx * c1, Y_QUAY, az + nz * c1], [bx + nx * c1, Y_QUAY, bz + nz * c1], [bx + nx * c2, Y_GROUND + 0.006, bz + nz * c2], [ax + nx * c2, Y_GROUND + 0.006, az + nz * c2], L_SIDEWALK, 4, COPING);
-        bld.wall(ax + nx * c0, az + nz * c0, bx + nx * c0, bz + nz * c0, Y_QUAY - 0.35, Y_QUAY, Y_QUAY - 0.35, Y_QUAY, -nx, -nz, L_PLAIN, COPING, L * t0);
-        if (nearDeck(mx, mz, 0.2) || net.roadAtPad(mx + nx * 0.3, mz + nz * 0.3, 0.6, false)) { flush(); continue; }
-        const px = nx * 0.3, pz = nz * 0.3;
-        bld.prism(ax + px, az + pz, bx + px, bz + pz, 0.5, Y_QUAY, Y_QUAY, PARAPET_H, L_STONE, QUAY, true);
-        if (!runA) runA = [ax + px, az + pz];
-        runB = [bx + px, bz + pz];
+        const pc = { ax, az, bx, bz, mx, mz, nx, nz, dx, dz, len: L / m, u: L * t0, first: k === 0, berge: false, open: false, ua: 0 };
+        // berge : donnée réelle proche, assez d'eau devant pour la bande, pas sous un pont (la hauteur du sol est 2D :
+        // un même point ne peut pas être à la fois tablier et berge)
+        pc.berge = wantBank(mx - nx * 4, mz - nz * 4, nz) && !nearDeck(mx, mz, 3.5) && masks.isWater(mx - nx * (BW + 2), mz - nz * (BW + 2)) && masks.isWater(mx - nx * BW * 0.5, mz - nz * BW * 0.5) && !nearDeck(mx - nx * BW, mz - nz * BW, 3.5);
+        pcs.push(pc);
       }
-      flush();
     }
+    polyPieces.push(pcs);
+  }
+  // --- suites de pièces de berge, lignes extérieures en onglet, rampes et escaliers
+  const hq = [];                // quads de la couche de hauteur : ax,az,bx,bz,cx,cz,dx,dz,h0,h1 (h0 côté a-d, h1 côté b-c)
+  const bergeLamps = [], runsInfo = [];
+  let bergeLen = 0, nRamps = 0, nStairs = 0;
+  const STONE_B = [206, 198, 182], PAVE_B = [225, 220, 210];
+  for (const pcs of polyPieces) {
+    let i = 0;
+    while (i < pcs.length) {
+      if (!pcs[i] || !pcs[i].berge) { i++; continue; }
+      let j = i; while (j + 1 < pcs.length && pcs[j + 1] && pcs[j + 1].berge && Math.hypot(pcs[j + 1].ax - pcs[j].bx, pcs[j + 1].az - pcs[j].bz) < 0.5) j++;
+      const run = pcs.slice(i, j + 1); i = j + 1;
+      let total = 0; for (const pc of run) { pc.ua = total; total += pc.len; }
+      if (total < 30) { for (const pc of run) pc.berge = false; continue; }
+      bergeLen += total;
+      // points extérieurs en onglet (vers l'eau = -n)
+      for (let k = 0; k < run.length; k++) {
+        const pc = run[k], pv = run[k - 1], nxn = run[k + 1];
+        const mit = (q) => { if (!q) return [-pc.nx, -pc.nz]; let mx = -pc.nx - q.nx, mz = -pc.nz - q.nz; const d = 1 + (pc.nx * q.nx + pc.nz * q.nz); const sc = 1 / Math.max(0.5, d); return [mx * sc, mz * sc]; };
+        const m0 = mit(pv), m1 = mit(nxn);
+        pc.oax = pc.ax + m0[0] * BW; pc.oaz = pc.az + m0[1] * BW; pc.obx = pc.bx + m1[0] * BW; pc.obz = pc.bz + m1[1] * BW;
+      }
+      // accès : rampe carrossable (palier = 1 pièce au niveau du quai, puis 34 m à ~9 %) et escalier (9 m)
+      const structs = [];
+      const place = (k, type) => { const pc = run[k]; if (!pc || pc.open || nearDeck(pc.mx, pc.mz, 14) || net.roadAtPad(pc.mx + pc.nx * 0.3, pc.mz + pc.nz * 0.3, 0.6, false)) return false; const L = type === 'ramp' ? 34 : 9; if (pc.ua + pc.len + L > total - 4) return false; pc.open = true; structs.push({ type, s0: pc.ua, land: pc.len, len: L, w: type === 'ramp' ? 5.6 : 2.6 }); if (type === 'ramp') nRamps++; else nStairs++; return true; };
+      if (total >= 62) { for (let k = 1; k < run.length && !place(k, 'ramp'); k++); }
+      for (let u = 190; u < total - 60; u += 180) { const k = run.findIndex((pc) => pc.ua >= u); if (k > 0) for (let q = k; q < Math.min(run.length, k + 4) && !place(q, (Math.round(u / 180) % 2) ? 'stairs' : 'ramp'); q++); }
+      if (total >= 40 && total < 62) for (let k = 1; k < run.length && !place(k, 'stairs'); k++);
+      const hAt = (u) => { for (const st of structs) { if (u >= st.s0 - 1e-3 && u <= st.s0 + st.land + st.len + 1e-3) return [u <= st.s0 + st.land ? 0 : Y_B * ((u - st.s0 - st.land) / st.len), st]; } return [Y_B, null]; };
+      runsInfo.push({ x: run[0].ax, z: run[0].az, len: Math.round(total), structs: structs.length });
+      for (const pc of run) {
+        // sous-segments : coupures aux limites des ouvrages
+        const cuts = [pc.ua, pc.ua + pc.len];
+        for (const st of structs) for (const c of [st.s0, st.s0 + st.land, st.s0 + st.land + st.len]) if (c > pc.ua + 0.05 && c < pc.ua + pc.len - 0.05) cuts.push(c);
+        cuts.sort((p, q) => p - q);
+        const bld = surf.at(pc.mx, pc.mz);
+        const P = (u, f) => { const t = (u - pc.ua) / pc.len, ix = pc.ax + (pc.bx - pc.ax) * t, iz = pc.az + (pc.bz - pc.az) * t, ox = pc.oax + (pc.obx - pc.oax) * t, oz = pc.oaz + (pc.obz - pc.oaz) * t; return [ix + (ox - ix) * f, iz + (oz - iz) * f]; };
+        for (let c = 0; c + 1 < cuts.length; c++) {
+          const u0 = cuts[c], u1 = cuts[c + 1], um = (u0 + u1) / 2;
+          const [, st] = hAt(um); const h0 = st ? hAt(u0 + 1e-3)[0] : Y_B, h1 = st ? hAt(u1 - 1e-3)[0] : Y_B;
+          const fw = st ? st.w / BW : 0;
+          const a0 = P(u0, 0), b0 = P(u1, 0), a1 = P(u0, 1), b1 = P(u1, 1);
+          if (st) {
+            const am = P(u0, fw), bm = P(u1, fw);
+            // rampe / palier / escalier (bande intérieure) + mur de soutènement côté fleuve
+            bld.flatQuad([a0[0], h0 + 0.01, a0[1]], [b0[0], h1 + 0.01, b0[1]], [bm[0], h1 + 0.01, bm[1]], [am[0], h0 + 0.01, am[1]], L_PAVE, 1, PAVE_B);
+            hq.push(a0[0], a0[1], b0[0], b0[1], bm[0], bm[1], am[0], am[1], h0, h1);
+            bld.wall(am[0], am[1], bm[0], bm[1], Y_B, h0, Y_B, h1, -pc.nx, -pc.nz, L_STONE, STONE_B, u0);
+            if (Math.max(h0, h1) > Y_B + 0.4) { bld.prism(am[0], am[1], bm[0], bm[1], 0.35, h0, h1, 0.85, L_STONE, STONE_B, true); addWallBox(am[0], am[1], bm[0], bm[1], Infinity, 0.2); }
+            if (st.type === 'stairs' && u0 >= st.s0 + st.land - 0.01) { // marches visibles (la hauteur praticable reste une pente)
+              const nS = Math.round((h0 - h1) / 0.17), cm = P(u0, fw / 2), dm = P(u1, fw / 2);
+              for (let q = 0; q < nS; q++) { const t = (q + 0.5) / nS; box2(cm[0] + (dm[0] - cm[0]) * t, cm[1] + (dm[1] - cm[1]) * t, pc.dx, pc.dz, (u1 - u0) / nS, st.w, h0 + (h1 - h0) * ((q + 1) / nS), (h0 - h1) / nS + 0.02, L_PLAIN, [214, 208, 196]); }
+            }
+            // mur d'about du palier (côté début de berge)
+            if (Math.abs(u0 - st.s0) < 0.01) { bld.wall(a0[0], a0[1], am[0], am[1], Y_B, 0, Y_B, 0, -pc.dx, -pc.dz, L_STONE, STONE_B, 0); addWallBox(a0[0], a0[1], am[0], am[1], Infinity, 0.2); bld.prism(a0[0], a0[1], am[0], am[1], 0.35, 0, 0, 0.85, L_STONE, STONE_B, true); }
+            bld.flatQuad([am[0], Y_B, am[1]], [bm[0], Y_B, bm[1]], [b1[0], Y_B, b1[1]], [a1[0], Y_B, a1[1]], L_PAVE, 1, PAVE_B);
+            hq.push(am[0], am[1], bm[0], bm[1], b1[0], b1[1], a1[0], a1[1], Y_B, Y_B);
+          } else {
+            bld.flatQuad([a0[0], Y_B, a0[1]], [b0[0], Y_B, b0[1]], [b1[0], Y_B, b1[1]], [a1[0], Y_B, a1[1]], L_PAVE, 1, PAVE_B);
+            hq.push(a0[0], a0[1], b0[0], b0[1], b1[0], b1[1], a1[0], a1[1], Y_B, Y_B);
+          }
+          // bord de quai côté fleuve : mur, bordure de pierre, collision basse (on ne roule pas dans la Seine)
+          bld.wall(a1[0], a1[1], b1[0], b1[1], -6.5, Y_B, -6.5, Y_B, -pc.nx, -pc.nz, L_STONE, STONE_B, u0);
+          const e0 = P(u0, 0.965), e1 = P(u1, 0.965);
+          bld.prism(e0[0], e0[1], e1[0], e1[1], 0.5, Y_B, Y_B, 0.22, L_PLAIN, COPING, false);
+          addWallBox(e0[0], e0[1], e1[0], e1[1], Y_B + 2.2, 0.3);
+        }
+        // mur de fond (pied du mur de quai) : infranchissable depuis la berge, y compris là où le parapet est ouvert
+        addWallBox(pc.ax + pc.nx * 0.25, pc.az + pc.nz * 0.25, pc.bx + pc.nx * 0.25, pc.bz + pc.nz * 0.25, -0.6, 0.3);
+        // anneaux d'amarrage et échelles sur le mur de quai, bollards, bancs, lampadaires
+        const k8 = Math.round(pc.ua / 8);
+        box2(pc.mx - pc.nx * 0.06, pc.mz - pc.nz * 0.06, pc.dx, pc.dz, 0.32, 0.1, Y_B + 1.25, 0.3, L_PLAIN, [38, 36, 34]);
+        if (k8 % 9 === 4) for (const o of [-0.25, 0.25]) box2(pc.mx + pc.dx * o - pc.nx * 0.08, pc.mz + pc.dz * o - pc.nz * 0.08, pc.dx, pc.dz, 0.06, 0.08, Y_B, 2.9, L_PLAIN, [40, 40, 42]);
+        const em = P(pc.ua + pc.len / 2, 0.93); box2(em[0], em[1], pc.dx, pc.dz, 0.34, 0.34, Y_B + 0.2, 0.42, L_PLAIN, [32, 34, 36]);
+        const [hm, stm] = hAt(pc.ua + pc.len / 2);
+        if (!stm && k8 % 5 === 2) { const q = P(pc.ua + pc.len / 2, 0.08); bergeLamps.push(q[0], Y_B, q[1]); }
+        if (!stm && k8 % 6 === 0) { const q = P(pc.ua + pc.len / 2, 0.14); box2(q[0], q[1], pc.dx, pc.dz, 1.9, 0.45, Y_B + 0.4, 0.07, L_PLAIN, [120, 88, 54]); box2(q[0] + pc.nx * 0.2, q[1] + pc.nz * 0.2, pc.dx, pc.dz, 1.9, 0.06, Y_B + 0.45, 0.42, L_PLAIN, [120, 88, 54]); for (const o of [-0.8, 0.8]) box2(q[0] + pc.dx * o, q[1] + pc.dz * o, pc.dx, pc.dz, 0.08, 0.42, Y_B, 0.42, L_PLAIN, [40, 44, 42]); }
+        void hm;
+      }
+      // abouts de la berge (mur + collision)
+      for (const [pc, end] of [[run[0], 0], [run[run.length - 1], 1]]) {
+        const ix = end ? pc.bx : pc.ax, iz = end ? pc.bz : pc.az, ox = end ? pc.obx : pc.oax, oz = end ? pc.obz : pc.oaz;
+        surf.at(ix, iz).wall(ix, iz, ox, oz, -6.5, Y_B, -6.5, Y_B, end ? pc.dx : -pc.dx, end ? pc.dz : -pc.dz, L_STONE, STONE_B, 0);
+        addWallBox(ix, iz, ox, oz, Y_B + 2.2, 0.3);
+      }
+    }
+  }
+  function box2(x, z, dx, dz, len, w, y0, h, layer, col) { surf.at(x, z).prism(x - dx * len / 2, z - dz * len / 2, x + dx * len / 2, z + dz * len / 2, w, y0, y0, h, layer, col, true); }
+
+  // --- couche de hauteur (contrat v4) : grille de quads, rejet immédiat hors de l'emprise des berges, aucune allocation
+  const HQ = new Float32Array(hq), nQ = HQ.length / 10, HC = 12;
+  let hx0 = Infinity, hx1 = -Infinity, hz0 = Infinity, hz1 = -Infinity;
+  for (let q = 0; q < nQ; q++) for (let k = 0; k < 8; k += 2) { const x = HQ[q * 10 + k], z = HQ[q * 10 + k + 1]; if (x < hx0) hx0 = x; if (x > hx1) hx1 = x; if (z < hz0) hz0 = z; if (z > hz1) hz1 = z; }
+  const gw = nQ ? Math.floor((hx1 - hx0) / HC) + 1 : 0, gh = nQ ? Math.floor((hz1 - hz0) / HC) + 1 : 0;
+  const cellStart = new Int32Array(gw * gh + 1); let cellItems = new Int32Array(0);
+  if (nQ) {
+    const lists = new Array(gw * gh);
+    for (let q = 0; q < nQ; q++) {
+      let x0 = Infinity, x1 = -Infinity, z0 = Infinity, z1 = -Infinity;
+      for (let k = 0; k < 8; k += 2) { const x = HQ[q * 10 + k], z = HQ[q * 10 + k + 1]; if (x < x0) x0 = x; if (x > x1) x1 = x; if (z < z0) z0 = z; if (z > z1) z1 = z; }
+      for (let cx = Math.floor((x0 - hx0) / HC); cx <= Math.floor((x1 - hx0) / HC); cx++) for (let cz = Math.floor((z0 - hz0) / HC); cz <= Math.floor((z1 - hz0) / HC); cz++) (lists[cz * gw + cx] || (lists[cz * gw + cx] = [])).push(q);
+    }
+    let n = 0; for (let c = 0; c < gw * gh; c++) { cellStart[c] = n; n += lists[c] ? lists[c].length : 0; } cellStart[gw * gh] = n;
+    cellItems = new Int32Array(n); for (let c = 0; c < gw * gh; c++) if (lists[c]) cellItems.set(lists[c], cellStart[c]);
+  }
+  /** Hauteur de la berge / rampe en (x,z), ou undefined hors des berges. */
+  function bergeHeight(x, z) {
+    if (x < hx0 || x > hx1 || z < hz0 || z > hz1) return undefined;
+    const c = Math.floor((z - hz0) / HC) * gw + Math.floor((x - hx0) / HC);
+    for (let k = cellStart[c], e = cellStart[c + 1]; k < e; k++) {
+      const o = cellItems[k] * 10;
+      const ax = HQ[o], az = HQ[o + 1], bx = HQ[o + 2], bz = HQ[o + 3], cx = HQ[o + 4], cz = HQ[o + 5], dx = HQ[o + 6], dz = HQ[o + 7];
+      const s1 = (bx - ax) * (z - az) - (bz - az) * (x - ax), s2 = (cx - bx) * (z - bz) - (cz - bz) * (x - bx), s3 = (dx - cx) * (z - cz) - (dz - cz) * (x - cx), s4 = (ax - dx) * (z - dz) - (az - dz) * (x - dx);
+      if ((s1 >= 0 && s2 >= 0 && s3 >= 0 && s4 >= 0) || (s1 <= 0 && s2 <= 0 && s3 <= 0 && s4 <= 0)) {
+        const h0 = HQ[o + 8], h1 = HQ[o + 9]; if (h0 === h1) return h0;
+        const ex = bx - ax, ez = bz - az; let t = ((x - ax) * ex + (z - az) * ez) / (ex * ex + ez * ez); t = t < 0 ? 0 : t > 1 ? 1 : t;
+        return h0 + (h1 - h0) * t;
+      }
+    }
+    return undefined;
+  }
+
+  // --- murs de quai, couronnement, parapets
+  for (const pcs of polyPieces) {
+    let runA = null, runB = null; // tronçon de parapet en cours (pour fusionner les collisions)
+    const flush = () => { if (runA) addParapetBox(runA[0], runA[1], runB[0], runB[1]); runA = null; };
+    for (const pc of pcs) {
+      if (!pc) { flush(); continue; }
+      if (pc.first) flush();
+      const { ax, az, bx, bz, mx, mz, nx, nz } = pc;
+      const bld = surf.at(mx, mz);
+      bld.wall(ax, az, bx, bz, -6.5, Y_QUAY, -6.5, Y_QUAY, -nx, -nz, L_STONE, QUAY, pc.u);
+      // couronnement (déborde un peu sur l'eau, recouvre le bord du sol découpé par le masque)
+      const c0 = pc.open ? 0.0 : -0.45, c1 = 1.7, c2 = 2.4;
+      bld.flatQuad([ax + nx * c0, Y_QUAY, az + nz * c0], [bx + nx * c0, Y_QUAY, bz + nz * c0], [bx + nx * c1, Y_QUAY, bz + nz * c1], [ax + nx * c1, Y_QUAY, az + nz * c1], L_PLAIN, 6, COPING);
+      bld.flatQuad([ax + nx * c1, Y_QUAY, az + nz * c1], [bx + nx * c1, Y_QUAY, bz + nz * c1], [bx + nx * c2, Y_GROUND + 0.006, bz + nz * c2], [ax + nx * c2, Y_GROUND + 0.006, az + nz * c2], L_SIDEWALK, 4, COPING);
+      if (!pc.open) bld.wall(ax + nx * c0, az + nz * c0, bx + nx * c0, bz + nz * c0, Y_QUAY - 0.35, Y_QUAY, Y_QUAY - 0.35, Y_QUAY, -nx, -nz, L_PLAIN, COPING, pc.u);
+      if (pc.open || nearDeck(mx, mz, 0.2) || net.roadAtPad(mx + nx * 0.3, mz + nz * 0.3, 0.6, false)) { flush(); continue; }
+      const px = nx * 0.3, pz = nz * 0.3;
+      bld.prism(ax + px, az + pz, bx + px, bz + pz, 0.5, Y_QUAY, Y_QUAY, PARAPET_H, L_STONE, QUAY, true);
+      if (!runA) runA = [ax + px, az + pz];
+      runB = [bx + px, bz + pz];
+    }
+    flush();
   }
 
   // ---------- 3. ponts
@@ -202,15 +363,17 @@ export function buildRiver(ctx, net, surf, masks) {
         if (wP) { nx = -nx; nz = -nz; }
         // boîtes vertes des bouquinistes (par groupes de 4, un vide entre les groupes)
         const left = nz > 0.25 && x > BQ_L[0] && x < BQ_L[1], right = nz < -0.25 && x > BQ_R[0] && x < BQ_R[1];
-        if ((left || right) && (Math.floor(t / 2.6) % 6) < 4 && !nearDeck(x, z, 3) && !net.roadAtPad(x + nx * 0.3, z + nz * 0.3, 0.6, false)) {
+        if ((left || right) && (Math.floor(t / 2.6) % 6) < 4 && !nearDeck(x, z, 3) && !net.roadAtPad(x + nx * 0.3, z + nz * 0.3, 0.6, false) && bergeHeight(x - nx * 2.8, z - nz * 2.8) !== 0) {
           box(x + nx * 0.3, z + nz * 0.3, dx, dz, 2.0, 0.78, Y_QUAY + PARAPET_H, 0.6, L_PLAIN, [26, 62, 42]);
           box(x + nx * 0.3, z + nz * 0.3, dx, dz, 2.1, 0.86, Y_QUAY + PARAPET_H + 0.6, 0.06, L_PLAIN, [20, 48, 33]); nBox++;
         }
         // péniches amarrées le long des quais
         acc += 2.6;
-        if (acc > 430 && !nearDeck(x, z, 30) && masks.isWater(x - nx * 5, z - nz * 5) && masks.isWater(x - nx * 9, z - nz * 9) && masks.isWater(x - nx * 5 + dx * 16, z - nz * 5 + dz * 16) && masks.isWater(x - nx * 5 - dx * 16, z - nz * 5 - dz * 16)) {
+        const bo = bergeHeight(x - nx * 3, z - nz * 3) !== undefined ? BW + 0.6 : 0; // amarrée contre la berge s'il y en a une
+        if (acc > (bo ? 150 : 430) && !nearDeck(x, z, 30) && masks.isWater(x - nx * (5 + bo), z - nz * (5 + bo)) && masks.isWater(x - nx * 9, z - nz * 9) && masks.isWater(x - nx * 5 + dx * 16, z - nz * 5 + dz * 16) && masks.isWater(x - nx * 5 - dx * 16, z - nz * 5 - dz * 16)) {
           acc = 0; nBoat++;
-          const bx = x - nx * 4.6, bz = z - nz * 4.6, long = nBoat % 3 === 0;
+          const bx = x - nx * (4.6 + bo), bz = z - nz * (4.6 + bo), long = nBoat % 3 === 0;
+          if (bo) box(x - nx * (BW + 1.2), z - nz * (BW + 1.2), nx, nz, 3.4, 1.1, Y_B - 0.05, 0.12, L_PLAIN, [150, 120, 84]); // passerelle
           const hull = nBoat % 2 ? [36, 40, 48] : [92, 34, 30], len = long ? 44 : 30;
           box(bx, bz, dx, dz, len, 5.2, WATER_LEVEL - 0.4, 1.7, L_PLAIN, hull);
           box(bx, bz, dx, dz, len - 1.2, 4.6, WATER_LEVEL + 1.3, 0.08, L_PLAIN, [120, 96, 70]);
@@ -265,7 +428,7 @@ uniform float uWTime; uniform sampler2D uWNrm; uniform vec3 uWSky; varying vec3 
 
   const tmpC = new THREE.Color();
   return {
-    water, decks, nearDeck, boats: nBoat, bookstalls: nBox,
+    water, decks, nearDeck, boats: nBoat, bookstalls: nBox, bergeHeight, bergeLamps, bergeLen: Math.round(bergeLen), ramps: nRamps, stairs: nStairs, runsInfo, Y_B,
     update(dt, night) {
       uni.uWTime.value += dt;
       // reflet du ciel : couleur du brouillard / fond de scène (fournis par l'agent environnement)

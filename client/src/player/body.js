@@ -17,21 +17,21 @@ export const TILE = {
   SKIN: 0, FACE_M: 1, FACE_F: 2, HAND: 3, EYES: 4, HAIR: 5, COTTON: 6, TSHIRT: 7,
   SHIRT: 8, KNIT: 9, HOODIE: 10, BLOUSON: 11, COAT: 12, PUFFER: 13, DENIM: 14, JEANHIP: 15,
   CHINO: 16, CHINOHIP: 17, KNITS: 18, WOOL: 19, LEATHER: 20, SNEAKER: 21, RUBBER: 22, GLASSES: 23,
-  DRESS: 24, BAG: 25, SCARF: 26, PLAIN: 27,
+  DRESS: 24, BAG: 25, SCARF: 26, PLAIN: 27, FACE_MO: 28, FACE_FO: 29, SUIT: 30,
 };
 // index de couleur (palette du personnage)
-export const COL = { SKIN: 0, TOP: 1, BOTTOM: 2, SHOE: 3, HAIR: 4, BAG: 5, INNER: 6, DARK: 7, SOLE: 8, WHITE: 9, SCARF: 10, LEGS: 11, HAT: 12, BELT: 13, SKIN2: 14, METAL: 15 };
+export const COL = { SKIN: 0, TOP: 1, BOTTOM: 2, SHOE: 3, HAIR: 4, BAG: 5, INNER: 6, DARK: 7, SOLE: 8, WHITE: 9, SCARF: 10, LEGS: 11, HAT: 12, BELT: 13, SKIN2: 14, METAL: 15, EYE: 16, BROW: 17 };
 
 // ------------------------------------------------------------------------------------------------ profils du corps
 const K = (rows, f) => rows.map((r) => { const o = {}; f.forEach((n, i) => { o[n] = r[i]; }); return o; });
 const TF5 = ['y', 'rx', 'rf', 'rb', 'n'];
-const TORSO_M = K([[0.8, 0.085, 0.075, 0.085, 2.2], [0.86, 0.17, 0.098, 0.12, 2.4], [0.92, 0.166, 0.102, 0.122, 2.5], [0.98, 0.16, 0.106, 0.11, 2.4], [1.04, 0.15, 0.106, 0.1, 2.3], [1.1, 0.142, 0.105, 0.096, 2.3],
-  [1.18, 0.147, 0.11, 0.1, 2.3], [1.26, 0.16, 0.12, 0.11, 2.4], [1.32, 0.17, 0.124, 0.116, 2.5], [1.38, 0.174, 0.116, 0.116, 2.6], [1.43, 0.18, 0.084, 0.094, 2.9], [1.462, 0.128, 0.07, 0.086, 2.5], [1.49, 0.088, 0.062, 0.072, 2.1], [1.515, 0.06, 0.058, 0.062, 2]], TF5);
-const TORSO_F = K([[0.8, 0.085, 0.075, 0.085, 2.2], [0.86, 0.174, 0.098, 0.127, 2.4], [0.92, 0.175, 0.1, 0.13, 2.5], [0.98, 0.165, 0.1, 0.114, 2.4], [1.04, 0.145, 0.095, 0.098, 2.3], [1.1, 0.124, 0.09, 0.088, 2.2],
-  [1.18, 0.126, 0.098, 0.09, 2.2], [1.26, 0.138, 0.126, 0.098, 2.3], [1.32, 0.148, 0.128, 0.104, 2.4], [1.38, 0.154, 0.108, 0.106, 2.5], [1.43, 0.161, 0.078, 0.088, 2.9], [1.462, 0.114, 0.066, 0.08, 2.5], [1.49, 0.076, 0.056, 0.066, 2.1], [1.515, 0.052, 0.05, 0.055, 2]], TF5);
-const LEG = K([[0.06, 0.036, 0.04, 0.04], [0.1, 0.035, 0.036, 0.038], [0.18, 0.04, 0.038, 0.045], [0.28, 0.05, 0.043, 0.061], [0.36, 0.055, 0.046, 0.067], [0.44, 0.05, 0.05, 0.054], [0.5, 0.054, 0.061, 0.052],
-  [0.56, 0.06, 0.064, 0.058], [0.66, 0.072, 0.076, 0.074], [0.78, 0.085, 0.088, 0.09], [0.88, 0.089, 0.09, 0.096], [0.95, 0.084, 0.085, 0.09]], ['y', 'rx', 'rf', 'rb']);
-const ARM = K([[0.855, 0.026, 0.02], [0.9, 0.03, 0.025], [0.98, 0.038, 0.036], [1.07, 0.043, 0.042], [1.13, 0.04, 0.042], [1.19, 0.042, 0.045], [1.3, 0.047, 0.052], [1.365, 0.05, 0.056], [1.402, 0.047, 0.054], [1.427, 0.035, 0.044], [1.438, 0.013, 0.018]], ['y', 'rx', 'rf']);
+const TORSO_M = K([[0.8, 0.085, 0.075, 0.085, 2.2], [0.86, 0.166, 0.098, 0.118, 2.3], [0.92, 0.168, 0.1, 0.12, 2.4], [0.98, 0.158, 0.1, 0.108, 2.3], [1.04, 0.148, 0.098, 0.096, 2.2], [1.1, 0.14, 0.098, 0.09, 2.2],
+  [1.18, 0.143, 0.104, 0.094, 2.2], [1.26, 0.153, 0.114, 0.104, 2.25], [1.32, 0.162, 0.118, 0.11, 2.3], [1.38, 0.166, 0.11, 0.11, 2.4], [1.43, 0.177, 0.078, 0.088, 2.8], [1.462, 0.14, 0.07, 0.086, 2.4], [1.49, 0.1, 0.064, 0.076, 2.1], [1.515, 0.064, 0.06, 0.066, 2]], TF5);
+const TORSO_F = K([[0.8, 0.085, 0.075, 0.085, 2.2], [0.86, 0.17, 0.098, 0.125, 2.3], [0.92, 0.175, 0.1, 0.128, 2.4], [0.98, 0.163, 0.098, 0.112, 2.3], [1.04, 0.142, 0.092, 0.096, 2.2], [1.1, 0.122, 0.088, 0.086, 2.2],
+  [1.18, 0.124, 0.096, 0.088, 2.2], [1.26, 0.134, 0.122, 0.094, 2.25], [1.32, 0.142, 0.124, 0.1, 2.3], [1.38, 0.148, 0.104, 0.1, 2.4], [1.43, 0.156, 0.072, 0.082, 2.8], [1.462, 0.12, 0.066, 0.08, 2.4], [1.49, 0.084, 0.058, 0.068, 2.1], [1.515, 0.054, 0.052, 0.056, 2]], TF5);
+const LEG = K([[0.06, 0.035, 0.04, 0.038], [0.1, 0.033, 0.035, 0.036], [0.18, 0.038, 0.037, 0.044], [0.28, 0.05, 0.042, 0.064], [0.36, 0.056, 0.045, 0.072], [0.44, 0.048, 0.048, 0.054], [0.5, 0.054, 0.063, 0.05],
+  [0.56, 0.061, 0.066, 0.058], [0.66, 0.076, 0.08, 0.076], [0.78, 0.09, 0.092, 0.092], [0.88, 0.092, 0.092, 0.098], [0.95, 0.085, 0.085, 0.09]], ['y', 'rx', 'rf', 'rb']);
+const ARM = K([[0.855, 0.026, 0.021], [0.9, 0.03, 0.026], [0.98, 0.037, 0.036], [1.07, 0.041, 0.042], [1.13, 0.038, 0.041], [1.19, 0.04, 0.044], [1.3, 0.044, 0.05], [1.355, 0.045, 0.052], [1.39, 0.043, 0.05], [1.412, 0.034, 0.043], [1.424, 0.016, 0.022]], ['y', 'rx', 'rf']);
 const HEAD = K([[1.548, 0.018, 0.016, 0.02, -0.052, 2.2], [1.56, 0.04, 0.05, 0.04, -0.035, 2.3], [1.58, 0.057, 0.072, 0.055, -0.02, 2.3], [1.605, 0.065, 0.086, 0.07, -0.008, 2.25], [1.635, 0.07, 0.094, 0.085, 0, 2.2],
   [1.67, 0.074, 0.094, 0.094, 0.002, 2.15], [1.7, 0.076, 0.096, 0.098, 0.004, 2.1], [1.73, 0.075, 0.09, 0.098, 0.006, 2.1], [1.755, 0.066, 0.074, 0.088, 0.008, 2.05], [1.772, 0.042, 0.045, 0.06, 0.01, 2], [1.78, 0.004, 0.004, 0.004, 0.01, 2]], ['y', 'rx', 'rf', 'rb', 'z', 'n']);
 export const HEAD_V0 = 1.535, HEAD_V1 = 1.79;
@@ -50,7 +50,7 @@ function morph(look) {
     }
     return k;
   });
-  return { g, c, torso, shx: 0.187 - 0.02 * g + 0.008 * c, arm: 1 - 0.14 * g + 0.11 * c, leg: 1 + 0.12 * c, neck: 0.056 - 0.008 * g + 0.004 * c, jaw: 1 - 0.07 * g + 0.03 * Math.max(0, c), age: look.age };
+  return { g, c, torso, shx: 0.178 - 0.022 * g + 0.006 * c, arm: 1 - 0.14 * g + 0.11 * c, leg: 1 + 0.12 * c, neck: 0.06 - 0.011 * g + 0.005 * c, old: look.age > 60 ? 1 : 0, jaw: 1 - 0.07 * g + 0.03 * Math.max(0, c), age: look.age };
 }
 export function bonePositions(look) {
   const M = morph(look), s = M.shx;
@@ -122,12 +122,15 @@ function faceDisp(M, p) {
   const ny = y - 1.636, prof = ny > 0 ? Math.exp(-(ny * ny) / (0.03 * 0.03)) : Math.exp(-(ny * ny) / (0.0085 * 0.0085));
   const wn = 0.0095 + 0.0065 * Math.exp(-(ny * ny) / (0.012 * 0.012));
   let d = (0.022 - 0.003 * M.g) * prof * Math.exp(-(x * x) / (wn * wn));
-  d -= 0.0085 * G2(ax - 0.031, 0.017, y - 1.672, 0.012);
-  d += (0.0045 - 0.002 * M.g) * G2(ax - 0.03, 0.03, y - 1.694, 0.008);
-  d += 0.004 * G2(ax - 0.052, 0.02, y - 1.645, 0.016);
+  d -= 0.0115 * G2(ax - 0.031, 0.016, y - 1.672, 0.011);                 // orbites
+  d += (0.0065 - 0.003 * M.g) * G2(ax - 0.03, 0.03, y - 1.695, 0.008);   // arcades
+  d += 0.0058 * G2(ax - 0.053, 0.019, y - 1.647, 0.015);                 // pommettes
+  d -= 0.0028 * G2(ax - 0.021 - (1.63 - y) * 0.35, 0.006, y - 1.618, 0.014); // sillon nasogénien
+  d -= 0.003 * G2(ax - 0.066, 0.012, y - 1.7, 0.02);                     // tempes
+  d -= (0.002 + 0.002 * M.old) * G2(ax - 0.05, 0.016, y - 1.6, 0.016);   // creux des joues
   d += (0.004 + 0.0015 * M.g) * G2(x, 0.021, y - 1.609, 0.0055) + (0.0038 + 0.0015 * M.g) * G2(x, 0.018, y - 1.597, 0.006);
   d -= 0.0022 * G2(x, 0.024, y - 1.603, 0.0022);
-  d += 0.005 * G2(x, 0.02, y - 1.562, 0.012);
+  d += 0.0068 * G2(x, 0.019, y - 1.563, 0.011);
   p[2] -= d * smooth(0.03, 0.06, -p[2]);
 }
 const HP = [0, 0, 0];
@@ -151,7 +154,7 @@ function faceZ(M, x, y) {
 }
 
 function buildHead(mb, M, look, q) {
-  const tile = M.g ? TILE.FACE_F : TILE.FACE_M;
+  const tile = M.old ? (M.g ? TILE.FACE_FO : TILE.FACE_MO) : M.g ? TILE.FACE_F : TILE.FACE_M;
   const ys = q ? [1.548, 1.556, 1.566, 1.578, 1.588, ...range(1.594, 1.702, 0.0062), 1.714, 1.728, 1.742, 1.756, 1.767, 1.775, 1.78] : [1.548, 1.57, 1.605, 1.65, 1.7, 1.745, 1.772, 1.78];
   const seg = q ? 28 : 8;
   const base = mb.count, cols = seg + 1;
@@ -171,23 +174,28 @@ function buildHead(mb, M, look, q) {
     // oreilles
     const ex = s * (headRing(M, 1.66).rx - 0.003);
     if (!earsHidden) mb.tube([{ y: 1.63, rx: 0.002, rf: 0.004 }, { y: 1.64, rx: 0.006, rf: 0.012 }, { y: 1.658, rx: 0.008, rf: 0.016 }, { y: 1.678, rx: 0.008, rf: 0.017 }, { y: 1.69, rx: 0.005, rf: 0.012 }, { y: 1.695, rx: 0.002, rf: 0.004 }].map((r) => ({ ...r, x: ex, z: 0.014 })),
-      { seg: 6, tile: TILE.SKIN, col: COL.SKIN2, skin: [HD], disp: (p) => { p[0] += s * Math.max(0, p[2] - 0.008) * 0.32 + s * 0.002; } });
+      { seg: 6, tile: TILE.SKIN, col: COL.SKIN2, skin: [HD], disp: (p) => { p[0] += s * Math.max(0, p[2] - 0.01) * 0.2 + s * 0.001; } });
     // yeux (carreau en amande posé dans l'orbite) + paupières (os LID : écrasées au repos, descendues au clignement)
     const eye = (dz, tileE, col, skin, k) => mb.patch((u, v, o) => {
       const a = (u - 0.5) * 2, hx = 0.0145, hy = 0.0061 * Math.sqrt(Math.max(0, 1 - a * a * 0.92));
       o[0] = s * 0.031 + a * hx; o[1] = 1.672 + (v - 0.5) * 2 * hy - a * s * 0.0006; o[2] = faceZ(M, o[0], o[1]) - dz;
     }, { nu: 6, nv: 2, tile: tileE, col, skin, uv: k == null ? null : (u, v, o) => { o[0] = (k + (s < 0 ? u : 1 - u)) / 3; o[1] = v; } });
-    eye(0.0016, TILE.EYES, COL.WHITE, [HD], look.eye);
+    eye(0.0016, TILE.EYES, COL.EYE, [HD], look.eye);
+    mb.patch((u, v, o) => { // sourcil
+      const a = u, x = s * (0.011 + 0.04 * a), th = (M.g ? 0.0022 : 0.0032) * (0.55 + 0.9 * Math.sin(Math.PI * Math.min(1, 0.25 + a * 0.75)));
+      o[0] = x; o[1] = 1.6905 + (M.g ? 0.008 : 0.005) * Math.sin(Math.PI * Math.min(1, a * 1.15)) - 0.004 * a + (v - 0.5) * 2 * th; o[2] = faceZ(M, x, o[1]) - 0.0009;
+    }, { nu: 5, nv: 1, tile: TILE.HAIR, col: COL.BROW, skin: [HD], uv: (u, v, o) => { o[0] = 0.3 + 0.2 * u; o[1] = 0.5 + 0.2 * v; } });
     eye(0.003, TILE.SKIN, COL.SKIN2, [LID], null);
   }
 }
 
 // ------------------------------------------------------------------------------------------------ cheveux, barbe, couvre-chefs
 const HAIRS = {
-  court: { line: [[0, 1.738], [0.22, 1.73], [0.36, 1.676], [0.47, 1.668], [0.5, 1.692], [0.6, 1.66], [0.75, 1.606], [1, 1.6]], th: 0.013, front: 0.011 },
+  court: { line: [[0, 1.738], [0.22, 1.73], [0.36, 1.676], [0.47, 1.668], [0.5, 1.692], [0.6, 1.66], [0.75, 1.606], [1, 1.6]], th: 0.017, front: 0.014, part: 1 },
+  afro: { line: [[0, 1.725], [0.25, 1.715], [0.4, 1.672], [0.5, 1.68], [0.62, 1.645], [1, 1.6]], th: 0.05, front: 0.004, curl: 1 },
   rase: { line: [[0, 1.74], [0.22, 1.733], [0.36, 1.68], [0.47, 1.672], [0.5, 1.694], [0.6, 1.665], [0.75, 1.612], [1, 1.606]], th: 0.0035, front: 0 },
-  milong: { line: [[0, 1.736], [0.16, 1.724], [0.26, 1.63], [0.36, 1.575], [0.5, 1.555], [1, 1.54]], th: 0.02, front: 0.006, hang: 1 },
-  long: { line: [[0, 1.736], [0.15, 1.724], [0.24, 1.6], [0.32, 1.5], [0.42, 1.47], [0.55, 1.4], [0.7, 1.35], [1, 1.33]], th: 0.021, front: 0.004, hang: 1 },
+  milong: { line: [[0, 1.736], [0.16, 1.724], [0.26, 1.63], [0.36, 1.575], [0.5, 1.555], [1, 1.54]], th: 0.026, front: 0.008, hang: 1, part: 1 },
+  long: { line: [[0, 1.736], [0.15, 1.724], [0.24, 1.6], [0.32, 1.5], [0.42, 1.47], [0.55, 1.4], [0.7, 1.35], [1, 1.33]], th: 0.027, front: 0.006, hang: 1, part: 1 },
   chignon: { line: [[0, 1.74], [0.25, 1.735], [0.38, 1.695], [0.5, 1.68], [0.7, 1.618], [1, 1.602]], th: 0.009, front: 0.002 },
   queue: { line: [[0, 1.74], [0.25, 1.735], [0.38, 1.695], [0.5, 1.68], [0.7, 1.618], [1, 1.602]], th: 0.009, front: 0.002 },
   calvitie: { line: [[0.4, 1.674], [0.5, 1.686], [0.6, 1.66], [0.75, 1.606], [1, 1.6]], th: 0.0045, front: 0, from: 0.58, top: [[0.4, 1.69], [0.55, 1.735], [0.75, 1.748], [1, 1.752]] },
@@ -204,6 +212,10 @@ function skullCap(mb, M, o) {
     const yTop = o.top ? pl(o.top, fa) : 1.7805, yb = pl(o.line, fa);
     const s = o.top ? v : 0.35 * v + 0.65 * (1 - Math.cos(v * Math.PI / 2)), y = lerp(yTop, yb, s); // rangs resserrés près du sommet (épouse la calotte)
     let th = (o.th + (o.front || 0) * smooth(0.45, 0.1, fa) * smooth(0.75, 0.2, s)) * (0.7 + 0.45 * Math.sin(Math.PI * Math.min(1, s * 1.1)));
+    const wt = warp(t);
+    if (o.part) th *= 1 - 0.55 * Math.exp(-((wt - 0.585) * (wt - 0.585)) / 0.0006) * smooth(0.6, 0.15, s) * smooth(0.5, 0.3, fa); // raie sur le côté
+    if (o.curl) th *= 0.8 + 0.3 * Math.sin(t * 61 + s * 23) * Math.sin(s * 37 + t * 17) + 0.12 * Math.sin(Math.PI * s); // boucles
+    else if (!o.tile) th *= 1 + 0.16 * Math.sin(t * 43 + 1.7) * smooth(0.1, 0.5, s); // mèches
     if (v > 0.985 && o.lip !== false) th *= 0.25; // bord rentré
     if (o.top && v < 0.02) th *= 0.2;
     if (o.th2) th += o.th2 * smooth(1 - o.band, 1 - o.band + 0.05, s); // revers (bonnet)
@@ -219,7 +231,11 @@ function skullCap(mb, M, o) {
 function buildHair(mb, M, look, q) {
   const st = HAIRS[look.hair];
   const hat = look.hat;
-  if (st) skullCap(mb, M, { ...st, nu: q ? (st.from ? 16 : 24) : 8, nv: q ? (st.hang ? 12 : 8) : 3, th: hat !== 'none' ? Math.min(st.th, 0.009) : st.th, front: hat !== 'none' ? 0 : st.front });
+  if (st) {
+    const o = { ...st, nu: q ? (st.from ? 16 : 28) : 8, nv: q ? (st.hang ? 12 : 9) : 3, th: hat !== 'none' ? Math.min(st.th, 0.009) : st.th, front: hat !== 'none' ? 0 : st.front };
+    if (look.fringe && hat === 'none') { o.line = st.line.map(([a, y]) => [a, a < 0.2 ? y - 0.036 : y]); o.front = 0.012; o.part = 0; } // frange
+    skullCap(mb, M, o);
+  }
   if (look.hair === 'chignon') {
     const c = [0, 1.752, 0.088];
     mb.tube(range(-1, 1, q ? 0.34 : 0.67).map((k) => ({ x: c[0], z: c[2], y: c[1] + k * 0.036, rx: 0.04 * Math.sqrt(Math.max(0.02, 1 - k * k)), rf: 0.036 * Math.sqrt(Math.max(0.02, 1 - k * k)) })), { seg: q ? 10 : 5, tile: TILE.HAIR, col: COL.HAIR, skin: [HD] });
@@ -236,11 +252,11 @@ function buildHair(mb, M, look, q) {
       const y = lerp(y0, y1, v);
       headPoint(M, t, y, th * Math.sin(Math.PI * Math.min(1, 0.12 + v * 0.95)) * (1 - 0.5 * smooth(0.7, 1, fa)), true, out);
       if (v === 0) out[1] -= 0.004;
-    }, { nu: 14, nv: 5, tile: TILE.HAIR, col: COL.HAIR, skin: [HD] });
+    }, { nu: 14, nv: 5, tile: TILE.HAIR, col: COL.HAIR, skin: [HD], uv: (u, v, o) => { o[1] = 0.3 + 0.6 * v; } });
     mb.patch((u, v, out) => { // moustache
       const x = (u - 0.5) * 0.062, y = 1.6135 + v * 0.013 - Math.abs(x) * 0.12;
       out[0] = x; out[1] = y; out[2] = faceZ(M, x, y) - th * 0.6 * Math.sin(Math.PI * (0.15 + 0.7 * v));
-    }, { nu: 6, nv: 2, tile: TILE.HAIR, col: COL.HAIR, skin: [HD] });
+    }, { nu: 6, nv: 2, tile: TILE.HAIR, col: COL.HAIR, skin: [HD], uv: (u, v, o) => { o[1] = 0.3 + 0.6 * v; } });
   }
   // --- couvre-chefs
   if (hat === 'bonnet') {
@@ -270,16 +286,16 @@ function buildHair(mb, M, look, q) {
 
 // ------------------------------------------------------------------------------------------------ haut du corps
 const TOPS = {
-  tshirt: { tile: TILE.TSHIRT, sl: TILE.COTTON, ease: 0.008, hem: 0.915, collar: 'crew' },
-  shirt: { tile: TILE.SHIRT, sl: TILE.COTTON, ease: 0.012, hem: 0.9, cuff: 0.004, collar: 'shirt' },
-  pull: { tile: TILE.KNIT, sl: TILE.KNITS, ease: 0.02, hem: 0.9, cuff: 0.008, collar: 'crew', rib: 1 },
-  hoodie: { tile: TILE.HOODIE, sl: TILE.COTTON, ease: 0.03, hem: 0.885, cuff: 0.01, collar: 'hood', rib: 1 },
-  blouson: { tile: TILE.BLOUSON, sl: TILE.LEATHER, ease: 0.028, hem: 0.935, cuff: 0.008, collar: 'stand', rib: 1 },
-  veste: { tile: TILE.COAT, sl: TILE.WOOL, ease: 0.02, hem: 0.845, collar: 'lapel' },
-  manteau: { tile: TILE.COAT, sl: TILE.WOOL, ease: 0.03, hem: 0.56, collar: 'lapel' },
-  trench: { tile: TILE.COAT, sl: TILE.WOOL, ease: 0.028, hem: 0.5, collar: 'lapel', belt: 1 },
-  doudoune: { tile: TILE.PUFFER, sl: TILE.PUFFER, ease: 0.045, hem: 0.885, cuff: 0.012, collar: 'puff', quilt: 1 },
-  robe: { tile: TILE.DRESS, sl: TILE.COTTON, ease: 0.007, hem: 0.56, collar: 'scoop', flare: 1 },
+  tshirt: { tile: TILE.TSHIRT, sl: TILE.COTTON, ease: 0.005, hem: 0.915, collar: 'crew' },
+  shirt: { tile: TILE.SHIRT, sl: TILE.COTTON, ease: 0.008, hem: 0.9, cuff: 0.003, collar: 'shirt', drape: 0.5 },
+  pull: { tile: TILE.KNIT, sl: TILE.KNITS, ease: 0.012, hem: 0.9, cuff: 0.006, collar: 'crew', rib: 1, fill: 0.35, drape: 0.6 },
+  hoodie: { tile: TILE.HOODIE, sl: TILE.COTTON, ease: 0.02, hem: 0.885, cuff: 0.008, collar: 'hood', rib: 1, fill: 0.7, drape: 1 },
+  blouson: { tile: TILE.BLOUSON, sl: TILE.LEATHER, ease: 0.014, hem: 0.935, cuff: 0.006, collar: 'stand', rib: 1, fill: 0.6, drape: 0.5 },
+  veste: { tile: TILE.SUIT, sl: TILE.WOOL, ease: 0.01, hem: 0.85, collar: 'lapel', pad: 0.008, drape: 0.3 },
+  manteau: { tile: TILE.COAT, sl: TILE.WOOL, ease: 0.017, hem: 0.56, collar: 'lapel', pad: 0.006, fill: 0.6, drape: 0.8 },
+  trench: { tile: TILE.COAT, sl: TILE.WOOL, ease: 0.014, hem: 0.5, collar: 'lapel', belt: 1, drape: 1 },
+  doudoune: { tile: TILE.PUFFER, sl: TILE.PUFFER, ease: 0.04, hem: 0.885, cuff: 0.012, collar: 'puff', quilt: 1, fill: 1 },
+  robe: { tile: TILE.DRESS, sl: TILE.COTTON, ease: 0.005, hem: 0.56, collar: 'scoop', flare: 1 },
 };
 const RG = {};
 /** Section du vêtement de torse à la hauteur y (corps + aisance, tombé droit sous les hanches). */
@@ -289,8 +305,9 @@ function garmentRing(M, G, y, out = {}) {
   sampleKeys(M.torso, Math.min(1.515, Math.max(y, long ? hipY : 0.8)), out);
   let e = G.ease * (y > 1.4 ? lerp(1, 0.55, smooth(1.4, 1.47, y)) : 1);
   if (y > 1.485) e *= 0.3;
-  if (G.ease >= 0.018 && y < 1.3 && y > 0.9) { // les vêtements amples ne marquent pas la taille
-    const ch = sampleKeys(M.torso, 1.3, RG), fill = bell(y, 1.1, 0.13);
+  if (G.pad && y > 1.36 && y < 1.47) out.rx += G.pad * bell(y, 1.425, 0.03); // épaule structurée (veste, manteau)
+  if (G.fill && y < 1.3 && y > 0.9) { // les vêtements amples ne marquent pas (ou peu) la taille
+    const ch = sampleKeys(M.torso, 1.3, RG), fill = bell(y, 1.1, 0.13) * G.fill;
     out.rx = Math.max(out.rx, lerp(out.rx, ch.rx - 0.012, fill)); out.rb = Math.max(out.rb, lerp(out.rb, ch.rb - 0.006, fill));
     if (!M.g) out.rf = Math.max(out.rf, lerp(out.rf, ch.rf - 0.012, fill));
   }
@@ -298,6 +315,7 @@ function garmentRing(M, G, y, out = {}) {
     const d = hipY - y, fl = G.flare ? 0.2 : 0.05;
     out.rx += d * fl; out.rf += d * fl * 0.8 + 0.012 * Math.min(1, d / 0.08); out.rb += d * fl * 0.6; out.n = lerp(out.n, 2.2, Math.min(1, d / 0.2));
   }
+  if (G.tile !== undefined && y < 1.09 && G.hem < 0.99) e = Math.max(e, 0.019 * smooth(1.09, 1.03, y));
   if (G.rib && y < G.hem + 0.045) e -= 0.012 * smooth(G.hem + 0.045, G.hem + 0.01, y);
   if (G.quilt) e += 0.011 * Math.pow(Math.abs(Math.sin((Math.PI * (y - G.hem)) / 0.078)), 0.55) - 0.004;
   out.rx += e; out.rf += e; out.rb += e; out.y = y; out.x = 0; out.z = out.z || 0;
@@ -319,7 +337,13 @@ function buildTop(mb, M, look, q) {
   rings.push({ x: 0, y: 1.503, z: 0.01, rx: M.neck + 0.014, rf: M.neck + 0.011, rb: M.neck + 0.016, n: 2 }); // raccord au cou
   // ourlet : bord légèrement retourné vers l'intérieur
   const hemIn = { ...rings[0], rx: rings[0].rx - 0.014, rf: rings[0].rf - 0.014, rb: rings[0].rb - 0.014, y: G.hem + 0.004, v: 0 };
-  const pleat = look.top === 'robe' ? (p, u, r) => { if (r.y < 0.9) { const k = (0.9 - r.y) * 0.05 * Math.sin(u * Math.PI * 2 * 14); p[0] *= 1 + k; p[2] *= 1 + k; } } : null;
+  const dr = G.drape || 0;
+  const pleat = look.top === 'robe' ? (p, u, r) => { if (r.y < 0.9) { const k = (0.9 - r.y) * 0.05 * Math.sin(u * Math.PI * 2 * 14); p[0] *= 1 + k; p[2] *= 1 + k; } }
+    : dr ? (p, u, r) => { // plis de gravité : le bas du vêtement ondule, léger creux sous la poitrine
+      const low = smooth(G.hem + 0.16, G.hem, r.y) + (skirt ? 0.5 * smooth(0.9, G.hem, r.y) : 0);
+      const k = dr * (0.014 * low * Math.sin(u * Math.PI * 2 * 5 + 0.9) + 0.006 * low * Math.sin(u * Math.PI * 2 * 11 + 2)) - dr * 0.006 * bell(r.y, 1.16, 0.05) * smooth(0.3, 0.5, u) * smooth(0.7, 0.5, u);
+      p[0] *= 1 + k; p[2] *= 1 + k;
+    } : null;
   mb.tube([hemIn, ...rings], { seg: q ? 22 : 8, tile: G.tile, col: COL.TOP, skin, v0: G.hem, v1: 1.5, disp: pleat });
     const at = (y) => garmentRing(M, G, y, {});
 
@@ -374,9 +398,9 @@ function buildTop(mb, M, look, q) {
     const xc = (y) => s * (M.shx + 0.015 * smooth(SHOULDER_Y, WRIST_Y, y));
     const long = look.sleeve === 'long';
     const cutY = long ? 0.875 : 1.262;
-    const eS = long ? Math.min(G.ease, 0.03) + 0.004 : 0.012;
-    const ring = (y, e, extra = 0) => { const k = sampleKeys(ARM, y, {}); const fold = long && G.ease > 0.015 ? 0.004 * bell(y, 1.115, 0.018) + 0.003 * bell(y, 1.16, 0.014) : 0; const qu = G.quilt && y < 1.4 ? 0.01 * Math.pow(Math.abs(Math.sin((Math.PI * (y - 0.865)) / 0.0774)), 0.55) : 0; const top = smooth(1.438, 1.39, y); return { x: xc(y), y, z: 0, rx: k.rx * M.arm + (e + fold + qu + extra) * top, rf: k.rf * M.arm + (e + fold + qu + extra) * top, rb: (k.rf * M.arm + (e + fold + qu + extra) * top) * (1 + 0.1 * bell(y, 1.12, 0.03)), n: 2 }; };
-    const ysA = q ? [...range(cutY, 1.38, G.quilt ? 0.0194 : 0.036), 1.398, 1.416, 1.43, 1.438] : [cutY, lerp(cutY, 1.13, 0.5), 1.13, 1.28, 1.4, 1.437];
+    const eS = long ? (G.quilt ? 0.03 : G.ease * 0.75 + 0.002) : 0.008;
+    const ring = (y, e, extra = 0) => { const k = sampleKeys(ARM, y, {}); const fold = long && !G.quilt ? (0.0035 * bell(y, 1.112, 0.014) + 0.003 * bell(y, 1.15, 0.012) + 0.002 * bell(y, 1.34, 0.014)) * (0.5 + (G.drape || 0.3)) : 0; const qu = G.quilt && y < 1.4 ? 0.01 * Math.pow(Math.abs(Math.sin((Math.PI * (y - 0.865)) / 0.0774)), 0.55) : 0; const top = smooth(1.424, 1.38, y); return { x: xc(y), y, z: 0, rx: k.rx * M.arm + (e + fold + qu + extra) * top, rf: k.rf * M.arm + (e + fold + qu + extra) * top, rb: (k.rf * M.arm + (e + fold + qu + extra) * top) * (1 + 0.1 * bell(y, 1.12, 0.03)), n: 2 }; };
+    const ysA = q ? [...range(cutY, 1.375, G.quilt ? 0.0194 : 0.036), 1.392, 1.406, 1.417, 1.424] : [cutY, lerp(cutY, 1.13, 0.5), 1.13, 1.28, 1.39, 1.423];
     const sl = ysA.map((y) => ring(y, eS));
     if (long && G.cuff) { sl[0] = ring(cutY, G.cuff); if (q) sl[1] = ring(ysA[1], lerp(G.cuff, eS, 0.8)); }
     const cuffIn = { ...sl[0], rx: sl[0].rx - 0.01, rf: sl[0].rf - 0.01, rb: sl[0].rb - 0.01, y: cutY + 0.003, v: sl[0].v };
@@ -388,17 +412,17 @@ function buildTop(mb, M, look, q) {
 }
 
 function buildHand(mb, M, s, x, q) {
-  const Hd = s < 0 ? HL : HR, k = 0.92 * (1 - 0.1 * M.g + 0.04 * M.c);
+  const Hd = s < 0 ? HL : HR, k = 1.02 * (1 - 0.09 * M.g + 0.04 * M.c);
   // paume + doigts regroupés, légèrement repliés vers la cuisse ; la tuile « main » dessine les sillons entre les doigts
-  const keys = [[0.875, 0.021, 0.026, 0, 0], [0.85, 0.017, 0.031, 0, -0.002], [0.825, 0.013, 0.041, -0.001, -0.004], [0.79, 0.012, 0.044, -0.003, -0.005], [0.765, 0.0115, 0.042, -0.006, -0.006],
-    [0.74, 0.0105, 0.039, -0.011, -0.008], [0.715, 0.0095, 0.036, -0.018, -0.011], [0.694, 0.008, 0.031, -0.025, -0.013], [0.682, 0.005, 0.022, -0.029, -0.014]];
+  const keys = [[0.875, 0.022, 0.026, 0, 0], [0.856, 0.0165, 0.027, 0, -0.001], [0.838, 0.0145, 0.038, -0.001, -0.004], [0.8, 0.0145, 0.046, -0.003, -0.005], [0.77, 0.013, 0.046, -0.006, -0.006],
+    [0.742, 0.0115, 0.043, -0.012, -0.008], [0.714, 0.0105, 0.041, -0.02, -0.011], [0.69, 0.0095, 0.038, -0.028, -0.013], [0.676, 0.0075, 0.031, -0.032, -0.014]];
   const rings = (q ? keys : [keys[0], keys[2], keys[5], keys[8]]).map(([y, rx, rz, dx, dz], i, a) => ({ x: x + s * dx * k, y: WRIST_Y + (y - WRIST_Y) * k, z: dz * k - 0.004, rx: rx * k, rf: rz * k, rb: rz * k * 0.92, n: 2.6, v: 1 - i / (a.length - 1) })).reverse();
   mb.tube(rings, { seg: q ? 10 : 5, tile: TILE.HAND, col: COL.SKIN, capBottom: true, skin: (px, y, z, S) => { S.b0 = Hd; S.b1 = s < 0 ? FL : FR; S.w0 = smooth(0.875, 0.845, y); },
     uv: s < 0 ? (u, v, p, o) => { o[0] = 1 - u; } : null });
   if (!q) return;
   // pouce
-  const p0 = [x - s * 0.002, WRIST_Y - 0.035 * k, -0.03 * k];
-  mb.sweep([0, 0.33, 0.66, 1].map((t) => ({ x: p0[0] - s * 0.012 * t * t, y: p0[1] - 0.075 * k * t, z: p0[2] - 0.034 * k * Math.sin(t * 1.9), rx: 0.0105 * k * (1 - 0.35 * t), rz: 0.0095 * k * (1 - 0.35 * t), v: 0.45 * (1 - t) })), { seg: 6, tile: TILE.SKIN, col: COL.SKIN, skin: [Hd], caps: true, up: [1, 0, 0] });
+  const p0 = [x - s * 0.004, WRIST_Y - 0.03 * k, -0.03 * k];
+  mb.sweep([0, 0.3, 0.6, 0.85, 1].map((t) => ({ x: p0[0] - s * 0.016 * t * t, y: p0[1] - 0.085 * k * t, z: p0[2] - 0.05 * k * Math.sin(t * 1.7), rx: 0.0125 * k * (1 - 0.3 * t), rz: 0.0115 * k * (1 - 0.3 * t), v: 0.45 * (1 - t) })), { seg: 6, tile: TILE.SKIN, col: COL.SKIN, skin: [Hd], caps: true, up: [1, 0, 0] });
 }
 
 // ------------------------------------------------------------------------------------------------ bas du corps
@@ -438,7 +462,7 @@ function buildBottom(mb, M, look, q) {
         + (kind !== 'short' ? 0.004 * bell(y, 0.11, 0.022) + 0.003 * bell(y, 0.155, 0.02) + 0.0025 * bell(y, 0.46, 0.02) : 0);
       const ys = q ? [...range(hem, 0.44, 0.03), ...range(0.47, 0.95, 0.04)] : [hem, 0.3, 0.5, 0.7, 0.95];
       const rings = ys.filter((y) => y >= hem).map((y) => legRing(M, s, y, e(y)));
-      if (kind !== 'short') { rings[0].rx = Math.max(rings[0].rx, 0.05); rings[0].rf = Math.max(rings[0].rf, 0.056); rings[0].rb = Math.max(rings[0].rb, 0.052); } // bas de jambe sur la chaussure
+      if (kind !== 'short') { rings[0].rx = Math.max(rings[0].rx, 0.05); rings[0].rf = Math.max(rings[0].rf, 0.058); rings[0].rb = Math.max(rings[0].rb, 0.052); if (q && rings[2]) { rings[1].rf += 0.012; rings[1].z -= 0.004; rings[2].rf -= 0.004; } } // bas de jambe qui casse sur la chaussure
       const hemIn = { ...rings[0], rx: rings[0].rx - 0.012, rf: rings[0].rf - 0.012, rb: rings[0].rb - 0.012, y: hem + 0.003 };
       mb.tube([hemIn, ...rings], { seg: q ? 12 : 6, tile: Bt.leg, col: COL.BOTTOM, skin: sk, v0: 0.06, v1: 0.95, capTop: true, uv: s < 0 ? (u, v, p, o) => { o[0] = 1 - u; } : null });
     }
@@ -454,13 +478,14 @@ function buildBottom(mb, M, look, q) {
 
 function buildShoe(mb, look, s, q, boots) {
   const F = s < 0 ? FTL : FTR, kind = look.shoes;
-  const sole = kind === 'baskets' ? 0.024 : 0.012, heel = kind === 'talons' ? 0.035 : kind === 'baskets' ? 0 : 0.012;
-  const slim = kind === 'talons' ? 0.86 : kind === 'derbies' ? 0.94 : 1;
-  const len = kind === 'baskets' ? 0.28 : 0.275;
+  const sole = kind === 'baskets' ? 0.03 : kind === 'talons' ? 0.008 : 0.014, heel = kind === 'talons' ? 0.045 : kind === 'baskets' ? 0 : kind === 'bottines' ? 0.022 : 0.014;
+  const slim = kind === 'talons' ? 0.84 : kind === 'derbies' ? 0.93 : kind === 'baskets' ? 1.06 : 1;
+  const len = kind === 'baskets' ? 0.295 : kind === 'derbies' ? 0.3 : 0.28;
   // sections le long du pied (du talon vers la pointe) : [s, demi-largeur, hauteur]
-  const keys = [[0, 0.018, 0.045], [0.02, 0.031, 0.07], [0.07, 0.04, kind === 'talons' ? 0.06 : 0.092], [0.12, 0.044, kind === 'talons' ? 0.04 : 0.084], [0.17, 0.049, kind === 'talons' ? 0.036 : 0.064], [0.215, 0.049, 0.048], [0.25, 0.04, 0.04], [0.272, 0.022, 0.028], [0.28, 0.006, 0.014]];
+  const low = kind === 'talons', sleek = kind === 'derbies';
+  const keys = [[0, 0.02, 0.05], [0.02, 0.033, 0.075], [0.07, 0.041, low ? 0.06 : 0.098], [0.12, 0.046, low ? 0.04 : sleek ? 0.08 : 0.09], [0.17, 0.051, low ? 0.034 : sleek ? 0.056 : 0.07], [0.215, 0.051, sleek ? 0.04 : 0.052], [0.25, 0.043, sleek ? 0.032 : 0.044], [0.272, sleek ? 0.02 : 0.027, 0.03], [0.28, 0.008, 0.016]];
   const ks = q ? keys : [keys[0], keys[2], keys[4], keys[6], keys[8]];
-  const x0 = s * HIPX, zHeel = 0.082;
+  const x0 = s * HIPX, zHeel = 0.088;
   const base = (t) => sole + heel * smooth(0.11, 0.05, t);
   const xf = (p) => { const t = p[1], w = p[2]; p[1] = -w; p[2] = zHeel - t; p[0] += s * 0.012 * smooth(0.05, 0.25, t); };
   const tile = kind === 'baskets' ? TILE.SNEAKER : TILE.LEATHER;
@@ -521,6 +546,7 @@ export function buildBody(look, lod) {
   const G = buildTop(mb, M, look, q);
   buildBottom(mb, M, look, q);
   if (look.bag !== 'none') buildBag(mb, M, look, q, G);
+  if (look.attitude === 'phone' && q) mb.box(M.shx + 0.015 - 0.019, 0.772, -0.012, 0.0045, 0.07, 0.035, { tile: TILE.PLAIN, col: COL.DARK, skin: [HR], n: 6, seg: 6 });
   base = mb.finish();
   base.bonePos = bonePositions(look);
   base.key = key;

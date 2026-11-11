@@ -102,6 +102,8 @@
       const places = [['arc', 125], ['concorde', 130], ['louvre', 150], ['opera', 90], ['madeleine', 80], ['trocadero', 110], ['notredame', 110], ['invalides', 140], ['eiffel', 120]];
       for (const [id, R] of places) { const l = LANDMARK_BY_ID[id]; if (!l) continue; for (let i = 0; i < nPlace; i++) { const a = rnd() * 6.283, r = Math.sqrt(rnd()) * R; pts.push([l.x + Math.cos(a) * r, l.z + Math.sin(a) * r, 'place:' + id]); } }
       for (const pl of (data.plazas || []).concat(data.parks || [])) { if (!/Vendôme|Victoires|Dauphine|Tertre|Carrousel|Tuileries|Luxembourg/.test(pl.name || '')) continue; const p = pl.polygon; for (let i = 0; i < 60; i++) { const a = p[(rnd() * p.length) | 0], b = p[(rnd() * p.length) | 0], t = rnd(); pts.push([a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t, 'place:' + pl.name]); } }
+      // berges basses et rampes : points pris là où la couche de hauteur est définie
+      const bh = w._river?.bergeHeight; if (bh) { let nb = 0; for (let i = 0; i < 400000 && nb < 2500; i++) { const x = BOUNDS.minX + rnd() * (BOUNDS.maxX - BOUNDS.minX), z = -300 + rnd() * 2800; const h = bh(x, z); if (h !== undefined) { pts.push([x, z, h === -3 ? 'berge' : 'rampe']); nb++; } } }
       let defects = 0, benign = 0, multi = 0; const byKind = {}, examples = [];
       for (const [x, z, kind] of pts) {
         O.set(x, 60, z); rc.set(O, D); rc.far = 80;

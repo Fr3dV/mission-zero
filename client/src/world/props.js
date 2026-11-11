@@ -122,6 +122,13 @@ export function buildProps(ctx, net, masks, river, bld, Q, uniforms, streetInfo)
       }
     }
   }
+  // lampadaires des berges basses (positions fournies par river.js, au niveau de la promenade)
+  for (let i = 0; i + 2 < (river.bergeLamps || []).length; i += 3) {
+    const x = river.bergeLamps[i], y = river.bergeLamps[i + 1], z = river.bergeLamps[i + 2];
+    const k = tileKey(x, z); let a = lampTiles.get(k); if (!a) lampTiles.set(k, (a = []));
+    a.push(x, y, z, 0);
+    collision.addCircle({ x, z, r: 0.2, top: y + 5, tag: 'lamp', data: { type: 'lamp', tile: a, i: a.length / 4 - 1, x, z, y } });
+  }
   const lampGeo = lampGeometry(THREE);
   const glowTex = createGlowTexture(THREE);
   const poolGeo = new THREE.PlaneGeometry(22, 22); poolGeo.rotateX(-Math.PI / 2); poolGeo.translate(0, 0.07, 0);

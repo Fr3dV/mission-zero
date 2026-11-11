@@ -39,26 +39,54 @@ function leg(P, T, S, F, p, beta, Sh, lift, hipY, pelvisPitch, run) {
   P[T * 3] = th - pelvisPitch; P[S * 3] = -k; P[F * 3] = fp - (th - k);
 }
 
+/** Attitude propre au personnage (bras) : mains dans les poches, bras croisés, téléphone, mains dans le dos, main sur la hanche. */
+function attitude(P, g, w, walking, t) {
+  const a = g.att;
+  if (!a || a === 'relax' || w <= 0) return;
+  const mix = (b, x, y, z, k = w) => { P[b * 3] += (x - P[b * 3]) * k; P[b * 3 + 1] += (y - P[b * 3 + 1]) * k; P[b * 3 + 2] += (z - P[b * 3 + 2]) * k; };
+  if (a === 'pockets') {
+    mix(AL, -0.2, -0.35, -0.08); mix(AR, -0.2, 0.35, 0.08); mix(FL, 0.66, 0, 0.1); mix(FR, 0.66, 0, -0.1); mix(HL, -0.25, 0, 0); mix(HR, -0.25, 0, 0);
+    P[CH * 3] -= 0.03 * w; P[NK * 3] += 0.03 * w;
+  } else if (a === 'phone') {
+    const sc = Math.sin(t * 0.7 + g.phase) * 0.03;
+    mix(AR, 0.5, 0.55, 0.02); mix(FR, 1.95 + sc, 0, 0); mix(HR, -0.2, 0, 0);
+    P[NK * 3] += (-0.28 - P[NK * 3]) * w * 0.9; P[HD * 3] += (-0.22 - P[HD * 3]) * w * 0.9; P[HD * 3 + 1] *= 1 - 0.8 * w; P[NK * 3 + 1] *= 1 - 0.8 * w; P[CH * 3] -= 0.05 * w;
+  } else if (walking) return;
+  else if (a === 'crossed') {
+    mix(AL, 0.28, -1.15, 0.04); mix(AR, 0.36, 1.15, -0.04); mix(FL, 1.62, 0, 0); mix(FR, 1.5, 0, 0); mix(HL, 0.1, 0, 0); mix(HR, 0.1, 0, 0);
+    P[CH * 3] -= 0.03 * w; P[SP * 3] += 0.04 * w;
+  } else if (a === 'behind') {
+    mix(AL, -0.42, -1.4, -0.06); mix(AR, -0.42, 1.4, 0.06); mix(FL, 1.05, 0, 0); mix(FR, 1.2, 0, 0);
+    P[CH * 3] += 0.04 * w; P[SP * 3] += 0.03 * w;
+  } else if (a === 'hip') {
+    const s = g.side < 0 ? AL : AR, f = g.side < 0 ? FL : FR, k = g.side < 0 ? -1 : 1;
+    mix(s, -0.18, 1.15 * k, 0.5 * k); mix(f, 1.55, 0, 0); mix(g.side < 0 ? HL : HR, -0.5, 0, 0);
+  }
+}
+
 export const POSES = {
   idle(P, t, g) {
     const ph = g.phase, br = Math.sin(t * 1.55 + ph), w = Math.sin(t * 0.33 + ph * 2), w2 = Math.sin(t * 0.21 + ph);
-    const sh = (w + 0.4 * w2) * 0.7; // transfert de poids d'une jambe sur l'autre
+    // hanché : le poids repose surtout sur une jambe, avec de lents transferts
+    const sh = Math.max(-1, Math.min(1, (g.side || 1) * (0.62 + 0.22 * w2) + 0.3 * w * Math.max(0, Math.sin(t * 0.07 + ph))));
     const lookY = (Math.sin(t * 0.27 + ph * 3) + 0.6 * Math.sin(t * 0.61 + ph)) * 0.2 * g.look, lookX = Math.sin(t * 0.19 + ph * 5) * 0.05;
-    set(P, H, -g.stoop * 0.3, 0.04 * sh, 0.045 * sh);
-    set(P, SP, 0.012 * br - g.stoop * 0.5, -0.02 * sh, -0.028 * sh);
-    set(P, CH, -0.025 + 0.028 * br - g.stoop * 0.6, lookY * 0.15, -0.014 * sh);
-    set(P, NK, 0.04 + g.stoop * 0.6 + lookX, lookY * 0.35, -0.003 * sh);
-    set(P, HD, -0.03 - 0.012 * br, lookY * 0.5, 0);
-    set(P, AL, 0.05 + 0.01 * br - 0.02 * sh, 0.1, -0.055 - 0.012 * br);
-    set(P, AR, 0.05 + 0.01 * br + 0.02 * sh, -0.1, 0.055 + 0.012 * br);
-    set(P, FL, 0.24 + 0.02 * br, 0, 0.03); set(P, FR, 0.24 + 0.02 * br, 0, -0.03);
-    set(P, HL, 0.1, 0, 0.06); set(P, HR, 0.1, 0, -0.06);
-    // jambe d'appui tendue, l'autre légèrement fléchie
-    const fl = pos(sh) * 0.14, frr = pos(-sh) * 0.14;
-    set(P, TL, 0.03 + fl, g.toeOut, -0.03 - 0.045 * sh); set(P, TR, 0.03 + frr, -g.toeOut, 0.03 - 0.045 * sh);
+    const fid = Math.sin(t * 0.9 + ph) * Math.sin(t * 0.37 + ph * 2) * 0.03; // micro-mouvements
+    set(P, H, -g.stoop * 0.3, 0.05 * sh, 0.055 * sh);
+    set(P, SP, 0.012 * br - g.stoop * 0.5, -0.025 * sh, -0.05 * sh);
+    set(P, CH, -0.025 + 0.028 * br - g.stoop * 0.6, lookY * 0.15 - 0.02 * sh, -0.03 * sh + fid * 0.3);
+    set(P, NK, 0.04 + g.stoop * 0.6 + lookX, lookY * 0.35, 0.012 * sh);
+    set(P, HD, -0.03 - 0.012 * br, lookY * 0.5, 0.025 * sh * g.look - fid * 0.4);
+    // bras relâchés le long du corps : coudes un peu fléchis, avant-bras vers les cuisses
+    set(P, AL, 0.05 + 0.01 * br - 0.03 * sh + fid, -0.22, 0.015 - 0.01 * br); set(P, AR, 0.05 + 0.01 * br + 0.03 * sh - fid, 0.22, -0.015 + 0.01 * br);
+    set(P, FL, 0.3 + 0.02 * br + 0.06 * Math.max(0, -sh), 0, 0.07); set(P, FR, 0.3 + 0.02 * br + 0.06 * Math.max(0, sh), 0, -0.07);
+    set(P, HL, 0.14, 0, 0.05); set(P, HR, 0.14, 0, -0.05);
+    attitude(P, g, 1, false, t);
+    // jambe d'appui tendue, l'autre fléchie et un peu ouverte
+    const fl = pos(sh) * 0.17, frr = pos(-sh) * 0.17;
+    set(P, TL, 0.03 + fl, g.toeOut + 0.12 * pos(sh), -0.03 - 0.055 * sh); set(P, TR, 0.03 + frr, -g.toeOut - 0.12 * pos(-sh), 0.03 - 0.055 * sh);
     set(P, SL, -0.05 - fl * 2); set(P, SR, -0.05 - frr * 2);
     set(P, FTL, 0.02 + fl, 0, 0); set(P, FTR, 0.02 + frr, 0, 0);
-    P[DX] = -0.022 * sh; P[DY] = -0.003 + 0.002 * br - 0.004 * Math.abs(sh); P[DZ] = 0;
+    P[DX] = -0.026 * sh; P[DY] = -0.003 + 0.002 * br - 0.006 * Math.abs(sh); P[DZ] = 0;
   },
 
   walk(P, t, g, phi, v) {
@@ -76,13 +104,15 @@ export const POSES = {
     set(P, NK, 0.03 + g.stoop * 0.6, -0.03 * k * c, 0);
     set(P, HD, 0.015, -0.025 * k * c, 0.004 * lat);
     const a = 0.34 * g.arm * k, sw = Math.cos(TAU * pL - 0.25);
-    set(P, AL, -a * sw + 0.03, 0.08, -0.06); set(P, AR, a * sw + 0.03, -0.08, 0.06);
-    set(P, FL, 0.2 + 0.26 * g.arm * pos(-sw) + 0.05 * v, 0, 0.04); set(P, FR, 0.2 + 0.26 * g.arm * pos(sw) + 0.05 * v, 0, -0.04);
+    const sw2 = Math.cos(TAU * pL - 0.25 - 0.55); // l'avant-bras suit avec un temps de retard
+    set(P, AL, -a * sw + 0.03, -0.18, -0.012); set(P, AR, a * sw + 0.03, 0.18, 0.012);
+    set(P, FL, 0.22 + 0.3 * g.arm * pos(-sw2) + 0.06 * v, 0, 0.06); set(P, FR, 0.22 + 0.3 * g.arm * pos(sw2) + 0.06 * v, 0, -0.06);
     set(P, HL, 0.12, 0, 0.05); set(P, HR, 0.12, 0, -0.05);
     set(P, TL, 0, g.toeOut, -0.015 + 0.03 * g.sway * lat); set(P, TR, 0, -g.toeOut, 0.015 + 0.03 * g.sway * lat);
     set(P, SL, 0); set(P, SR, 0); set(P, FTL, 0); set(P, FTR, 0);
-    leg(P, TL, SL, FTL, pL, beta, Sh, 0.05, hipY, pitch, false);
-    leg(P, TR, SR, FTR, pR, beta, Sh, 0.05, hipY, pitch, false);
+    leg(P, TL, SL, FTL, pL, beta, Sh, 0.085, hipY, pitch, false);
+    leg(P, TR, SR, FTR, pR, beta, Sh, 0.085, hipY, pitch, false);
+    attitude(P, g, 0.85, true, t);
     P[DX] = -0.02 * g.sway * lat; P[DY] = hipY - HIP_Y; P[DZ] = 0;
   },
 
@@ -124,6 +154,28 @@ export const POSES = {
     set(P, SL, -1.0); set(P, SR, -0.82);
     set(P, FTL, 0.2); set(P, FTR, 0.05);
     P[DX] = 0; P[DY] = SIT_ROOT_Y - 0.94; P[DZ] = 0;
+  },
+
+  /** Assis sur une chaise (origine du groupe au sol, assise à ~0,45 m) : buste droit ou penché, une main sur la table, l'autre tient une tasse. */
+  sit_chair(P, t, g) {
+    const br = Math.sin(t * 1.5 + g.phase), fwd = g.hurry > 0.55 ? -0.2 : 0.06, crossed = g.look > 1.05, k = g.side || 1;
+    const sip = sm(Math.sin(t * 0.55 + g.phase * 4) * 5 - 3.6); // de temps en temps, la tasse monte aux lèvres
+    set(P, H, fwd * 0.6, 0, 0); set(P, SP, fwd * 0.4 - 0.03, 0, 0); set(P, CH, -0.03 + 0.016 * br, 0.05 * Math.sin(t * 0.23 + g.phase), 0);
+    set(P, NK, 0.03 - fwd * 0.5 + 0.1 * sip, 0.22 * Math.sin(t * 0.31 + g.phase * 2) * g.look, 0); set(P, HD, -0.02, 0.2 * Math.sin(t * 0.31 + g.phase * 2) * g.look, 0);
+    const A1 = k > 0 ? AL : AR, F1 = k > 0 ? FL : FR, H1 = k > 0 ? HL : HR, A2 = k > 0 ? AR : AL, F2 = k > 0 ? FR : FL, H2 = k > 0 ? HR : HL;
+    set(P, A1, 0.62 - fwd, 0, -0.12 * k); set(P, F1, 0.95, 0, 0.35 * k); set(P, H1, 0.05);           // main posée sur la table
+    set(P, A2, 0.55 - fwd + 0.35 * sip, 0, 0.1 * k); set(P, F2, 1.0 + 1.05 * sip, 0, -0.25 * k); set(P, H2, -0.2); // main à la tasse
+    const hx = fwd * 0.6;
+    if (crossed) { // jambes croisées
+      const T1 = k > 0 ? TR : TL, S1 = k > 0 ? SR : SL, F1b = k > 0 ? FTR : FTL, T2 = k > 0 ? TL : TR, S2 = k > 0 ? SL : SR;
+      set(P, T2, 1.5 - hx, 0, 0.03 * k); set(P, S2, -1.5);
+      set(P, T1, 1.72 - hx, 0, -0.24 * k); set(P, S1, -1.25); set(P, F1b, -0.35 + 0.08 * Math.sin(t * 1.9 + g.phase));
+    } else {
+      set(P, TL, 1.5 - hx, 0.05, -0.1); set(P, TR, 1.5 - hx, -0.05, 0.1);
+      set(P, SL, -1.5 - 0.25 * (g.hurry < 0.3 ? 1 : 0)); set(P, SR, -1.42);
+      set(P, FTL, 0.02 + 0.25 * (g.hurry < 0.3 ? 1 : 0)); set(P, FTR, -0.06);
+    }
+    P[DX] = 0; P[DY] = 0.52 - 0.94; P[DZ] = 0;
   },
 
   jump(P) {
