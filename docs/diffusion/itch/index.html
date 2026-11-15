@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Mission Zéro</title>
+<style>
+  /* Le jeu occupe tout le cadre fourni par itch.io (1280x720 conseillé). */
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #0b0e14; }
+  #jeu { position: fixed; inset: 0; width: 100%; height: 100%; border: 0; display: block; }
+  /* Écran d'accueil d'une ligne : visible tant que le serveur n'a pas répondu (démarrage à froid). */
+  #accueil { position: fixed; inset: 0; display: flex; align-items: center; justify-content: center;
+    color: #e9c46a; font: 600 18px/1.4 system-ui, sans-serif; text-align: center; padding: 0 24px;
+    background: #0b0e14; transition: opacity .4s; }
+  #accueil.fini { opacity: 0; pointer-events: none; }
+  #accueil a { color: #fff; }
+</style>
+</head>
+<body>
+<iframe id="jeu" title="Mission Zéro"
+  src="https://mission-zero-386737191383.europe-west1.run.app/"
+  allow="fullscreen; autoplay; gamepad; clipboard-write" allowfullscreen></iframe>
+<div id="accueil">Mission Zéro démarre… le serveur se réveille, quelques secondes.</div>
+<script>
+  // Adresse du jeu (servi par son propre serveur, en Europe).
+  const jeu = document.getElementById('jeu');
+  const accueil = document.getElementById('accueil');
+  let charge = false;
+
+  // Le jeu a répondu : on retire l'écran d'accueil et on donne le focus au jeu (clavier direct).
+  jeu.addEventListener('load', () => {
+    charge = true;
+    accueil.classList.add('fini');
+    jeu.focus();
+  });
+
+  // Tout clic hors du jeu (écran d'accueil, bords) renvoie le focus vers l'iframe.
+  addEventListener('pointerdown', () => jeu.focus());
+  // Si la page itch reprend le focus (ex. retour d'onglet), on le rend au jeu.
+  addEventListener('focus', () => { if (charge) jeu.focus(); });
+
+  // Serveur injoignable après 30 s : on propose d'ouvrir le jeu dans un onglet.
+  setTimeout(() => {
+    if (charge) return;
+    accueil.innerHTML = 'Le serveur met du temps à répondre. <a href="' + jeu.src +
+      '" target="_blank" rel="noopener">Ouvrir Mission Zéro dans un nouvel onglet</a>';
+  }, 30000);
+</script>
+</body>
+</html>

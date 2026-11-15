@@ -302,7 +302,7 @@ export function createHudFun(ctx, env) {
   // =====================================================================
   // Première voiture : un bandeau doré, une seule fois par compte, quand le solde atteint le prix de l'occasion la moins chère
   // =====================================================================
-  const USED = VEHICLES.filter((v) => v.brand === 'G7' && v.price > 0).sort((a, b) => a.price - b.price)[0] || null;
+  const USED = VEHICLES.filter((v) => v.brand === 'Lutèce Taxis' && v.price > 0).sort((a, b) => a.price - b.price)[0] || null;
   let firstCarDone = false;
   function firstCar() {
     if (firstCarDone || !USED) return;

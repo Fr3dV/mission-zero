@@ -52,7 +52,7 @@ export const LANDMARKS = [
   // ---- ajouts ----
   L('tls_chateaudeau', "Château d'eau (galerie photo)", 43.59870, 1.43693, 54, 12),
   L('tls_tourcontrole', 'Tour de contrôle de Blagnac', 43.63512, 1.36783, 219, 14),
-  L('tls_airbus', 'Tarmac Airbus', 43.62220, 1.36150, 233, 30),                    // A380, A350, BelugaXL et A320 au sol
+  L('tls_airbus', 'Tarmac des avionneurs', 43.62220, 1.36150, 233, 30),                    // A380, A350, BelugaXL et A320 au sol
   L('tls_dalbade', 'Notre-Dame de la Dalbade', 43.59765, 1.44256, 264, 36),
   L('tls_taur', 'Notre-Dame du Taur', 43.60558, 1.44273, 262, 30),                 // le clocher-mur donne sur la rue du Taur
   L('tls_augustins', 'Musée des Augustins', 43.601079, 1.446475, 264, 62),

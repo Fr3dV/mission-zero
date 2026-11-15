@@ -51,7 +51,7 @@ const MAX_SPEED = Math.max(...VEHICLES.map((v) => v.maxSpeed));
 const isNum = (v) => typeof v === 'number' && Number.isFinite(v);
 const inBounds = (b, p) => p.x >= b.minX && p.x <= b.maxX && p.z >= b.minZ && p.z <= b.maxZ;
 const holdsOf = (m) => m.steps.reduce((t, s) => t + (s.holdSec || 0), 0);
-/** Voiture de référence pour juger un chrono : la voiture fournie, sinon la citadine (niveaux 1-2) ou une première Tesla. */
+/** Voiture de référence pour juger un chrono : la voiture fournie, sinon la citadine (niveaux 1-2) ou une première Fulgur. */
 const refCar = (m) => (m.vehicle?.provided ? VEHICLE_BY_ID[m.vehicle.typeId] : m.level <= 2 ? VEHICLE_BY_ID.citadine : VEHICLE_BY_ID.tesla_model3);
 
 test('registre : chaque ville a ses missions, ses biens, ses lieux et ses attendus de test', () => {
@@ -282,10 +282,10 @@ for (const city of CITY_IDS) {
     assert.ok(byLevel(1).length >= BASE_LEVELS[1].missionsDone);
     const rewards = MISSIONS.map((m) => m.reward);
     assert.ok(Math.min(...rewards) <= 1000 && Math.max(...rewards) === Math.max(...byLevel(BASE_LEVELS.length).map((m) => m.reward)));
-    // la première Tesla demande un vrai effort (> 8 missions de début) mais reste atteignable
+    // la première Fulgur demande un vrai effort (> 8 missions de début) mais reste atteignable
     const early = byLevel(1).concat(byLevel(2), byLevel(3));
     const n = (VEHICLE_BY_ID.tesla_model3.price - STARTING_MONEY) / (early.reduce((t, m) => t + m.reward, 0) / early.length);
-    assert.ok(n >= 8 && n <= 25, `Tesla en ${n.toFixed(1)} missions de début`);
+    assert.ok(n >= 8 && n <= 25, `Fulgur en ${n.toFixed(1)} missions de début`);
     // les 7 types sont représentés
     for (const t of Object.keys(MISSION_TYPES)) assert.ok(MISSIONS.some((m) => m.type === t), `aucun ${t}`);
     // les cooldowns suivent la grille : plus on gagne, plus on attend
@@ -334,14 +334,14 @@ for (const city of CITY_IDS) {
     assert.ok(Math.hypot(places.SPAWN.x, places.SPAWN.z) < 400, 'le point de départ est sur la place centrale (origine de la ville)');
     if (places.SPAWN.lookAt) assert.ok(landmarks[places.SPAWN.lookAt], `SPAWN.lookAt : monument ${places.SPAWN.lookAt} inconnu`);
     assert.equal(places.DEALERS.length, 3);
-    assert.deepEqual(places.DEALERS.map((d) => d.brand).sort(), ['Lamborghini', 'Porsche', 'Tesla']);
+    assert.deepEqual(places.DEALERS.map((d) => d.brand).sort(), ['Falkner', 'Fulgur', 'Muggini']);
     for (const d of places.DEALERS) {
       assert.ok(idOk(d.id) && d.name && inBounds(BOUNDS, d), `concession ${d.id}`);
       assert.ok(d.show.length >= 2 && d.show.every((t) => VEHICLE_BY_ID[t]?.brand === d.brand), `concession ${d.id}: modèles exposés`);
     }
     // toutes les voitures payantes du catalogue (hors taxi générique) sont vendues quelque part
     const sold = new Set(places.DEALERS.map((d) => d.brand));
-    for (const v of VEHICLES) if (['Tesla', 'Porsche', 'Lamborghini'].includes(v.brand)) assert.ok(sold.has(v.brand));
+    for (const v of VEHICLES) if (['Fulgur', 'Falkner', 'Muggini'].includes(v.brand)) assert.ok(sold.has(v.brand));
     assert.ok(places.PUBLIC_GARAGES.length >= 5);
     for (const k of places.PUBLIC_GARAGES) assert.ok(idOk(k.id) && k.name && inBounds(BOUNDS, k), `parking ${k.id}`);
     assert.ok(places.COLLECTIBLES.length >= 12);

@@ -119,7 +119,7 @@ const RAW = [
   {
     id: 'voiturier_ritz', level: 2, type: 'convoy', reward: 4000, cooldownSec: 300, requireVehicle: true,
     title: 'Voiturier du palace',
-    description: "Le voiturier du palace de la place Vendôme est débordé. Garez le Cayenne d'un client au parking du Carrousel… sans une rayure.",
+    description: "Le voiturier du palace de la place Vendôme est débordé. Garez le Piment d'un client au parking du Carrousel… sans une rayure.",
     giver: { name: 'Firmin', role: 'Chef voiturier' },
     vehicle: { typeId: 'porsche_cayenne', provided: true }, maxDamage: 30,
     start: PLACE.vendome,
@@ -196,9 +196,9 @@ const RAW = [
   // ============ Niveau 4 — Pilote ============
   {
     id: 'convoi_tesla', level: 4, type: 'convoy', reward: 12000, cooldownSec: 600, requireVehicle: true,
-    title: 'Livraison de Model S',
-    description: "Le showroom Tesla de la Madeleine doit livrer une Model S Plaid à un professeur du Panthéon. Pas une égratignure, s'il vous plaît.",
-    giver: { name: 'Elodie Watt', role: 'Conseillère Tesla' },
+    title: 'Livraison de Foudre',
+    description: "Le showroom Fulgur de la Madeleine doit livrer une Foudre à un professeur du Panthéon. Pas une égratignure, s'il vous plaît.",
+    giver: { name: 'Elodie Watt', role: 'Conseillère Fulgur' },
     vehicle: { typeId: 'tesla_models', provided: true }, maxDamage: 25,
     start: PLACE.teslaMadeleine,
     steps: [S(PLACE.pantheonSoufflot, 'Rue Soufflot — Panthéon', { kind: 'stop', holdSec: 2, radius: 14 })],
@@ -263,9 +263,9 @@ const RAW = [
   // ============ Niveau 5 — As du volant ============
   {
     id: 'convoi_porsche', level: 5, type: 'convoy', reward: 25000, cooldownSec: 900, requireVehicle: true,
-    title: 'La 911 du peintre',
-    description: "Un peintre de Montmartre s'offre une 911 Turbo S. Montez-la des Champs-Élysées jusqu'à la place du Tertre, intacte et dans les temps.",
-    giver: { name: 'Ferdinand', role: 'Vendeur Porsche' },
+    title: 'La Crécelle du peintre',
+    description: "Un peintre de Montmartre s'offre une Crécelle GT. Montez-la des Champs-Élysées jusqu'à la place du Tertre, intacte et dans les temps.",
+    giver: { name: 'Ferdinand', role: 'Vendeur Falkner' },
     vehicle: { typeId: 'porsche_911', provided: true }, maxDamage: 18,
     start: PLACE.porscheChamps, pace: 12,
     steps: [S(PLACE.tertre, 'Place du Tertre', { kind: 'stop', holdSec: 2, radius: 14 })],
@@ -329,7 +329,7 @@ const RAW = [
   {
     id: 'convoi_aventador', level: 6, type: 'convoy', reward: 45000, cooldownSec: 1500, requireVehicle: true,
     title: 'Silence, on tourne !',
-    description: "Un tournage sur le parvis de Notre-Dame réclame une Aventador orange. Traversez tout Paris depuis la Grande-Armée… et rendez-la comme neuve.",
+    description: "Un tournage sur le parvis de Notre-Dame réclame une Furiosa orange. Traversez tout Paris depuis la Grande-Armée… et rendez-la comme neuve.",
     giver: { name: 'Luc Clap', role: 'Réalisateur' },
     vehicle: { typeId: 'lambo_aventador', provided: true }, maxDamage: 12,
     start: PLACE.lamboGrandeArmee, pace: 14,

@@ -8,6 +8,21 @@ import { baseHeightAt } from '@shared/terrain.js';
 
 const VIEW = 125;
 
+// Noms d'enseignes FICTIFS peints sur les stores : on n'affiche jamais le nom réel tiré d'OpenStreetMap
+// (chaînes de restauration et commerces réels = marques déposées). Choix stable, dérivé de la position.
+const NOMS_CAFE = [
+  'Café du Commerce', 'Le Zinc', 'Le Balto', 'Café de la Place', 'Le Petit Comptoir', 'Chez Gégé', 'Le Rendez-vous',
+  'Bar des Amis', "Le Bistrot d'en face", 'Café des Sports', 'La Chope', 'Le Croissant Zéro', 'Le Tabac du Coin',
+  'Café de la Gare', 'Le Bon Accueil', "L'Escale", 'Le Narval', "Café de l'Horloge", 'La Tartine', 'Le Saint-Zéphyr',
+];
+const NOMS_RESTO = [
+  'La Bonne Fourchette', 'Chez Mamie Zéro', 'Le Gratin Dauphin', "L'Assiette Gourmande", 'Le Petit Bouchon',
+  'Pizzeria Bella Zéro', 'La Crêperie du Pont', 'Brasserie du Boulevard', 'Le Pot-au-Feu', "Les Ripailles d'Odile",
+  'Le Coq Hardi', 'La Cocotte Pressée', 'Sushi Samouraï', 'Le Wok Pressé', 'Tacos Tornade', 'Le Burger Zéro',
+  'La Table de Lulu', 'Au Petit Marmiton', 'Chez Fernand', 'Le Fromager Fou',
+];
+const nomFictif = (kind, h) => { const L = kind === 'cafe' ? NOMS_CAFE : NOMS_RESTO; return L[Math.floor(h * L.length) % L.length]; };
+
 function tableGeo(THREE) {
   const g = new Geo();
   g.cyl(0, 0, 0, 0.03, 0.2, 0.2, 10, [0.05, 0.055, 0.05], 0, true);       // pied en fonte
@@ -96,7 +111,7 @@ export function buildTerraces(ctx, net, bld, river, masks, Q, uniforms) {
     const key = gk(fx, fz); let near = false;
     for (let ix = -1; ix <= 1 && !near; ix++) for (let iz = -1; iz <= 1; iz++) { const a = used.get(gk(fx + ix * 13, fz + iz * 13)); if (a) for (const q of a) if ((q.fx - fx) ** 2 + (q.fz - fz) ** 2 < (q.width / 2 + width / 2 + 1.5) ** 2) { near = true; break; } }
     if (!ok || near) continue;
-    const t = { name: (p.name || (p.kind === 'cafe' ? 'Café' : 'Restaurant')).slice(0, 26), kind: p.kind, fx, fz, nx, nz, dx, dz, width, rows, depth, y: heightAt(fx, fz) + (r._ped ? 0.01 : 0.11), style: Math.floor(h2 * AWN.length), id: terr.length, yaw: Math.atan2(-nx, -nz) /* face avant du mobilier vers la chaussée (-n) */ };
+    const t = { name: nomFictif(p.kind, h).slice(0, 26), kind: p.kind, fx, fz, nx, nz, dx, dz, width, rows, depth, y: heightAt(fx, fz) + (r._ped ? 0.01 : 0.11), style: Math.floor(h2 * AWN.length), id: terr.length, yaw: Math.atan2(-nx, -nz) /* face avant du mobilier vers la chaussée (-n) */ };
     t.yaw = Math.atan2(nx, nz);
     terr.push(t); let a = used.get(key); if (!a) used.set(key, (a = [])); a.push(t);
   }

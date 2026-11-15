@@ -89,9 +89,9 @@ export const SPAWN = { x: 30, z: 60, lookAt: 'concorde', label: 'Place de la Con
 
 /** Concessions : trois adresses réelles. `show` = modèles exposés sur les podiums ; `street` = rue à privilégier. */
 export const DEALERS = [
-  { id: 'tesla', brand: 'Tesla', name: 'Tesla Madeleine', color: '#e63946', ...G(48.8712, 2.3222), street: 'Malesherbes', show: ['tesla_model3', 'tesla_models', 'tesla_cybertruck'] },
-  { id: 'porsche', brand: 'Porsche', name: 'Porsche Champs-Élysées', color: '#f4d35e', ...G(48.8708, 2.3050), street: 'Champs-Élysées', show: ['porsche_911', 'porsche_taycan', 'porsche_cayenne'] },
-  { id: 'lamborghini', brand: 'Lamborghini', name: 'Lamborghini Grande-Armée', color: '#9bff3c', ...G(48.8758, 2.2880), street: 'Grande Armée', show: ['lambo_huracan', 'lambo_aventador', 'lambo_urus'] },
+  { id: 'tesla', brand: 'Fulgur', name: 'Fulgur Madeleine', color: '#e63946', ...G(48.8712, 2.3222), street: 'Malesherbes', show: ['tesla_model3', 'tesla_models', 'tesla_cybertruck'] },
+  { id: 'porsche', brand: 'Falkner', name: 'Falkner Champs-Élysées', color: '#f4d35e', ...G(48.8708, 2.3050), street: 'Champs-Élysées', show: ['porsche_911', 'porsche_taycan', 'porsche_cayenne'] },
+  { id: 'lamborghini', brand: 'Muggini', name: 'Muggini Grande-Armée', color: '#9bff3c', ...G(48.8758, 2.2880), street: 'Grande Armée', show: ['lambo_huracan', 'lambo_aventador', 'lambo_urus'] },
 ];
 
 /** Parkings publics : permettent de sortir une voiture possédée sans être propriétaire d'un bien. */

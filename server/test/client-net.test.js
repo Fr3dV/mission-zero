@@ -7,7 +7,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { register } from 'node:module';
 import WS from 'ws';
-import { boot, join, seedPlayer, place, drive } from '../testkit.js';
+import { boot, join, seedPlayer, place, drive, quit } from '../testkit.js';
 import { MemoryStore } from '../store/memory.js';
 import * as jobs from '../../shared/jobs.js';
 import { CITY_ID } from '../../shared/cities.js';
@@ -73,7 +73,7 @@ async function done(app, ...clients) {
   await app.close();
 }
 /** Un client du jeu réduit à son module réseau : bus et store du contrat, joueur immobile au volant en (x, z). */
-function game(app, { name, token = null, x = O.x, z = O.z }) {
+function game(app, { name, token = null, x = O.x, z = O.z, room = 'essai-net' }) {
   disk.clear(); socks.length = 0; hellos.length = 0; halted = false;
   if (token) disk.set('mz.accounts.v1', JSON.stringify({ [`${location.host}|${name.toLowerCase()}`]: token }));
   const handlers = new Map(), events = [];
@@ -105,7 +105,7 @@ function game(app, { name, token = null, x = O.x, z = O.z }) {
     stop() { clearInterval(pump); halted = true; for (const s of [...socks].reverse()) refuse(s); },
   };
   games.push(g);
-  bus.emit('intent:login', { name, room: 'essai-net' });
+  bus.emit('intent:login', { name, room });
   return g;
 }
 const online = (g) => until('accueil', () => g.net.status === 'online' && g.store.me.id);
@@ -416,5 +416,61 @@ test('client net : ARRÊT puis relance du serveur pendant un Chiche à mise, une
     evs = await bob.back(mark);
     assert.deepEqual(evs.filter((e) => e[0] === 'mission:result').map((e) => e[1]), [{ id: M1.id, ok: false, reward: 0, reason: 'Mission interrompue par une coupure.', code: 'lost' }]);
     assert.equal(bob.net.status, 'online');
+  } finally { await done(app, lea); }
+});
+
+test('client net : serveur complet à la première connexion => un seul message clair, puis partie en solo (net.refusal = server_full)', async () => {
+  const app = await boot({ at: T0, maxConnections: 0 });
+  try {
+    const g = game(app, { name: 'Tard' });
+    await until('hors-ligne', () => g.net.offline && g.store.me.id);
+    const toasts = g.of('toast').map((t) => t.text);
+    assert.deepEqual(toasts.filter((t) => /Serveur complet/.test(t)).length, 1, JSON.stringify(toasts));
+    assert.ok(!toasts.some((t) => /injoignable|refusée/.test(t)), JSON.stringify(toasts));
+    assert.equal(g.net.refusal, 'server_full');
+  } finally { await done(app); }
+});
+
+test('client net : salle publique pleine => accueil en « <ville>-2 », annoncé une fois, et la reconnexion redemande cette instance', async () => {
+  const app = await boot({ at: T0, helloBurst: 0 });
+  const crowd = [];
+  try {
+    for (let i = 0; i < 32; i++) crowd.push(await join(app, { name: 'J' + i, room: CITY_ID, city: CITY_ID }));
+    const g = game(app, { name: 'Bob', room: CITY_ID });
+    await online(g);
+    assert.equal(g.store.room, `${CITY_ID}-2`);
+    assert.equal(g.of('toast').filter((t) => /pleine : vous jouez dans/.test(t.text)).length, 1);
+    const friend = await join(app, { name: 'Ami', room: CITY_ID, city: CITY_ID });
+    assert.equal(friend.welcome.room, `${CITY_ID}-2`);
+    crowd.push(friend);
+    await quit(app, crowd.shift()); // une place se libère dans la première salle : Bob reste avec les siens
+    const mark = await g.cut();
+    await g.back(mark);
+    assert.equal(hellos[hellos.length - 1].room, `${CITY_ID}-2`, JSON.stringify(hellos.map((h) => h.room)));
+    assert.equal(g.store.room, `${CITY_ID}-2`);
+  } finally { await done(app, ...crowd); }
+});
+
+test('client net : /mute masque le chat d’un joueur sur cet appareil (mémorisé), /unmute le rétablit', async () => {
+  const app = await boot({ at: T0 });
+  let lea = null;
+  try {
+    const g = game(app, { name: 'Bob' });
+    await online(g);
+    lea = await join(app, { name: 'Léa', room: 'essai-net', city: CITY_ID });
+    const heard = () => g.of('chat:message').filter((m) => !m.system).map((m) => m.text);
+    lea.send('chat', { text: 'coucou' });
+    await until('premier message', () => heard().includes('coucou'));
+    g.bus.emit('intent:chat', { text: '/mute léa' });
+    assert.ok(g.net.isMuted(lea.welcome.id));
+    assert.match(g.of('chat:message').filter((m) => m.system).pop().text, /masqué/);
+    assert.equal(JSON.parse(localStorage.getItem('mz.muted.v1'))[lea.welcome.id], 'Léa');
+    lea.send('chat', { text: 'tu m’entends ?' });
+    await lea.sync(); await sleep(80);
+    assert.ok(!heard().includes('tu m’entends ?'), 'masqué');
+    g.bus.emit('intent:chat', { text: '/unmute Léa' });
+    lea.send('chat', { text: 'et là ?' });
+    await until('message rétabli', () => heard().includes('et là ?'));
+    assert.equal(hellos.length, 1);
   } finally { await done(app, lea); }
 });

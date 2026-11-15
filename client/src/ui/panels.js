@@ -11,7 +11,7 @@ import * as MIS from '@shared/missions.js';
 const SELL_RATIO = PROPS.SELL_BACK_RATIO ?? 0.7;
 const PAINTS = CAT.PAINTS || [], HORNS = CAT.HORNS || [];
 const starsFor = MIS.starsFor || ((n) => Math.max(0, Math.floor((n - 40) / 20)));
-const USED_BRAND = 'G7';       // le coin des occasions (Garage ▸ Occasions) : la première voiture à soi
+const USED_BRAND = 'Lutèce Taxis';       // le coin des occasions (Garage ▸ Occasions) : la première voiture à soi
 const STOCK_PAINT_PRICE = 500; // repeindre dans une teinte du catalogue du modèle (les teintes du nuancier portent leur prix)
 const AWAY_NIGHT_H = 12, AWAY_RATIO = 0.5; // relevé du matin : 50 % du loyer, 12 h au plus par absence (règle serveur)
 const DARE_STAKES = [0, 500, 2000], DARE_JOIN_M = 80;

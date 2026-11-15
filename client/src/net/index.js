@@ -13,6 +13,12 @@
 // et lvl / st / look sur chaque entrée de store.players. Aucun message nouveau n'est envoyé à un serveur qui
 // n'annonce pas la capacité correspondante dans welcome.feat (un serveur plus ancien compterait chaque type inconnu
 // comme un message invalide).
+// Salles publiques : le serveur répartit « <ville> » -> « <ville>-2 », « <ville>-3 »… quand elle est pleine ; l'instance
+// reçue (store.room) est redemandée à chaque reconnexion et annoncée une fois. Refus 'server_full' / 'room_full' à la
+// connexion : un seul message clair, partie en solo, net.refusal renseigné pour l'UI.
+// Chat : masquage LOCAL d'un joueur — net.mute(id, on), net.isMuted(id), net.mutedList(), intention intent:mute
+// { id, muted }, commandes « /mute pseudo », « /unmute pseudo », « /muets » ; événement chat:mute { id, name, muted }.
+// Mémorisé dans localStorage (mz.muted.v1). Le filtre d'injures et les débits sont côté serveur (server/chat-filter.js).
 import { C, S, CLOSE, PROTOCOL_VERSION, WS_PATH, CLIENT_SEND_HZ, DEFAULT_ROOM, encodeState, normColor } from '@shared/protocol.js';
 import { sanitizeName, sanitizeRoom, createBucket } from '@shared/economy.js';
 import { CITY_ID, CITIES, DEFAULT_CITY } from '@shared/cities.js';
@@ -31,6 +37,14 @@ const UNAVAILABLE = 'Indisponible sur ce serveur.';
 const NO_LINK = 'Pas de connexion au serveur : réessayez dans un instant.';
 const NO_START = 'Pas de connexion au serveur : mission non démarrée.';
 const MISSION_CUT = 'Mission interrompue par une coupure.';
+
+const MUTED_KEY = 'mz.muted.v1'; // { "<id du joueur>": pseudo } — joueurs dont le chat est masqué sur CET appareil
+const FULL_TEXT = 'Serveur complet pour le moment : vous jouez en solo (hors-ligne). Réessayez dans quelques minutes.';
+// Salle publique (sans code) : « <ville> » puis « <ville>-2 », « <ville>-3 »… attribuées par le serveur quand elle est pleine
+const instanceOf = (code) => { const m = /^(.+)-([2-9]|[1-9][0-9])$/.exec(String(code || '')); return m && m[1] === CITY_ID ? +m[2] : String(code || '') === CITY_ID ? 1 : 0; };
+
+function readMuted() { try { const m = JSON.parse(localStorage.getItem(MUTED_KEY)); return m && typeof m === 'object' && !Array.isArray(m) ? m : {}; } catch { return {}; } }
+function writeMuted(m) { try { localStorage.setItem(MUTED_KEY, JSON.stringify(m)); } catch { /* stockage indisponible : masqué pour cette session seulement */ } }
 
 function readAccounts() { try { return JSON.parse(localStorage.getItem(ACCOUNTS_KEY)) || {}; } catch { return {}; } }
 function writeAccounts(a) { try { localStorage.setItem(ACCOUNTS_KEY, JSON.stringify(a)); } catch { /* stockage indisponible */ } }
@@ -63,6 +77,8 @@ export function createNet(ctx) {
   let session = false; // hello accepté sur la connexion courante
   let misses = 0; // première connexion : essais restés sans réponse du serveur (les refus 'rate' ne comptent pas)
   let rateTold = false; // le refus 'rate' du hello a déjà été dit au joueur (une fois par attente, pas à chaque essai)
+  let refusal = null; // dernier refus fatal du hello { code, text } ('server_full', 'room_full'…), lu à la fermeture
+  const muted = readMuted(); // id -> pseudo : chat de ces joueurs ignoré localement (le serveur n'en sait rien)
   let chased = false; // un avis de recherche est ouvert côté serveur : 'wanted' parti, ni contrôle ni fuite depuis
   let sendAcc = 0, lastSent = '', lastSentAt = 0, lastPingAt = 0, lastWarnAt = 0;
   const emoteBucket = createBucket(4, 1); // même débit que le seau du serveur : inutile d'envoyer ce qu'il ignorerait
@@ -74,7 +90,44 @@ export function createNet(ctx) {
     send: (type, payload) => transmit(type, payload),
     /** Le serveur courant annonce-t-il cette capacité ('fun1', 'taxi', 'dare', 'heat', 'paint', 'offline') ? */
     has: (cap) => has(cap),
+    /** Masque (on = true) ou rétablit le chat d'un joueur, sur cet appareil seulement. Retourne l'état final. */
+    mute: (id, on = true) => setMuted(id, on),
+    isMuted: (id) => safeId(id) && Object.hasOwn(muted, id),
+    /** Joueurs masqués : [{ id, name }]. */
+    mutedList: () => Object.entries(muted).map(([id, name]) => ({ id, name })),
+    /** Refus du serveur à la connexion ('server_full', 'room_full'), null sinon : l'UI peut l'afficher dans l'écran de connexion. */
+    refusal: null,
   };
+
+  function setMuted(id, on) {
+    if (!safeId(id) || id === net.id) return false;
+    if (on) muted[id] = players.get(id)?.name || muted[id] || '?';
+    else delete muted[id];
+    writeMuted(muted);
+    bus.emit('chat:mute', { id, name: muted[id] || players.get(id)?.name || '', muted: !!on });
+    return !!on;
+  }
+  /** Commandes locales du chat : /mute <pseudo>, /unmute <pseudo>, /muets. true = commande traitée (rien n'est envoyé). */
+  function chatCommand(text) {
+    const m = /^\/(mute|ignore|unmute|unignore|muets|muted)\b\s*(.*)$/i.exec(text);
+    if (!m) return false;
+    const cmd = m[1].toLowerCase(), who = m[2].trim().toLowerCase();
+    const info = (t) => bus.emit('chat:message', { from: 'Système', text: t, system: true, id: null });
+    if (cmd === 'muets' || cmd === 'muted') {
+      const list = Object.values(muted);
+      info(list.length ? `Joueurs masqués : ${list.join(', ')}. « /unmute pseudo » pour rétablir.` : 'Aucun joueur masqué.');
+      return true;
+    }
+    const on = cmd === 'mute' || cmd === 'ignore';
+    let id = null;
+    for (const p of players.values()) if (String(p.name).toLowerCase() === who) id = p.id;
+    if (!id && !on) for (const [k, n] of Object.entries(muted)) if (String(n).toLowerCase() === who) id = k;
+    if (!who || !id) { info(on ? 'Usage : /mute pseudo (un joueur présent dans la salle).' : 'Usage : /unmute pseudo (voir /muets).'); return true; }
+    const name = players.get(id)?.name || muted[id];
+    setMuted(id, on);
+    info(on ? `Chat de ${name} masqué sur cet appareil.` : `Chat de ${name} rétabli.`);
+    return true;
+  }
 
   const toast = (text, kind = 'info') => bus.emit('toast', { text, kind });
   function setStatus(state) {
@@ -167,6 +220,13 @@ export function createNet(ctx) {
         return;
       }
       const reconnect = welcomed; // net:welcome n'est émis qu'une fois par login : net:return porte ce drapeau
+      // Répartiteur : la salle publique demandée était pleine, le serveur a ouvert (ou rempli) une instance suivante.
+      // Elle est retenue pour les reconnexions (le serveur y replace le joueur tant qu'il y a de la place).
+      if (!net.offline && login && typeof m.room === 'string' && m.room !== login.room && instanceOf(m.room) && instanceOf(login.room)) {
+        if (!reconnect && instanceOf(m.room) > 1) toast(`Salle « ${login.room} » pleine : vous jouez dans « ${m.room} ».`, 'info');
+        login.room = m.room;
+      }
+      if (!net.offline) { refusal = null; net.refusal = null; } // le repli local ne fait pas oublier le refus du serveur
       // état d'avant la coupure, lu avant que l'accueil ne le remplace (Chiche perdu de vue, solde, mission fantôme)
       const prevDare = store.dare, prevMoney = reconnect && isObj(store.me) ? num(store.me.money) : null;
       session = true; rateTold = false;
@@ -242,7 +302,10 @@ export function createNet(ctx) {
       // Hello refusé pour débit ('rate', fermeture 4003) : la connexion réessaie d'elle-même et serait refusée de
       // nouveau tant que le seau de l'adresse est vide — le joueur le lit une fois, pas à chaque essai.
       const rate = m.op === C.HELLO && m.code === 'rate';
-      if (!rate || !rateTold) toast(m.text || 'Opération refusée.', 'error');
+      // refus fatal du hello : dit à la fermeture qui suit (onDown), en un seul message avec la suite (solo, arrêt)
+      if (m.op === C.HELLO && m.fatal) { refusal = { code: m.code || null, text: m.text || '' }; net.refusal = refusal.code; }
+      const full = m.op === C.HELLO && (m.code === 'server_full' || m.code === 'room_full');
+      if (!full && (!rate || !rateTold)) toast(m.text || 'Opération refusée.', 'error');
       if (rate) rateTold = true;
       bus.emit('net:error', { op: m.op || null, code: m.code || null, text: m.text || '' });
     },
@@ -265,7 +328,10 @@ export function createNet(ctx) {
       store.set({ players });
       bus.emit('net:playerLeave', { id: m.id, name });
     },
-    [S.CHAT](m) { bus.emit('chat:message', { from: m.from, text: m.text, system: !!m.system, id: m.id || null }); },
+    [S.CHAT](m) {
+      if (!m.system && safeId(m.id) && Object.hasOwn(muted, m.id)) return; // joueur masqué sur cet appareil
+      bus.emit('chat:message', { from: m.from, text: m.text, system: !!m.system, id: m.id || null });
+    },
     [S.MISSION_RESULT](m) {
       const ok = !!m.ok;
       if (ok && (m.cls === 'v' || m.cls === 's')) {
@@ -400,14 +466,14 @@ export function createNet(ctx) {
           // pas un échec : le serveur est là et répond, c'est le seau de hello de cette adresse qui est vide (une
           // salle entière qui arrive derrière le même routeur ; un jeton revient toutes les 2 s). Basculer alors
           // sur l'économie locale serait sans retour : la connexion réessaie, de plus en plus espacée (backoff).
-          if (fatal || (code !== CLOSE.FLOOD && ++misses >= FIRST_CONNECT_ATTEMPTS)) { startOffline(fatal ? null : 'Serveur injoignable : mode hors-ligne.'); return false; }
+          if (fatal || (code !== CLOSE.FLOOD && ++misses >= FIRST_CONNECT_ATTEMPTS)) { startOffline(fatal ? refusalText() : 'Serveur injoignable : mode hors-ligne.'); return false; }
           return true;
         }
         if (fatal) {
           // compte ouvert dans un autre onglet (ou hello refusé) : on arrête là, sans basculer sur une économie locale
           setStatus('offline');
           store.set({ online: false });
-          if (code !== CLOSE.REPLACED) toast('Connexion refusée par le serveur.', 'error');
+          if (code !== CLOSE.REPLACED) toast(refusal?.code === 'server_full' ? 'Serveur complet : reconnexion impossible pour le moment. Rechargez la page dans quelques minutes.' : 'Connexion refusée par le serveur.', 'error');
           clearRemotes();
           loseJob(); loseDare(); // plus de session : rien de tout cela ne reviendra
           return false;
@@ -417,6 +483,13 @@ export function createNet(ctx) {
         return true;
       },
     });
+  }
+
+  /** Message du passage en solo après un refus fatal du hello (null : le refus a déjà été affiché tel quel). */
+  function refusalText() {
+    if (refusal?.code === 'server_full') return FULL_TEXT;
+    if (refusal?.code === 'room_full') return `${refusal.text || 'Salle pleine.'} En attendant : partie en solo (hors-ligne).`;
+    return null;
   }
 
   function clearRemotes() {
@@ -441,7 +514,7 @@ export function createNet(ctx) {
     conn?.close(); conn = null;
     offline?.dispose(); offline = null;
     clearRemotes();
-    welcomed = false; session = false; net.id = null; memToken = null; rateTold = false; chased = false;
+    welcomed = false; session = false; net.id = null; memToken = null; rateTold = false; chased = false; refusal = null; net.refusal = null;
     loseJob(); loseDare(); // nouveau login : course et Chiche de la session précédente sont clos pour le reste du jeu
     store.set(freshStore()); // … et rien d'autre ne doit en transparaître
   }
@@ -483,7 +556,8 @@ export function createNet(ctx) {
     if (params?.get?.('offline') === '1' || typeof WebSocket === 'undefined') startOffline();
     else startOnline();
   });
-  bus.on('intent:chat', (p) => { const text = String(p?.text ?? '').trim(); if (text) request(C.CHAT, { text }); });
+  bus.on('intent:chat', (p) => { const text = String(p?.text ?? '').trim(); if (text && !chatCommand(text)) request(C.CHAT, { text }); });
+  bus.on('intent:mute', (p) => setMuted(p?.id, p?.muted !== false));
   bus.on('intent:missionStart', (p) => {
     if (transmit(C.MISSION_START, { id: p?.id })) return;
     // Rien de joignable (reconnexion en cours) : le serveur ne saura jamais que cette mission a démarré. Elle est

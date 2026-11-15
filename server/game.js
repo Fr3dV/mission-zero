@@ -17,6 +17,7 @@ import * as CORE from '../shared/content-core.js';
 import * as MISSIONS from '../shared/missions.js';
 import { CITIES, DEFAULT_CITY, sanitizeCity, geoFor } from '../shared/cities.js';
 import { VEHICLES, VEHICLE_BY_ID, STARTER_VEHICLE } from '../shared/catalog.js';
+import { filterText, hasProfanity } from './chat-filter.js';
 
 const BOUNDS_MARGIN = 300; // tolérance autour de l'emprise jouable de la ville (m)
 // Vitesse plausible : au moins 130 m/s (468 km/h), et toujours 30 % au-dessus de la voiture la plus rapide du catalogue
@@ -53,8 +54,20 @@ const COMBO_ANNOUNCE_MIN = 5000, COMBO_ANNOUNCE_MS = 60000;
 // hello par adresse : rafale d'une salle pleine (toute une classe derrière la même adresse), puis un toutes les 2 s
 const HELLO_BURST = 40, HELLO_PER_SEC = 0.5;
 const DARE_HOLD_TEXT = "Terminez d'abord votre Chiche.";
+// Salles publiques (sans code d'invitation) : la salle de la ville (« paris », « toulouse ») déborde dans « paris-2 »,
+// « paris-3 »… au lieu de refuser le 33e joueur. Au-delà de la dernière instance, refus 'server_full'.
+const ROOM_INSTANCES_MAX = 99;
+const SERVER_FULL_TEXT = 'Serveur complet pour le moment : réessayez dans quelques minutes.';
+// Connexions au-delà de maxConnections : jusqu'à cette marge, la socket est acceptée le temps de dire « serveur complet »
+// (un refus HTTP 503 est indiscernable d'un serveur éteint pour le navigateur) ; au-delà, 503 brut.
+const FULL_NOTICE_MAX = 64;
+// Chat : 5 messages d'affilée puis 1 toutes les 2 s (seau du COMPTE), même message répété refusé pendant 15 s,
+// 3 messages filtrés en 2 min = chat coupé 2 min.
+const CHAT_REPEAT_MS = 15000, CHAT_STRIKES = 3, CHAT_STRIKE_MS = 120000, CHAT_MUTE_MS = 120000;
 
 const sha256 = (s) => createHash('sha256').update(s).digest('hex');
+/** Nom de remplacement d'un pseudo refusé : « JoueurNNNN » dérivé de l'id du compte, donc le même à chaque connexion. */
+const stableGuestName = (id) => 'Joueur' + (1000 + (parseInt(sha256(String(id)).slice(0, 8), 16) % 9000));
 const clamp = (v, a, b) => (v < a ? a : v > b ? b : v);
 const isObj = (o) => !!o && typeof o === 'object' && !Array.isArray(o);
 const r1 = (v) => Math.round(v * 10) / 10;
@@ -123,6 +136,17 @@ const feedOut = (e) => ({ ...e, x: feedText(e) });
  */
 export const roomKey = (city, code) => (city === DEFAULT_CITY ? code : `${city}:${code}`);
 
+/**
+ * Numéro d'instance d'une salle PUBLIQUE : 1 pour la salle de la ville (code = id de la ville : « paris »,
+ * « toulouse »), n pour « <ville>-n » (2 ≤ n ≤ 99) ; 0 pour une salle privée (code d'invitation saisi).
+ */
+export function roomInstance(city, code) {
+  if (code === city) return 1;
+  const m = /^(.+)-([2-9]|[1-9][0-9])$/.exec(code);
+  return m && m[1] === city ? +m[2] : 0;
+}
+export const instanceCode = (city, n) => (n === 1 ? city : `${city}-${n}`);
+
 /** Podium lu en persistance -> liste saine [{ id, name, sec, at }], triée, une entrée par joueur, 3 au plus. */
 function cleanTop(list) {
   const out = [], seen = new Set();
@@ -184,7 +208,9 @@ export function createGame({ store, now = Date.now, log = () => {}, rentInterval
   let wss = null, stopped = false, dareSeq = 0;
   const timers = [];
   const newSession = () => ({ mission: null, job: null, jobLast: null, heat: null, hold: 0 });
-  const newLimits = () => ({ dareBucket: eco.createBucket(2, 1 / 30), heatAnnAt: -Infinity, comboAnnAt: -Infinity });
+  const newLimits = () => ({ dareBucket: eco.createBucket(2, 1 / 30), heatAnnAt: -Infinity, comboAnnAt: -Infinity,
+    chatBucket: eco.createBucket(5, 0.5), chatLast: '', chatLastAt: -Infinity, chatHits: [], chatMuteUntil: 0 });
+  let fullNotices = 0; // sockets acceptées au-delà de maxConnections, le temps de dire « serveur complet »
 
   // ------------------------------------------------------------------ comptes
 
@@ -284,6 +310,47 @@ export function createGame({ store, now = Date.now, log = () => {}, rentInterval
       })());
     }
     return roomLoads.get(key);
+  }
+
+  /** Salle chargée pour rien (vide, pas retenue) : rendue à la mémoire (un hello concurrent qui l'a retenue la remet). */
+  function dropIfEmpty(room) { if (!room.conns.size && rooms.get(room.key) === room) rooms.delete(room.key); }
+
+  /**
+   * Instance publique où placer ce joueur (`want` = numéro demandé par le client). Ordre de préférence :
+   *   1. la salle de sa connexion encore ouverte (reconnexion avant détection de la coupure) : sa place y est déjà ;
+   *   2. l'instance demandée (le client renvoie celle de son accueil à chaque reconnexion ; lien d'un ami), puis la
+   *      dernière instance jouée (profile.inst), si elle a de la place ET qu'elle est animée ou que le joueur y
+   *      possède des biens (ses loyers y courent) : on ne renvoie personne seul dans une instance vide ;
+   *   3. l'instance animée (au moins un joueur) la plus basse qui a de la place ; à défaut la première instance vide :
+   *      paris, paris-2, paris-3… (une instance non chargée est vide).
+   * Charge au plus 3 salles. null : toutes les instances sont pleines. Le résultat est à revérifier par l'appelant
+   * (d'autres hello ont pu s'y glisser pendant la lecture du store).
+   */
+  async function pickPublicRoom(city, want, account) {
+    const p = account.profile, cur = account.conn?.room;
+    const fits = (r) => r.conns.size < MAX_PLAYERS_PER_ROOM || r === cur;
+    if (cur && cur.city === city && roomInstance(city, cur.code)) return cur;
+    const last = Math.floor(+(isObj(p.inst) ? p.inst[city] : 0) || 0);
+    const tried = new Set([1]);
+    for (const n of [want, last]) {
+      if (!(n >= 2 && n <= ROOM_INSTANCES_MAX) || tried.has(n)) continue;
+      tried.add(n);
+      const r = await fetchRoom(city, instanceCode(city, n));
+      if (fits(r) && (r.conns.size > 0 || eco.ownedProperties(r.record.owners, p.id).length > 0)) return r;
+      dropIfEmpty(r);
+    }
+    // d'abord l'instance animée la plus basse qui a de la place (paris pleine, paris-2 vidée, paris-3 à 20 : paris-3,
+    // pas seul en paris-2) ; sinon la première instance vide, chargée ou non
+    for (let n = 1; n <= ROOM_INSTANCES_MAX; n++) {
+      const r = rooms.get(roomKey(city, instanceCode(city, n)));
+      if (r && r.conns.size > 0 && fits(r)) return r;
+    }
+    for (let n = 1; n <= ROOM_INSTANCES_MAX; n++) {
+      const r = rooms.get(roomKey(city, instanceCode(city, n)));
+      if (!r) return fetchRoom(city, instanceCode(city, n));
+      if (fits(r)) return r;
+    }
+    return null;
   }
 
   const memberWorth = (m) => (Number.isFinite(m.worth) ? m.worth : +m.money || 0); // fiche d'avant le contrat v6 : worth absent = money
@@ -469,12 +536,34 @@ export function createGame({ store, now = Date.now, log = () => {}, rentInterval
     }
     if (m.v !== PROTOCOL_VERSION) return reject(conn, 'version', 'Version du jeu obsolète : rechargez la page.');
     const city = sanitizeCity(m.city); // absent (client d'avant le multi-villes) ou inconnu : Paris
-    const code = eco.sanitizeRoom(m.room);
-    const key = roomKey(city, code);
+    const want = eco.sanitizeRoom(m.room);
+    const inst = roomInstance(city, want); // 0 = salle privée (code d'invitation) ; sinon salle publique, à répartir
     let name = eco.sanitizeName(m.name);
+    const badName = hasProfanity(name);
+    if (badName) name = 'Joueur'; // provisoire : remplacé ci-dessous par un nom stable une fois le compte connu
     const { account, token } = await resolveAccount(m.token, name);
-    const room = await fetchRoom(city, code);
+    // pseudo injurieux : nom déjà en profil s'il est propre, sinon JoueurNNNN dérivé de l'id (le même à chaque
+    // connexion : le client renvoie son pseudo enregistré à chaque hello, le joueur ne doit pas changer de nom)
+    if (badName) name = account.profile.name !== 'Joueur' && !hasProfanity(account.profile.name) ? account.profile.name : stableGuestName(account.profile.id);
+    let room = null;
+    if (!inst) room = await fetchRoom(city, want);
+    else {
+      // répartiteur : la salle retenue est revérifiée ici, sans attente jusqu'à l'inscription du joueur
+      // rafale de hello (pic d'arrivées pendant une lecture du store) : chaque passe ne fait entrer que la place libre
+      // de la salle choisie ; les suivants repassent et vont plus loin (paris pleine → paris-2 → paris-3…). On boucle
+      // tant que le répartiteur propose une autre salle, borné par le nombre d'instances.
+      let prev = null;
+      for (let tries = 0; tries <= ROOM_INSTANCES_MAX + 1 && !room; tries++) {
+        const r = await pickPublicRoom(city, inst, account);
+        if (conn.closed || stopped) return;
+        if (!r || r === prev) break; // tout est plein, ou plus de progrès
+        if (r.conns.size < MAX_PLAYERS_PER_ROOM || r === account.conn?.room) room = r;
+        prev = r;
+      }
+      if (!room) return reject(conn, 'server_full', SERVER_FULL_TEXT);
+    }
     if (conn.closed || stopped) return;
+    const code = room.code, key = room.key;
     // ceinture : le compte de CE hello doit être celui de la table (jamais deux copies vivantes du même compte)
     const known = accounts.get(account.profile.id);
     if (!known) accounts.set(account.profile.id, account);
@@ -490,7 +579,8 @@ export function createGame({ store, now = Date.now, log = () => {}, rentInterval
     if (!rooms.has(key)) rooms.set(key, room); // la salle a pu être libérée entre-temps (chargement, remplacement)
     if (room.conns.size >= MAX_PLAYERS_PER_ROOM) {
       if (!room.conns.size) rooms.delete(key);
-      return reject(conn, 'room_full', `La salle « ${code} » est pleine (${MAX_PLAYERS_PER_ROOM} joueurs).`);
+      if (inst) return reject(conn, 'server_full', SERVER_FULL_TEXT);
+      return reject(conn, 'room_full', `La salle « ${code} » est pleine (${MAX_PLAYERS_PER_ROOM} joueurs) : choisissez un autre code, ou jouez sans code.`);
     }
     // unicité du pseudo dans la salle
     const taken = new Set([...room.conns.values()].map((c) => c.account.profile.name.toLowerCase()));
@@ -506,6 +596,7 @@ export function createGame({ store, now = Date.now, log = () => {}, rentInterval
     account.session.job = null; // une course de taxi ne survit pas à une coupure (le client l'annonce)
     if (account.session.mission) account.session.mission.moved = null; // mission conservée : le chemin de la coupure n'a pas été mesuré
     if (!account.fresh) room.keep = true;
+    if (inst) p.inst = { ...(isObj(p.inst) ? p.inst : {}), [city]: roomInstance(city, code) }; // dernière instance publique jouée
 
     // carnet de bord : bascule de jour, puis relevé du matin calculé AVANT toute réécriture de rentAt
     const fresh = J.rollDay(p, t) || !!token;
@@ -816,9 +907,25 @@ export function createGame({ store, now = Date.now, log = () => {}, rentInterval
     [C.STATE]: onState,
 
     [C.CHAT](conn, m) {
-      const text = eco.sanitizeChat(m.text);
-      if (!text) return;
-      if (!conn.chatBucket.take(now())) return sendError(conn, C.CHAT, { code: 'rate', text: 'Vous écrivez trop vite, patientez un instant.' });
+      const clean = eco.sanitizeChat(m.text); // caractères de contrôle, chevrons, MAX_CHAT_LEN (200)
+      if (!clean) return;
+      const L = conn.account.limits, t = now(); // débits du COMPTE : une reconnexion ne les remet pas à neuf
+      const muted = () => sendError(conn, C.CHAT, { code: 'muted', text: `Chat coupé pour langage injurieux (encore ${Math.ceil((L.chatMuteUntil - t) / 1000)} s).` });
+      if (L.chatMuteUntil > t) return muted();
+      if (!L.chatBucket.take(t)) return sendError(conn, C.CHAT, { code: 'rate', text: 'Vous écrivez trop vite, patientez un instant.' });
+      const { text, hits, strikes } = filterText(clean); // strikes : insultes (écarts) ; hits : tout mot masqué
+      const same = text.toLowerCase();
+      if (same === L.chatLast && t - L.chatLastAt < CHAT_REPEAT_MS) return sendError(conn, C.CHAT, { code: 'repeat', text: 'Message déjà envoyé.' });
+      L.chatLast = same; L.chatLastAt = t;
+      if (hits) {
+        if (strikes) { // seuls les messages avec une insulte comptent comme écarts (un mot cru est masqué sans plus)
+          L.chatHits = L.chatHits.filter((at) => t - at < CHAT_STRIKE_MS);
+          L.chatHits.push(t);
+          if (L.chatHits.length >= CHAT_STRIKES) { L.chatHits = []; L.chatMuteUntil = t + CHAT_MUTE_MS; muted(); }
+        }
+        // rien d'autre que des injures : rien n'est diffusé
+        if (!/[\p{L}\p{N}]/u.test(text.replace(/\*\*\*/g, ''))) return sendError(conn, C.CHAT, { code: 'filtered', text: 'Message bloqué par le filtre du chat.' });
+      }
       const p = conn.account.profile;
       broadcast(conn.room, S.CHAT, { from: p.name, id: p.id, text });
     },
@@ -1151,7 +1258,6 @@ export function createGame({ store, now = Date.now, log = () => {}, rentInterval
       helloPending: false, strikes: 0, dropped: 0,
       bucket: eco.createBucket(90, 45), // tous messages (15 états/s + pings en régime normal)
       opBucket: eco.createBucket(12, 2), // opérations d'économie
-      chatBucket: eco.createBucket(5, 0.5),
       transferBucket: eco.createBucket(3, 0.2),
       // contrat v6 : un seau par famille de messages, dépassement ignoré sans erreur ni strike (sauf DARE : erreur 'rate').
       // Le seau des Chiche et les délais d'annonce (avis de recherche, combo) sont dans le COMPTE (account.limits).
@@ -1232,7 +1338,22 @@ export function createGame({ store, now = Date.now, log = () => {}, rentInterval
       let path = '';
       try { path = new URL(req.url, 'http://x').pathname; } catch { /* URL invalide */ }
       if (path !== WS_PATH || stopped) { socket.destroy(); return; }
-      if (conns.size >= maxConnections) { socket.write('HTTP/1.1 503 Service Unavailable\r\nConnection: close\r\n\r\n'); socket.destroy(); return; }
+      if (conns.size >= maxConnections) {
+        if (fullNotices >= FULL_NOTICE_MAX) { socket.write('HTTP/1.1 503 Service Unavailable\r\nConnection: close\r\n\r\n'); socket.destroy(); return; }
+        // serveur complet : la socket est acceptée le temps de le DIRE (refus fatal, le client joue alors en solo et
+        // l'annonce), sans jamais entrer dans `conns` ni lire un message
+        fullNotices++;
+        wss.handleUpgrade(req, socket, head, (ws) => {
+          let done = false;
+          const release = () => { if (!done) { done = true; fullNotices--; } };
+          ws.on('close', release);
+          ws.on('error', () => { /* 'close' suit */ });
+          ws.send(encode(S.ERROR, { op: C.HELLO, code: 'server_full', text: SERVER_FULL_TEXT, fatal: true }));
+          ws.close(CLOSE.REJECTED, 'server_full');
+          setTimeout(() => { if (!done) ws.terminate(); }, 5000).unref?.();
+        });
+        return;
+      }
       wss.handleUpgrade(req, socket, head, (ws) => wss.emit('connection', ws, req));
     });
     const every = (fn, ms) => { const h = setInterval(fn, ms); h.unref?.(); timers.push(h); };
@@ -1264,6 +1385,7 @@ export function createGame({ store, now = Date.now, log = () => {}, rentInterval
 
   return {
     attach, shutdown, tickRents, tickSnapshots, tickLeaderboards, tickHeartbeat, tickJournal, tickDares,
-    stats: () => ({ connections: conns.size, rooms: rooms.size, accounts: accounts.size }),
+    stats: () => ({ connections: conns.size, rooms: rooms.size, accounts: accounts.size,
+      players: Object.fromEntries([...rooms.values()].map((r) => [r.key, r.conns.size])) }),
   };
 }

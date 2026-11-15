@@ -303,11 +303,11 @@ test('hors-ligne : képis — contrôle sans avis de recherche ignoré, amende p
 test('hors-ligne : Atelier (teinte à l’achat, peinture, klaxon verrouillé puis choisi) ; Chiche refusé ; émotes et chutes sans effet', () => {
   disk.clear();
   const a = local({ profile: rich(200000) });
-  const tesla = 'tesla_model3';
-  const bought = a.ask(C.BUY_CAR, { typeId: tesla, color: '#c1121f' }, S.PROFILE);
-  assert.equal(bought.me.carColors[tesla], '#c1121f', 'teinte choisie à l’achat conservée');
-  assert.equal(a.ask(C.PAINT_CAR, { typeId: tesla, color: '#c1121f' }, S.ERROR).code, 'same_color');
-  assert.equal(a.ask(C.PAINT_CAR, { typeId: tesla, color: '#123456' }, S.ERROR).code, 'bad_color');
+  const etincelle = 'tesla_model3';
+  const bought = a.ask(C.BUY_CAR, { typeId: etincelle, color: '#c1121f' }, S.PROFILE);
+  assert.equal(bought.me.carColors[etincelle], '#c1121f', 'teinte choisie à l’achat conservée');
+  assert.equal(a.ask(C.PAINT_CAR, { typeId: etincelle, color: '#c1121f' }, S.ERROR).code, 'same_color');
+  assert.equal(a.ask(C.PAINT_CAR, { typeId: etincelle, color: '#123456' }, S.ERROR).code, 'bad_color');
   assert.equal(a.ask(C.PAINT_CAR, { typeId: 'lambo_urus', color: '#c1121f' }, S.ERROR).code, 'not_owned');
   const stock = a.ask(C.PAINT_CAR, { typeId: 'citadine', color: VEHICLE_BY_ID.citadine.colors[1] }, S.PROFILE);
   assert.deepEqual([stock.delta, stock.reason, stock.me.carColors.citadine], [-eco.PAINT_STOCK_PRICE, 'peinture', VEHICLE_BY_ID.citadine.colors[1]]);

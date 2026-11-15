@@ -289,7 +289,7 @@ test('missions : mission de niveau 6 refusée (locked) pour un compte neuf', asy
   } finally { await app.close(); }
 });
 
-test('missions : un état en Aventador pendant la mission => catégorie Sport, le record Ville ne change pas', async () => {
+test('missions : un état en Muggini Furiosa pendant la mission => catégorie Sport, le record Ville ne change pas', async () => {
   const app = await boot({ at: T0 });
   try {
     const a = await join(app, { name: 'Alice' });
@@ -710,10 +710,10 @@ test('taxi : arrivée à 300 m refusée too_far (course conservée), puis fare +
 test('taxi : série (client suivant dans les 2 minutes), bonus au volant de SON Taxi Parisien, plafond horaire', async () => {
   const store = new MemoryStore(), d = dice();
   const ROOM_LEFT = 1000; // ce qu'il reste sous le plafond de l'heure : la 1re course (moins de 1 500 m) y tient, pas la 2e
-  const s = seedPlayer(store, { name: 'G7', money: 0, edit: (p) => { p.cars.push('taxi'); p.journal.fareWin = { at: T0, paid: 15000 - ROOM_LEFT }; } });
+  const s = seedPlayer(store, { name: 'Chauffeur', money: 0, edit: (p) => { p.cars.push('taxi'); p.journal.fareWin = { at: T0, paid: 15000 - ROOM_LEFT }; } });
   const app = await boot({ store, at: T0, rand: d.rand });
   try {
-    const a = await join(app, { name: 'G7', token: s.token });
+    const a = await join(app, { name: 'Chauffeur', token: s.token });
     // 1re course, en Citadine : pas de bonus
     let f = await fare(app, d, a, 'normal');
     assert.deepEqual([f.job.taxi, f.job.fare], [false, jobs.fareFor(f.dist, 1, false, 'normal')]);
@@ -1322,9 +1322,9 @@ test('gazette : welcome.feed = faits des autres depuis la dernière présence, 1
     const btoken = b.welcome.token;
     await a.ask('buy_car', { typeId: 'tesla_model3', color: '#c1121f' }, 'profile');
     const live = (await b.next('feed')).e;
-    assert.deepEqual([live.k, live.id, live.n, live.d, live.m, live.x], ['car', rich.id, 'Alice', 'Tesla Model 3', 'tesla_model3', "Alice s'offre une Tesla Model 3"]);
+    assert.deepEqual([live.k, live.id, live.n, live.d, live.m, live.x], ['car', rich.id, 'Alice', 'Fulgur Étincelle', 'tesla_model3', "Alice s'offre une Fulgur Étincelle"]);
     assert.equal((await a.next('feed')).e.k, 'car', 'diffusé à toute la salle');
-    assert.match((await b.next('chat', (m) => m.system)).text, /^Alice s'offre une Tesla Model 3 !$/);
+    assert.match((await b.next('chat', (m) => m.system)).text, /^Alice s'offre une Fulgur Étincelle !$/);
     await quit(app, b);
     // pendant l'absence de Bob : 7 achats-reventes = 14 faits
     for (let i = 0; i < 7; i++) {

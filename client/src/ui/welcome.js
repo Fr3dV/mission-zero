@@ -5,12 +5,15 @@
 import { bus as coreBus } from '../core/bus.js';
 import { CITY, CITY_ID, CITIES, DEFAULT_CITY } from '@shared/cities.js';
 import { h, icon, lsGet, lsSet, copyText, clamp, typo } from './util.js';
-import { cityArt, cityLine } from './cityart.js';
+import { cityArt, cityLine, CITY_SOURCES } from './cityart.js';
 import { controlsGrid } from './panels.js';
 
 const STEP_LABEL = { env: 'Ciel et lumière', world: 'Rues et immeubles', monuments: 'Monuments', vehicles: 'Véhicules', player: 'Personnage', traffic: 'Circulation', gameplay: 'Missions et immobilier', net: 'Connexion', ui: 'Interface', audio: 'Ambiance sonore' };
 const STEPS = Object.keys(STEP_LABEL);
 const FILE_LABEL = { roads: 'réseau de rues', buildings: 'bâtiments', pois: 'lieux et espaces verts', buildingsMeta: 'façades', buildingsMetaBin: 'façades', terrain: 'relief' };
+// Villes lourdes (données volumineuses) : sur appareil tactile, on n'y redirige jamais automatiquement
+// (un téléphone qui a planté en la chargeant y retomberait à chaque visite) ; Paris reste la ville d'arrivée.
+const HEAVY_CITIES = new Set(['toulouse']);
 const DROP_ON_SWITCH = ['city', 'tp', 'autostart', 'name']; // paramètres propres à une ville ou à un lancement
 const ssGet = (k) => { try { return sessionStorage.getItem(k); } catch { return null; } };
 const ssSet = (k, v) => { try { sessionStorage.setItem(k, v); } catch { /* indisponible */ } };
@@ -21,6 +24,7 @@ function createShell() {
   const autostart = !!params.get('autostart');
   const city = CITY, cityIds = Object.keys(CITIES);
   const coarse = (window.matchMedia?.('(pointer: coarse)').matches) || 'ontouchstart' in window || params.get('touch') === '1';
+  const touchPrimary = params.get('touch') === '1' || !!(window.matchMedia?.('(pointer: coarse)').matches && window.matchMedia('(hover: none)').matches);
   const isCompact = () => coarse || window.innerHeight < 520 || window.innerWidth < 720;
 
   // ---- Ville mémorisée : en arrivant sur `/` sans ville ni salle, on rejoint la dernière ville jouée.
@@ -28,7 +32,7 @@ function createShell() {
   // (pas deux redirections en moins de 3 s dans le même onglet) : jamais de boucle.
   let redirecting = false;
   const saved = lsGet('mz.city');
-  if (!params.has('city') && !params.has('room') && !autostart && saved && CITIES[saved] && saved !== CITY_ID && Date.now() - Number(ssGet('mz.redirect') || 0) > 3000) {
+  if (!params.has('city') && !params.has('room') && !autostart && saved && CITIES[saved] && saved !== CITY_ID && !(touchPrimary && HEAVY_CITIES.has(saved)) && Date.now() - Number(ssGet('mz.redirect') || 0) > 3000) {
     ssSet('mz.redirect', String(Date.now()));
     const u = new URL(location.href);
     u.searchParams.set('city', saved);
@@ -171,6 +175,10 @@ function createShell() {
   const howto = h('aside', { class: 'mz-howto', hidden: true }, h('span', { class: 'mz-eyebrow', text: 'Commandes' }), controlsGrid(null, !!coarse),
     coarse ? null : h('p', { class: 'mz-hint', text: 'Sur mobile : joystick à gauche, boutons à droite, en mode paysage.' }));
   const n = cityIds.length;
+  // crédit des données cartographiques (licence ODbL) : visible dès l'accueil, lien vers la page de copyright OSM
+  const srcExtra = (CITY_SOURCES[city.id] || CITY_SOURCES.paris).replace(/^©\s*contributeurs OpenStreetMap/, '');
+  const credit = h('p', { class: 'mz-credit' }, '© ',
+    h('a', { href: 'https://www.openstreetmap.org/copyright', target: '_blank', rel: 'noopener noreferrer', text: 'contributeurs OpenStreetMap' }), srcExtra);
   const welcome = h('div', { class: 'mz-welcome' + (autostart ? ' is-auto' : '') },
     h('div', { html: cityLine(redirecting ? saved : city.id), class: 'mz-skywrap' }),
     h('div', { class: 'mz-welcome-in' },
@@ -179,7 +187,8 @@ function createShell() {
         h('h1', { class: 'mz-title' }, h('em', { text: 'Mission' }), h('b', { text: 'Zéro' })),
         h('p', { class: 'mz-tagline', text: `Partez de rien. Roulez, livrez, investissez — et offrez-vous ${city.name}.` }),
         cityGrid, boot, notice, form),
-      howto));
+      howto),
+    credit);
   if (redirecting) welcome.replaceChildren(h('div', { class: 'mz-switch', dataset: { theme: saved } }, h('span', { class: 'mz-eyebrow', text: 'Mission Zéro' }), h('strong', { text: CITIES[saved].name }), h('span', { class: 'mz-switch-sub', text: `Retour à ${CITIES[saved].name}…` }), h('div', { class: 'mz-bar is-busy' }, h('i'))));
   ui.appendChild(welcome);
   paintProgress();

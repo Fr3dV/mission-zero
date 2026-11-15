@@ -121,7 +121,7 @@ export const DEFS = {
     ],
   },
   // -------------------------------------------------------------------------------------------
-  // Tesla Model 3 : capot court plongeant, bouclier lisse sans calandre, pavillon en arche très vitré,
+  // Fulgur Étincelle (tesla_model3) : capot court plongeant, bouclier lisse sans calandre, pavillon en arche très vitré,
   // malle courte et haute, feux arrière en C, poignées affleurantes, aucune sortie.
   tesla_model3: {
     fo: 0.84, wb: 2.875, wheelR: 0.335, tireW: 0.235,
@@ -158,7 +158,7 @@ export const DEFS = {
     ],
   },
   // -------------------------------------------------------------------------------------------
-  // Tesla Model S Plaid : grande berline fastback basse et large, hayon, bandeau chromé arrière.
+  // Fulgur Foudre (tesla_models) : grande berline fastback basse et large, hayon, bandeau chromé arrière.
   tesla_models: {
     fo: 0.93, wb: 2.96, wheelR: 0.355, tireW: 0.265,
     noseBulge: 0.25, tailBulge: 0.14, capKy: 0.28,
@@ -195,7 +195,7 @@ export const DEFS = {
     ],
   },
   // -------------------------------------------------------------------------------------------
-  // Tesla Cybertruck : facettes planes en inox brossé, pavillon triangulaire, barres lumineuses.
+  // Fulgur Monolithe (tesla_cybertruck) : facettes planes en inox brossé, pavillon triangulaire, barres lumineuses.
   tesla_cybertruck: {
     fo: 0.9, wb: 3.635, wheelR: 0.445, tireW: 0.3, archGap: 0.075, archCrest: 0.05,
     noseBulge: 0.05, tailBulge: 0.03, capAngle: 35, capKy: 0.2, rowSmooth: false,
@@ -230,7 +230,7 @@ export const DEFS = {
     ],
   },
   // -------------------------------------------------------------------------------------------
-  // Porsche 911 Turbo S : « flyline » (pavillon en arc continu jusqu'au bandeau), ailes avant plus hautes
+  // Falkner Crécelle GT (porsche_911) : « flyline » (pavillon en arc continu jusqu'au bandeau), ailes avant plus hautes
   // que le capot avec phares ovales au bout, hanches arrière très larges, aileron discret.
   porsche_911: {
     fo: 1.03, wb: 2.45, wheelR: 0.35, tireW: 0.29, archGap: 0.04, archCrest: 0.05,
@@ -272,7 +272,7 @@ export const DEFS = {
     ],
   },
   // -------------------------------------------------------------------------------------------
-  // Porsche Taycan : berline électrique basse, phares à quatre points avec « larmes » verticales, bandeau arrière.
+  // Falkner Électra (porsche_taycan) : berline électrique basse, phares à quatre points avec « larmes » verticales, bandeau arrière.
   porsche_taycan: {
     fo: 0.93, wb: 2.9, wheelR: 0.36, tireW: 0.27, archGap: 0.04, archCrest: 0.045,
     noseBulge: 0.2, tailBulge: 0.16, capKy: 0.28,
@@ -307,7 +307,7 @@ export const DEFS = {
     ],
   },
   // -------------------------------------------------------------------------------------------
-  // Porsche Cayenne : grand SUV, capot haut, phares à quatre points, bandeau arrière, becquet de toit.
+  // Falkner Piment (porsche_cayenne) : grand SUV, capot haut, phares à quatre points, bandeau arrière, becquet de toit.
   porsche_cayenne: {
     fo: 0.95, wb: 2.895, wheelR: 0.39, tireW: 0.285, archGap: 0.055,
     noseBulge: 0.2, tailBulge: 0.12, capKy: 0.35,
@@ -346,7 +346,7 @@ export const DEFS = {
     ],
   },
   // -------------------------------------------------------------------------------------------
-  // Lamborghini Huracán : coin compact, cabine avancée, prises d'air hexagonales, feux fins en Y.
+  // Muggini Tornada (lambo_huracan) : coin compact, cabine avancée, prises d'air hexagonales, feux fins en Y.
   lambo_huracan: {
     fo: 1.07, wb: 2.62, wheelR: 0.345, tireW: 0.3, archGap: 0.035, archCrest: 0.04,
     noseBulge: 0.16, tailBulge: 0.07, capAngle: 60, capKy: 0.25,
@@ -395,7 +395,7 @@ export const DEFS = {
     ],
   },
   // -------------------------------------------------------------------------------------------
-  // Lamborghini Aventador : coin monovolume (pare-brise dans le prolongement du capot court, cabine avancée),
+  // Muggini Furiosa (lambo_aventador) : coin monovolume (pare-brise dans le prolongement du capot court, cabine avancée),
   // énormes prises d'air latérales, face arrière en creux, sortie hexagonale centrale.
   lambo_aventador: {
     fo: 1.13, wb: 2.7, wheelR: 0.355, tireW: 0.33, archGap: 0.035, archCrest: 0.04,
@@ -445,7 +445,7 @@ export const DEFS = {
     ],
   },
   // -------------------------------------------------------------------------------------------
-  // Lamborghini Urus : SUV coupé agressif, grande calandre hexagonale, Y lumineux, pavillon fuyant.
+  // Muggini Bisonte (lambo_urus) : SUV coupé agressif, grande calandre hexagonale, Y lumineux, pavillon fuyant.
   lambo_urus: {
     fo: 1.0, wb: 3.003, wheelR: 0.4, tireW: 0.315, archGap: 0.05, archCrest: 0.045,
     noseBulge: 0.16, tailBulge: 0.1, capAngle: 62, capKy: 0.3,

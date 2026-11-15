@@ -122,7 +122,7 @@ test('imports entre lots : les tables nouvelles des autres lots sont lues par es
 
 // =============================================================================== profil
 
-test('classOf : Ville = à pied, Citadine, Taxi, Model 3, Cybertruck ; Sport = le reste', () => {
+test('classOf : Ville = à pied, Citadine, Taxi, Fulgur Étincelle, Fulgur Monolithe ; Sport = le reste', () => {
   assert.equal(eco.CLASS_SPEED, 62);
   for (const id of ['citadine', 'taxi', 'tesla_model3', 'tesla_cybertruck']) assert.equal(eco.classOf(id), 'v', id);
   for (const id of ['tesla_models', 'porsche_911', 'porsche_taycan', 'porsche_cayenne', 'lambo_huracan', 'lambo_aventador', 'lambo_urus']) assert.equal(eco.classOf(id), 's', id);
@@ -326,7 +326,7 @@ test('missionComplete : un état en voiture de sport pendant la mission => cls s
   const v1 = play(p, s, m, T0, { sec: 200 });
   assert.deepEqual([v1.cls, v1.pb, v1.best], ['v', true, null]);
   let t = T0 + (200 + m.cooldownSec + 1) * 1000;
-  const s1 = play(p, s, m, t, { sec: 90, sport: true }); // bien plus rapide, mais en Aventador
+  const s1 = play(p, s, m, t, { sec: 90, sport: true }); // bien plus rapide, mais en Muggini Furiosa
   assert.deepEqual([s1.cls, s1.pb, s1.best], ['s', true, null]);
   assert.deepEqual(p.best[m.id], { v: 200, s: 90 }, 'le record Ville est intact');
   // record personnel : battu seulement par un temps strictement meilleur, `best` = ancien record de la catégorie

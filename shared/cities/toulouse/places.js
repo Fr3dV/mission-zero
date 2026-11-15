@@ -129,9 +129,9 @@ export const SPAWN = { ...G(43.6040, 1.4431), lookAt: 'tls_capitole', label: 'Pl
 
 /** Concessions, dans les vraies zones de concessions de l'agglomération. `street` = voie à privilégier si elle existe. */
 export const DEALERS = [
-  { id: 'tls_tesla', brand: 'Tesla', name: 'Tesla Balma-Gramont', color: '#e63946', ...G(43.6300, 1.4835), street: 'Lavaur', show: ['tesla_model3', 'tesla_models', 'tesla_cybertruck'] },
-  { id: 'tls_porsche', brand: 'Porsche', name: "Porsche Route d'Espagne", color: '#f4d35e', ...G(43.5558, 1.4237), street: 'Espagne', show: ['porsche_911', 'porsche_taycan', 'porsche_cayenne'] },
-  { id: 'tls_lamborghini', brand: 'Lamborghini', name: 'Lamborghini Sesquières', color: '#9bff3c', ...G(43.6528, 1.4243), street: 'États-Unis', show: ['lambo_huracan', 'lambo_aventador', 'lambo_urus'] },
+  { id: 'tls_tesla', brand: 'Fulgur', name: 'Fulgur Balma-Gramont', color: '#e63946', ...G(43.6300, 1.4835), street: 'Lavaur', show: ['tesla_model3', 'tesla_models', 'tesla_cybertruck'] },
+  { id: 'tls_porsche', brand: 'Falkner', name: "Falkner Route d'Espagne", color: '#f4d35e', ...G(43.5558, 1.4237), street: 'Espagne', show: ['porsche_911', 'porsche_taycan', 'porsche_cayenne'] },
+  { id: 'tls_lamborghini', brand: 'Muggini', name: 'Muggini Sesquières', color: '#9bff3c', ...G(43.6528, 1.4243), street: 'États-Unis', show: ['lambo_huracan', 'lambo_aventador', 'lambo_urus'] },
 ];
 
 /** Parkings publics : permettent de sortir une voiture possédée sans être propriétaire d'un bien. */
@@ -267,7 +267,7 @@ export const RDV_POINTS = [
   R('tls_rdv_cugnaux', 'la mairie de Cugnaux', 43.53693, 1.34477),
   R('tls_rdv_tournefeuille', 'la mairie de Tournefeuille', 43.58360, 1.34584),
   R('tls_rdv_saint_martin', "l'église de Saint-Martin-du-Touch", 43.60139, 1.37012),
-  R('tls_rdv_airbus_saint_martin', "l'entrée d'Airbus à Saint-Martin", 43.60417, 1.37190),
+  R('tls_rdv_airbus_saint_martin', "l'entrée des avionneurs à Saint-Martin", 43.60417, 1.37190),
   R('tls_rdv_route_bayonne', 'la route de Bayonne', 43.60840, 1.38397),
   R('tls_rdv_purpan', "l'hôpital Purpan", 43.60799, 1.40197),
   R('tls_rdv_ancely', 'la place Ancely', 43.61869, 1.39728),

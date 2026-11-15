@@ -21,6 +21,12 @@ import { createUI } from './ui/index.js';
 import { createAudio } from './audio/index.js';
 
 const params = new URLSearchParams(location.search);
+// Appareil tactile d'abord (téléphone, tablette : pointeur grossier ET pas de survol ; ?touch=1 pour forcer).
+// Sans ?quality= explicite, il démarre en qualité allégée : basse sur petit écran, moyenne sur tablette.
+// Les ordinateurs (y compris les portables à écran tactile, qui gardent une souris) restent en 'high'.
+const touchPrimary = params.get('touch') === '1'
+  || !!(window.matchMedia?.('(pointer: coarse)').matches && window.matchMedia('(hover: none)').matches);
+const defaultQuality = () => (!touchPrimary ? 'high' : Math.min(screen.width, screen.height) < 600 ? 'low' : 'medium');
 const canvas = document.getElementById('game');
 const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, powerPreference: 'high-performance' });
 renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
@@ -71,7 +77,7 @@ const ctx = {
   uiRoot: document.getElementById('ui-root'),
   heightAt, WATER_LEVEL, LANDMARKS, LANDMARK_BY_ID, BOUNDS,
   city: CITY, cities: CITIES, // ville courante (?city=) et registre des villes
-  quality: params.get('quality') || 'high', // 'low' | 'medium' | 'high'
+  quality: params.get('quality') || defaultQuality(), // 'low' | 'medium' | 'high'
   worldData: null,
   time: 0, // secondes écoulées
   // remplis ci-dessous : env, world, monuments, vehicles, player, traffic, gameplay, net, ui, audio

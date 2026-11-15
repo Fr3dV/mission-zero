@@ -23,8 +23,9 @@ const STUMBLE_DROP = 3;  // hauteur de chute (m) au-delà de laquelle la récept
 const AIR_CATCH = 0.3;   // en l'air, une surface jusqu'à 30 cm au-dessus des pieds (marche, bordure) rattrape encore le joueur
 const HORN_PER_SEC = 2;  // klaxons émis au plus par seconde glissante (contrat v6)
 const EXIT_HINT_SEC = 5; // l'invite « F — Descendre » s'efface après ce temps d'arrêt
-// accords des invites : « le Taxi Parisien », « le Tesla Cybertruck » ; le reste du catalogue s'accorde au féminin
-const MASCULINE = new Set(['taxi', 'tesla_cybertruck']);
+// accords des invites : « le Taxi Parisien », « le Fulgur Monolithe », « le Falkner Piment », « le Muggini Bisonte » ;
+// le reste du catalogue s'accorde au féminin (même liste que MASCULINE_CARS côté serveur)
+const MASCULINE = new Set(['taxi', 'tesla_cybertruck', 'porsche_cayenne', 'lambo_urus']);
 const VIEW_LABEL = { proche: 'Caméra proche', loin: 'Caméra éloignée', capot: 'Caméra capot' };
 
 export function createPlayer(ctx) {

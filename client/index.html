@@ -17,6 +17,7 @@
   <script type="module" src="/src/main.js"></script>
   <!-- Menu commun du portail gamzu.fr : retour au portail et accès aux autres jeux.
        data-jeu="mz" tant que le jeu n'est pas servi depuis mz.gamzu.fr ; chargé en async pour ne jamais bloquer le jeu. -->
-  <script src="https://gamzu.fr/gamzu-menu.js" data-position="bas-centre" data-jeu="mz" async></script>
+  <!-- Menu commun gamzu.fr, seulement quand le jeu est ouvert seul (pas dans une iframe itch.io ou autre) -->
+  <script>if (window.top === window.self) { const s = document.createElement('script'); s.src = 'https://gamzu.fr/gamzu-menu.js'; s.async = true; s.dataset.position = 'bas-centre'; s.dataset.jeu = 'mz'; document.head.appendChild(s); }</script>
 </body>
 </html>

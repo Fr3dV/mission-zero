@@ -38,7 +38,7 @@
     ctx.player = { pos: { x: 0, y: 0, z: 0 }, yaw: 0, speed: 0, mode: drive ? 'vehicle' : 'foot', vehicle: drive ? veh : null, enabled: true };
     const L = LANDMARKS.filter((l) => !l.hidden);
     ctx.gameplay = { startMission: (id) => bus.emit('toast', { text: 'Mission démarrée : ' + id, kind: 'info' }), abortMission() {},
-      dealers: [{ x: (L[1]?.x ?? 0) + 120, z: (L[1]?.z ?? 0) + 60, brand: 'Porsche' }, { x: (L[3]?.x ?? 0) - 90, z: (L[3]?.z ?? 0) + 140, brand: 'Tesla' }] };
+      dealers: [{ x: (L[1]?.x ?? 0) + 120, z: (L[1]?.z ?? 0) + 60, brand: 'Falkner' }, { x: (L[3]?.x ?? 0) - 90, z: (L[3]?.z ?? 0) + 140, brand: 'Fulgur' }] };
     for (const t of ['intent:login', 'intent:chat', 'intent:buyCar', 'intent:buyProperty', 'intent:sellProperty', 'intent:transfer', 'intent:spawnCar', 'intent:setActiveCar', 'intent:respawn', 'audio:volume', 'gps:set'])
       bus.on(t, (p) => { (window.__log ||= []).push([t, p]); });
     bus.on('intent:login', ({ name, room }) => { store.set({ room, online: true, me: { id: 'me', name } }); setTimeout(() => { bus.emit('net:status', { state: 'online' }); bus.emit('net:welcome', { offline: false }); }, 300); });
@@ -169,7 +169,7 @@
         setTimeout(() => {
           bus.emit('mission:update', { mission: { title: 'Livraison express', steps: [1, 2, 3] }, stepIndex: 1, stepCount: 3, text: `Déposez le colis : ${dest.name}`, timeLeft: 83, distance: 1840 });
           bus.emit('gps:set', { x: dest.x + 90, z: dest.z, label: dest.name });
-          bus.emit('player:prompt', { text: 'F — Monter dans la Porsche 911' });
+          bus.emit('player:prompt', { text: 'F — Monter dans la Falkner Crécelle GT' });
           bus.emit('net:playerJoin', { id: 'c', name: 'Inès' });
           bus.emit('chat:message', { from: 'Camille', text: `Rendez-vous ${CITY.id === 'toulouse' ? 'place du Capitole' : 'place de la Concorde'} ?` });
           bus.emit('toast', { text: 'Loyers encaissés : Ƶ 150', kind: 'success' });

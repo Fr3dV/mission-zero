@@ -122,6 +122,11 @@
 .mz-welcome.is-out { opacity: 0; pointer-events: none; }
 .mz-skywrap { position: absolute; inset: auto 0 0 44%; height: 40vh; color: rgba(var(--gold-rgb), .22); pointer-events: none; -webkit-mask-image: linear-gradient(90deg, transparent, #000 25%, #000 85%, transparent); mask-image: linear-gradient(90deg, transparent, #000 25%, #000 85%, transparent); }
 .mz-skyline { position: absolute; inset: 0; width: 100%; height: 100%; }
+/* crédit OpenStreetMap de l'accueil : bas-droite (le bas-centre est réservé au menu gamzu) */
+.mz-credit { position: absolute; right: 14px; bottom: 10px; margin: 0; z-index: 2; font-size: 11px; color: var(--mute); text-shadow: 0 1px 2px #000; }
+.mz-credit a { color: inherit; text-decoration: underline; text-underline-offset: 2px; }
+.mz-credit a:hover { color: var(--gold); }
+.mz-compact .mz-credit { right: 10px; bottom: 6px; font-size: 10px; }
 .mz-welcome-in { position: relative; width: min(1180px, 100%); margin: auto; padding: 3.5vh 6vw; display: grid; grid-template-columns: minmax(0, 590px) minmax(0, 320px); justify-content: space-between; align-items: center; gap: 5vw; }
 .mz-title { display: flex; align-items: baseline; gap: .22em; margin: 12px 0 10px; font-family: var(--serif); font-weight: 400; line-height: .92; font-size: clamp(52px, 7vw, 96px); }
 .mz-title em { font-style: italic; font-size: .5em; color: var(--gold); letter-spacing: .01em; }
@@ -343,7 +348,7 @@
 /* Zone du menu gamzu (bas-centre, 40-60 % de la largeur sur 90 px) : la plaque et la pastille GPS s'arrêtent avant, ou passent au-dessus sur fenêtre étroite */
 .mz:not(.mz-compact) .mz-bl-info { max-width: calc(40vw - 228px); }
 /* … et l'invite contextuelle, qui serait à leur hauteur, se cale sous la plaque (qui garde sa largeur : pas de nom de rue coupé)
-   et à droite de la pastille GPS (bornée à 200 px) : une invite longue, « F — Monter dans la Lamborghini Aventador », ne
+   et à droite de la pastille GPS (bornée à 200 px) : une invite longue, « F — Monter dans la Muggini Furiosa », ne
    recouvre ni l'une ni l'autre ; elle s'arrête avant le bord droit et reste au-dessus de la zone du menu gamzu. */
 @media (max-width: 1100px) {
   .mz:not(.mz-compact) .mz-bl-info { max-width: 290px; padding-bottom: 82px; }
