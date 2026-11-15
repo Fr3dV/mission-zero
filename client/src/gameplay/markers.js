@@ -1,5 +1,8 @@
 // Marqueurs 3D du monde : colonnes lumineuses, anneaux au sol et icônes flottantes.
 // Trois InstancedMesh (3 draw calls) pour TOUS les marqueurs, plus le ruban GPS (1 draw call).
+// Budget : CAP instances au plus. Les couches sont remplies par ordre de priorité (PRIORITY, puis ordre de
+// création) : si la ville en demande davantage, ce sont les à-côtés qui sautent, jamais l'objectif en cours.
+// De près (caméra à moins de NEAR_FADE mètres), colonnes et icônes s'estompent pour ne pas couvrir l'écran.
 
 export const ICON = {
   mission: 0, flag: 1, house: 2, key: 3, car: 4, garage: 5, lock: 6, camera: 7,
@@ -8,6 +11,10 @@ export const ICON = {
 
 const CAP = 256;
 const ATLAS_N = 4; // 4 x 4 cases
+const NEAR_FADE = 15; // m
+const STAR_FLAG = 10; // ajouté à la phase (aData.z) d'un marqueur « vedette » : colonne étoilée
+/** Couches servies en premier quand le budget d'instances est atteint (les autres suivent dans l'ordre de création). */
+const PRIORITY = ['objective', 'dare', 'job', 'advisor', 'personal', 'missionStarts', 'estate'];
 
 /** Atlas d'icônes dessiné au canvas. Rouge = pastille (teintée), noir = pictogramme, alpha = couverture. */
 function makeAtlas(THREE) {
@@ -101,6 +108,7 @@ export function createMarkers(ctx, opts = {}) {
         vec4 c = modelMatrix * instanceMatrix * vec4(0.0, 0.0, 0.0, 1.0);
         float d = distance(cameraPosition.xz, c.xz);
         vFade = 1.0 - smoothstep(aData.y * 0.75, aData.y, d);
+        vFade *= mix(0.1, 1.0, smoothstep(${(NEAR_FADE * 0.3).toFixed(1)}, ${NEAR_FADE.toFixed(1)}, d)); // de près : presque transparent
         vec3 p = position;
         p.xz *= 1.0 + d * 0.0035; // reste lisible de loin
         gl_Position = projectionMatrix * viewMatrix * modelMatrix * instanceMatrix * vec4(p, 1.0);
@@ -110,9 +118,20 @@ export function createMarkers(ctx, opts = {}) {
       void main() {
         float a = pow(clamp(1.0 - vUv.y, 0.0, 1.0), 1.7) * 0.62; // clamp : pow(x<0) = NaN, fatal avec le bloom HDR
         a *= 0.82 + 0.18 * sin(uTime * 2.2 + vPhase + vUv.y * 9.0);
+        vec3 c = vColor * 1.25;
+        if (vPhase >= ${(STAR_FLAG - 1).toFixed(1)}) {
+          // colonne vedette : semis d'étoiles qui montent en scintillant
+          vec2 g = vec2(vUv.x * 14.0, vUv.y * 110.0 - uTime * 1.2);
+          vec2 id = floor(g), f = fract(g) - 0.5;
+          float h = fract(sin(dot(id, vec2(12.9898, 78.233))) * 43758.5453);
+          float tw = 0.5 + 0.5 * sin(uTime * 5.0 + h * 40.0);
+          float s = step(0.72, h) * (1.0 - smoothstep(0.0, 0.34, abs(f.x) + abs(f.y))) * tw;
+          a += s * 0.95 * (1.0 - vUv.y * 0.6);
+          c = mix(c, vec3(1.6, 1.5, 1.1), s);
+        }
         a *= vFade;
         if (a < 0.004) discard;
-        gl_FragColor = vec4(vColor * 1.25, a);
+        gl_FragColor = vec4(c, a);
       }`,
   }), 20);
 
@@ -157,6 +176,7 @@ export function createMarkers(ctx, opts = {}) {
         vec4 c = modelMatrix * instanceMatrix * vec4(0.0, 0.0, 0.0, 1.0);
         float d = distance(cameraPosition, c.xyz);
         vFade = 1.0 - smoothstep(aData.y * 0.75, aData.y, d);
+        vFade *= mix(0.12, 1.0, smoothstep(${(NEAR_FADE * 0.4).toFixed(1)}, ${NEAR_FADE.toFixed(1)}, d)); // de près : presque transparente
         float size = aData.w * clamp(d / 38.0, 1.0, 16.0); // taille apparente minimale
         c.y += (size - aData.w) * 0.55 + sin(uTime * 1.6 + aData.z) * 0.25;
         vec4 mv = viewMatrix * c;
@@ -179,16 +199,23 @@ export function createMarkers(ctx, opts = {}) {
   const col = new THREE.Color();
   const zero = new THREE.Matrix4().makeScale(0, 0, 0);
 
+  let dropped = 0, warned = false;
+  const order = []; // noms de couches, par priorité
   function rebuild() {
     dirty = false;
     let n = 0;
-    for (const list of layers.values()) {
+    dropped = 0;
+    order.length = 0;
+    for (const name of PRIORITY) if (layers.has(name)) order.push(name);
+    for (const name of layers.keys()) if (!PRIORITY.includes(name)) order.push(name);
+    for (const name of order) {
+      const list = layers.get(name);
       for (const k of list) {
-        if (n >= CAP) break;
+        if (n >= CAP) { dropped++; continue; }
         const y = Number.isFinite(k.y) ? k.y : yAt(k.x, k.z);
         col.set(k.color ?? 0xffffff);
         aColor.setXYZ(n, col.r, col.g, col.b);
-        const phase = (k.x * 0.37 + k.z * 0.71) % 6.283;
+        const phase = Math.abs(k.x * 0.37 + k.z * 0.71) % 6.283 + (k.star ? STAR_FLAG : 0);
         aData.setXYZW(n, k.icon ?? 0, k.range ?? 1500, phase, k.iconSize ?? 2.2);
         const bh = k.beamH ?? 60, br = k.beamR ?? 0.9;
         if (bh > 0) { m4.makeScale(br, bh, br); m4.setPosition(k.x, y, k.z); beams.setMatrixAt(n, m4); } else beams.setMatrixAt(n, zero);
@@ -198,6 +225,7 @@ export function createMarkers(ctx, opts = {}) {
         n++;
       }
     }
+    if (dropped && !warned) { warned = true; console.warn(`[gameplay] marqueurs : budget de ${CAP} instances atteint, ${dropped} non affichés`); }
     beams.count = rings.count = icons.count = n;
     beams.instanceMatrix.needsUpdate = rings.instanceMatrix.needsUpdate = icons.instanceMatrix.needsUpdate = true;
     aColor.needsUpdate = aData.needsUpdate = true;
@@ -279,13 +307,19 @@ export function createMarkers(ctx, opts = {}) {
 
   return {
     group,
-    /** Remplace la liste de marqueurs d'une couche. item = { x, z, y?, color, icon?, radius?, beamH?, beamR?, range?, iconSize?, iconY? } */
+    /**
+     * Remplace la liste de marqueurs d'une couche.
+     * item = { x, z, y?, color, icon?, radius?, beamH?, beamR?, range?, iconSize?, iconY?, star? } (star = colonne étoilée)
+     */
     set(layer, list) { layers.set(layer, list || []); dirty = true; },
     clear(layer) { if (layers.get(layer)?.length) { layers.set(layer, []); dirty = true; } },
     setRibbon,
     clearRibbon() { ribbon.visible = false; ribGeo.setDrawRange(0, 0); },
     setRibbonColor(c) { ribColor.value.set(c); },
     get count() { return beams.count; },
+    /** Budget d'instances et nombre de marqueurs écartés au dernier remplissage (0 en temps normal). */
+    capacity: CAP,
+    get dropped() { return dropped; },
     update(dt) { uTime.value += dt; if (dirty) rebuild(); },
   };
 }

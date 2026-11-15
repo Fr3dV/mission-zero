@@ -18,7 +18,10 @@
 //    de sortir), sortie décidée à l'avance (wantExit), clignotants ;
 //  - accidents (contrat « Dégâts et impacts ») : voir crashCar / crashedTick / tryRecover ; contournement des
 //    obstacles fixes (dodge), freinage d'urgence si le joueur coupe la route ;
-//  - vol de voiture (contrat v3) : conducteur visible (vehicle.occupant) et ejectDriver.
+//  - vol de voiture (contrat v3) : conducteur visible (vehicle.occupant) et ejectDriver ;
+//  - police (contrat v6) : les unités (driver === 'police', voir police.js) sont transparentes pour le trafic : ni
+//    distance de sécurité, ni freinage d'urgence, ni accident, ni place prise à l'apparition ;
+//  - klaxon du joueur (player:horn) : les voitures arrêtées devant lui repartent si leur voie est libre (onHorn).
 import { VEHICLE_BY_ID } from '@shared/catalog.js';
 import { baseHeightAt } from '@shared/terrain.js';
 import { createCharacter } from '../player/index.js';
@@ -605,7 +608,7 @@ export function createCars(T) {
     const pv = player && player.vehicle;
     if (list) for (let i = 0; i < list.length; i++) {
       const v = list[i];
-      if (T.owner.has(v)) continue;
+      if (T.owner.has(v) || v.driver === 'police') continue; // (unité de police : elle traverse le trafic, on l'ignore)
       const dx = v.pos.x - c.x, dz = v.pos.z - c.z;
       if (dx > R || dx < -R || dz > R || dz < -R) continue;
       if (v.pos.y - cy > LEVEL || cy - v.pos.y > LEVEL) continue;
@@ -1086,6 +1089,8 @@ export function createCars(T) {
       lc: 0, lcSlope: 0, lcT: 0, curveLat: 0, wantExit: false, exit1: false, exit2: false, ringN: 0, fast: false, blink: null, blinkT: 0,
       path: new Int32Array(PATH_MAX), pathS: new Float32Array(PATH_MAX), pathOff: new Float32Array(PATH_MAX), pathV: new Float32Array(PATH_MAX), pathN: 1, offN1: 0, offN2: 0,
       yieldV: 1e9, yieldD: 1e9, yieldT: 0, yieldIgnore: 0, zN: 0, zK: new Int8Array(3), zBack: new Float32Array(3),
+      // frôlements (near.js) : suivi du point le plus proche du véhicule du joueur
+      nmArm: false, nmGap: 1e9, nmRel: 0, nmSide: 1, nmX: 0, nmZ: 0, nmT: 0, nmCd: 0, nmV: null,
     };
     cars.push(c); T.owner.set(v, c);
     return c;
@@ -1125,6 +1130,7 @@ export function createCars(T) {
     if (T.vF > 14 && (tmp.x - T.fx) * T.vdx + (tmp.z - T.fz) * T.vdz < -60 && hSpeed[h] < T.vF * 1.05) return false;
     const list = ctx.vehicles.list, clear = 16 + hSpeed[h] * 1.3;
     for (let i = 0; i < list.length; i++) {
+      if (list[i].driver === 'police') continue;
       const dx = list[i].pos.x - tmp.x, dz = list[i].pos.z - tmp.z;
       if (dx * dx + dz * dz < clear * clear && Math.abs(list[i].pos.y - y) < LEVEL) return false;
     }
@@ -1154,6 +1160,7 @@ export function createCars(T) {
   function freeSpot(x, z, y, r) {
     const list = ctx.vehicles.list;
     for (let i = 0; i < list.length; i++) {
+      if (list[i].driver === 'police') continue;
       const dx = list[i].pos.x - x, dz = list[i].pos.z - z;
       if (dx * dx + dz * dz < r * r && Math.abs(list[i].pos.y - y) < LEVEL) return false;
     }
@@ -1314,7 +1321,8 @@ export function createCars(T) {
 
   /** `vehicle:hit` : une de nos voitures a été percutée (l'impulsion est déjà appliquée par le module véhicules). */
   function onHit(e) {
-    const c = e && T.owner.get(e.vehicle);
+    if (!e || !e.vehicle || e.vehicle.driver === 'police' || (e.by && e.by.driver === 'police')) return; // la police ne provoque pas d'accident
+    const c = T.owner.get(e.vehicle);
     if (!c || c === PARKED) return;
     // simple frôlement d'une voiture à l'arrêt et vide (garée, épave) : on continue sa route
     const by = e.by;
@@ -1323,15 +1331,40 @@ export function createCars(T) {
   }
   /** `vehicle:crash` : repli si aucun `vehicle:hit` n'est émis, et alerte des piétons. */
   function onCrash(e) {
-    if (!e || !e.vehicle) return;
+    if (!e || !e.vehicle || e.vehicle.driver === 'police' || (e.other && e.other.driver === 'police')) return;
     const a = T.owner.get(e.vehicle), b = e.other && T.owner.get(e.other);
     if (a && a !== PARKED && a.mode === 0) crashCar(a, e.impact || 4, e.other, e.other && !e.vehicle.applyImpulse);
     if (b && b !== PARKED && b.mode === 0) crashCar(b, e.impact || 4, e.vehicle, !e.other.applyImpulse);
     if (T.alarm && e.impact > 5) T.alarm(e.vehicle.pos.x, e.vehicle.pos.z, e.impact, false, e.vehicle.pos.y);
   }
 
+  /**
+   * `player:horn {x, z, vehicle}` : les voitures à l'arrêt devant le joueur (30 m, même niveau) repartent si leur voie
+   * est libre — celle qui hésitait à un carrefour ou à un cédez-le-passage s'engage, celle qui attendait par politesse
+   * démarre. Une voiture bloquée par un obstacle (file, piéton, joueur) ne bouge pas : la détection reste active.
+   */
+  function onHorn(e) {
+    if (!e || !isFinite(e.x) || !isFinite(e.z)) return;
+    const hv = e.vehicle, hy = hv && hv.pos ? hv.pos.y : T.fy;
+    const hfx = hv ? -Math.sin(hv.yaw) : 0, hfz = hv ? -Math.cos(hv.yaw) : 0;
+    for (let i = 0; i < cars.length; i++) {
+      const c = cars[i];
+      if (!c.active || c.mode !== 0 || c.speed > 0.6 || c.y - hy > LEVEL || hy - c.y > LEVEL) continue;
+      const dx = c.x - e.x, dz = c.z - e.z;
+      if (dx * dx + dz * dz > 900) continue;
+      if (hv) { // devant le capot du joueur, dans un couloir de 12 m de large
+        const f = dx * hfx + dz * hfz, l = dz * hfx - dx * hfz;
+        if (f < 1 || l > 6 || l < -6) continue;
+      }
+      if (c.gap < 6) continue; // voie occupée
+      c.holdT = 0; c.emergT = 0;
+      if (c.waitT > 0) c.waitT = WAIT_MAX + 1;    // carrefour à réservation : elle passe au prochain pas
+      if (c.yieldD < 1e8) c.yieldIgnore = 2.5;    // cédez-le-passage : elle s'engage
+    }
+  }
+
   return {
-    update, onCrash, onHit, crashCar, ejectDriver, carWeight, states: cars, active, parked, loose,
+    update, onCrash, onHit, onHorn, crashCar, ejectDriver, carWeight, states: cars, active, parked, loose,
     setTargets(nCars, nParked) { targetCars = nCars; targetParked = nParked; },
     get activeCount() { return activeCount; },
     dispose() { while (cars.length) destroy(cars[cars.length - 1]); for (const p of parked) { T.owner.delete(p.v); ctx.vehicles.remove(p.v); } parked.length = 0; },

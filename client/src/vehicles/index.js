@@ -1,7 +1,7 @@
 // Module « véhicules » : modèles procéduraux, physique arcade, collisions, effets.
 // Contrat : voir docs/ARCHITECTURE.md (ctx.vehicles / vehicle).
 import { VEHICLE_BY_ID } from '@shared/catalog.js';
-import { createMesh, getCarGeometry } from './models.js';
+import { createMesh, getCarGeometry, PLATE_COUNT } from './models.js';
 import { initPhysics, stepVehicle, collideVehicles, applyImpulse, resetVertical, SAFE_DROP_V } from './physics.js';
 import { initDamage, applyDamage, repairDamage, disposeDamage, IMPACT_MIN } from './damage.js';
 import { createEffects } from './effects.js';
@@ -19,6 +19,11 @@ export function createVehicles(ctx) {
   bus.on('env:time', (e) => { night = !!e?.night; });
   const LOD_DIST = ctx.quality === 'low' ? 18 : ctx.quality === 'medium' ? 30 : 42;
   const FX_DIST = 140;
+  const LAND_MIN_T = 0.25;      // durée de vol (s) à partir de laquelle une réception émet vehicle:landed
+  // Plaques : la plaque par défaut d'un modèle (info.plate) est réservée à la voiture personnelle du joueur ; toutes les
+  // autres voitures (trafic, stationnement, missions, joueurs distants) tournent sur les plaques restantes de l'atlas.
+  let plateSeq = 0;
+  const otherPlate = (own) => { const k = plateSeq++ % (PLATE_COUNT - 1); return k >= own ? k + 1 : k; };
 
   const isDynamic = (v) => !v.remote && !(v.phys.kinT > ctx.time);
 
@@ -37,6 +42,13 @@ export function createVehicles(ctx) {
       controls: { throttle: 0, brake: 0, steer: 0, handbrake: false },
       // champs étendus (audio, HUD, gameplay) : rpm 0..1, gear (-1 = R, 0 = N, 1..n), slip 0..1, damage 0..1
       rpm: 0, gear: 0, slip: 0, damage: 0,
+      // télémétrie de style (contrat v6), lue chaque image par le gameplay et la caméra :
+      //   driftAngle : angle de dérive lissé (rad) = atan2(vitesse latérale, |vitesse longitudinale|), 0 sous 3 m/s ;
+      //                > 0 = la voiture glisse vers sa droite (dérive en virage à gauche), < 0 = vers sa gauche ;
+      //   airborne   : roues décollées (saut, chute). Toujours 0 / false pour un véhicule cinématique ou distant.
+      driftAngle: 0, airborne: false,
+      // gyrophare (opts.beacon, setBeacon) et plaque d'immatriculation (index dans l'atlas, opts.plate)
+      beacon: false, plate: 0,
       // dégâts (contrat v2) : mass (kg), damageZones {front, rear, left, right} 0..1, wrecked, scrape 0..1 (raclement en cours)
       mass: 1500, damageZones: null, wrecked: false, scrape: 0,
       /** Impulsion monde (N·s) ; point d'application monde optionnel → lacet. */
@@ -48,9 +60,14 @@ export function createVehicles(ctx) {
       setControls(c) { if (c) Object.assign(v.controls, c); },
       /** y (optionnel) : hauteur de la chaussée au niveau voulu ; absent = on reste sur le niveau courant. */
       setTransform(nx, nz, nyaw, speed = 0, y) { setTransform(v, nx, nz, nyaw, speed, y); },
+      /** Allume ou éteint le gyrophare (deux feux bleus alternés sur le toit ; aucun éclairage dynamique). */
+      setBeacon(on) { v.beacon = !!on; group.userData.setBeacon(v.beacon); },
+      /** Change la plaque d'immatriculation (index 0..PLATE_COUNT-1 dans l'atlas). */
+      setPlate(i) { group.userData.setPlate(i); v.plate = group.userData.plate; },
       update(dt) { simulate(v, dt); },
     };
     initPhysics(v, geo.info, geo.def);
+    if (v.remote) v.phys.sleeping = false;                  // un véhicule cinématique (trafic, réseau, police) n'est jamais endormi
     v.vis = {
       info: geo.info, roll: 0, rollV: 0, pitch: 0, pitchV: 0, heave: 0, tPitch: 0, tRoll: 0, placed: false,
       born: ctx.time || 0, lightKey: -1, hazardT: 0, lastSpeed: 0, accel: 0, lod: false, net: null, lastSetT: -1, setDt: 1,
@@ -58,6 +75,8 @@ export function createVehicles(ctx) {
       ry: 0, sim: false, yGiven: opts.remote && Number.isFinite(opts.y) ? opts.y : null, heave: 0, heaveV: 0,
     };
     initDamage(v);
+    v.setPlate(Number.isInteger(opts.plate) ? opts.plate : otherPlate(geo.info.plate));
+    if (opts.beacon) v.setBeacon(true);
     place(v, 0, true);
     scene.add(group);
     list.push(v);
@@ -126,7 +145,8 @@ export function createVehicles(ctx) {
     s.lightKey = -1;
     if (!dyn) {
       // véhicule distant / IA percuté : le trafic décide de le rendre dynamique ; l'impulsion reste en attente un court instant
-      p.pending = { ix: h.ix || 0, iz: h.iz || 0, x: h.x, z: h.z, t: ctx.time };
+      // (jamais pour une unité de police, qui reste cinématique quoi qu'il arrive : aucun état en attente)
+      p.pending = v.driver === 'police' ? null : { ix: h.ix || 0, iz: h.iz || 0, x: h.x, z: h.z, t: ctx.time };
       bus.emit('vehicle:hit', { vehicle: v, by: h.other || null, impact: h.impact, ix: h.ix || 0, iz: h.iz || 0, x: h.x, z: h.z });
       return;
     }
@@ -143,8 +163,10 @@ export function createVehicles(ctx) {
   function simulate(v, dt) {
     const p = v.phys, s = v.vis;
     if (p.crashT > 0) p.crashT -= dt;
+    // impulsion en attente périmée (véhicule percuté resté cinématique) : oubliée
+    if (p.pending && ctx.time - p.pending.t >= 0.6) p.pending = null;
     if (v.remote) {
-      s.sim = false;
+      s.sim = false; v.driftAngle = 0; v.airborne = false;
       const n = s.net;
       if (n && !n.direct) {
         // extrapolation de la cible + rattrapage exponentiel
@@ -158,7 +180,7 @@ export function createVehicles(ctx) {
       v.rpm = clamp(Math.abs(v.speed) / v.spec.maxSpeed, 0, 1); v.gear = v.speed < -0.3 ? -1 : 1;
       return;
     }
-    if (p.kinT > ctx.time) { s.sim = false; return; }
+    if (p.kinT > ctx.time) { s.sim = false; v.driftAngle = 0; v.airborne = false; return; }
     // passage cinématique → dynamique (voiture IA rendue au joueur, réveil) : l'état vertical repart de la hauteur courante
     if (!s.sim) { s.yGiven = null; resetVertical(v); }
     // percuté alors qu'il était cinématique, puis rendu dynamique par le trafic : l'impulsion en attente s'applique
@@ -168,6 +190,8 @@ export function createVehicles(ctx) {
     s.sim = !p.sleeping;
     v.scrape = p.scrape;
     if (p.hit) { const h = p.hit; p.hit = null; registerHit(v, h, true); }
+    // réception d'un saut ou d'une chute d'au moins 0,25 s (même sans dégât) : durée et distance du vol, vitesse verticale absorbée
+    if (p.landT >= LAND_MIN_T) bus.emit('vehicle:landed', { vehicle: v, airTime: p.landT, landV: p.landV, dist: p.landD });
     if (p.landV > 0) landing(v, p.landV);
     if (p.scrape > 0.3 && s.dist < 80 && Math.random() < dt * 30 * p.scrape) fx.sparks(p.scrapeX, v.pos.y + 0.4, p.scrapeZ, v.vel.x, v.vel.z, 2);
     if (!p.sleeping || !wasSleeping) s.placed = false;
@@ -307,6 +331,12 @@ export function createVehicles(ctx) {
       ud.setLights({ head: head ? 1 : 0, drl: hasDriver ? 1 : 0, brake: braking ? 1 : 0, reverse: reverse ? 1 : 0, blinkL: bl ? 1 : 0, blinkR: br ? 1 : 0, sign: v.typeId === 'taxi' ? (night ? 1 : 0.25) : 0 });
     }
 
+    // gyrophare : deux éclats brefs d'un côté, puis de l'autre (cycle de 0,6 s, décalé d'une voiture à l'autre)
+    if (v.beacon && !lod) {
+      const ph = ((ctx.time - s.born) * 1.65) % 1, q = (ph * 2) % 1, on = q < 0.3 || (q > 0.45 && q < 0.75) ? 1 : 0;
+      ud.flashBeacon(ph < 0.5 ? on : 0, ph < 0.5 ? 0 : on);
+    }
+
     if (dist > FX_DIST) return;
     // ombre de contact : sur le sol du niveau courant (sous la voiture quand elle est en l'air)
     const airborne = s.sim && p.gap > 0.02;
@@ -399,8 +429,11 @@ export function createVehicles(ctx) {
     const camX = camera.position.x, camZ = camera.position.z;
     const pv = ctx.player?.vehicle;
     const localV = pv && pv.driver === 'local' ? pv : null;
+    const own = ctx.gameplay?.personalCar || null;           // voiture personnelle du joueur (créée par le gameplay)
     for (let i = 0; i < list.length; i++) {
       const v = list[i];
+      // la voiture personnelle porte la plaque de son modèle, qu'aucune autre voiture ne reçoit
+      if ((v === own || v.personal === true) && v.plate !== v.vis.info.plate) v.setPlate(v.vis.info.plate);
       if (!v.group.visible) continue;
       // un choc voiture↔voiture a pu déplacer un véhicule endormi
       if (!v.phys.sleeping) v.vis.placed = false;

@@ -234,7 +234,8 @@ export function createDamage(ctx, { props, veg, uniforms, terraces }) {
     let nd = 0; for (const b of broken) if (b.obj) nd++;
     for (let i = 0; nd > MAX_DYN && i < broken.length; i++) if (broken[i].obj) { dropObj(broken[i]); nd--; }
     while (broken.length > MAX_BROKEN) repair(0);
-    bus.emit('world:propBroken', { tag, x: d.x, z: d.z, energy: E });
+    // contrat v6 : le type d'objet (d.type, 'terrasse' compris) et le véhicule en cause (celui passé à onImpact, sinon null)
+    bus.emit('world:propBroken', { tag, kind: d.type, x: d.x, z: d.z, energy: E, vehicle: e?.vehicle || null });
   }
   function dropObj(b) {
     if (!b.obj) return;
@@ -263,7 +264,7 @@ export function createDamage(ctx, { props, veg, uniforms, terraces }) {
 
   // ------------------------------------------------------------ onImpact
   let lastWall = -9, lastHitEvt = -9;
-  function hitEvent(tag, e, E) { if (ctx.time - lastHitEvt > 0.25) { lastHitEvt = ctx.time; bus.emit('world:propHit', { tag, x: e.x, z: e.z, energy: E }); } }
+  function hitEvent(tag, e, E, d) { if (ctx.time - lastHitEvt > 0.25) { lastHitEvt = ctx.time; bus.emit('world:propHit', { tag, kind: d?.type || null, x: e.x, z: e.z, energy: E, vehicle: e?.vehicle || null }); } }
   function onImpact(e) {
     if (!e) return FIXED;
     const s = e.shape, d = s?.data, tag = e.tag || s?.tag || '';
@@ -273,7 +274,7 @@ export function createDamage(ctx, { props, veg, uniforms, terraces }) {
       if (speed > 3.5 && now - lastWall > 0.35 && (tag === 'building' || tag === 'parapet' || tag === 'metro' || tag === 'monument')) {
         lastWall = now; markShape(s, e, Math.min(1.3, 0.4 + speed * 0.05));
         emit(tag === 'metro' ? 4 : 3, e.x, heightAt(e.x, e.z) + 0.7, e.z, Math.min(14, 3 + speed), 0.5, -e.dirX * speed, 0, -e.dirZ * speed);
-        hitEvent(tag, e, E);
+        hitEvent(tag, e, E, d);
       }
       return FIXED;
     }
@@ -299,7 +300,7 @@ export function createDamage(ctx, { props, veg, uniforms, terraces }) {
       } else {
         wobble(d, mesh, d.i, dir, 0.02 + 0.05 * (E / Eb), E > Eb * 0.35 ? 0.05 * (E / Eb) : 0);
         if (E > Eb * 0.5) emit(1, d.x, d.y + 4.9, d.z, 4, 0.2, 0, 0, 0);
-        hitEvent(tag, e, E);
+        hitEvent(tag, e, E, d);
         res = { broke: false, absorb: Math.min(1, E / Eb) };
       }
     } else if (d.type === 'tree') {
@@ -321,7 +322,7 @@ export function createDamage(ctx, { props, veg, uniforms, terraces }) {
         register(d, s, tag, obj, () => { setInst(grp.near, d.j, m0); removeStump(st); }, 3, e, E);
         res = { broke: true, absorb: 0.08 + 0.07 * Math.min(1, Math.max(0, (d.scale - 0.65) / 0.55)) };
       } else {
-        if (speed > 1.2) { wobble(d, grp.near, d.j, dir, 0.012 * (0.4 + E / Eb), 0); emit(0, d.x, top, d.z, 8, 6 * d.scale, 0, 0, 0); hitEvent(tag, e, E); }
+        if (speed > 1.2) { wobble(d, grp.near, d.j, dir, 0.012 * (0.4 + E / Eb), 0); emit(0, d.x, top, d.z, 8, 6 * d.scale, 0, 0, 0); hitEvent(tag, e, E, d); }
         res = FIXED;
       }
     } else if (d.type === 'terrasse') {
@@ -350,11 +351,11 @@ export function createDamage(ctx, { props, veg, uniforms, terraces }) {
         register(d, s, tag, obj, () => restoreRange(d), 1.5, e, E);
         res = { broke: true, absorb: ABSORB[d.type] || 0.04 };
       } else if (Eb) {
-        hitEvent(tag, e, E);
+        hitEvent(tag, e, E, d);
         res = { broke: false, absorb: Math.min(1, E / Eb) };
       } else {
         if (E > 60000) { tiltRange(d, dir, 0.012 + 0.03 * Math.min(1, E / 250000)); emit(4, e.x, d.y + 0.9, e.z, 8, 0.5, -dir.dirX * speed, 0, -dir.dirZ * speed); markShape(s, dir, 0.6); if (!d.dented) { d.dented = true; broken.push({ d, shape: null, tag, x: d.x, z: d.z, r: 0, t: now, obj: null, restore: () => { restoreRange(d); d.tx = 0; d.dented = false; } }); } }
-        if (speed > 3) hitEvent(tag, e, E);
+        if (speed > 3) hitEvent(tag, e, E, d);
         res = FIXED;
       }
     }

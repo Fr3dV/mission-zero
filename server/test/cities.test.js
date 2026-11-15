@@ -185,7 +185,7 @@ test("économie : mission et bien d'une autre ville refusés ; argent et voiture
     await a.close();
 
     // ids piégés : jamais pris pour une mission, un bien ou une voiture
-    const b = await join(app, { name: 'Malin', room: 'eco' });
+    const b = await join(app, { name: 'Malin', room: 'eco', token: seedPlayer(store, { name: 'Malin', money: STARTING_MONEY }).token });
     for (const id of ['constructor', '__proto__', 'toString', 'hasOwnProperty']) {
       assert.equal((await b.ask('mission_start', { id }, 'mission_result')).code, 'unknown_mission', id);
       assert.equal((await b.ask('buy_prop', { id }, 'error')).code, 'unknown_property', id);
@@ -221,15 +221,15 @@ test("persistance : une salle de Paris d'avant le multi-villes est retrouvée so
   assert.deepEqual(t.welcome.lb.map((e) => e.name), ['Tom']);
   await app.close();
 
-  assert.deepEqual([...store.rooms.keys()].sort(), ['amis', 'toulouse:amis']);
-  const paris = await store.getRoom('amis'), tls = await store.getRoom('toulouse:amis');
+  // la salle de Toulouse n'a vu passer qu'un compte tout neuf qui n'a rien fait : ni elle ni lui ne sont écrits
+  assert.deepEqual([...store.rooms.keys()].sort(), ['amis']);
+  assert.equal(await store.getPlayer(t.welcome.id), null);
+  const paris = await store.getRoom('amis');
   assert.equal(paris.code, 'amis');
   assert.equal(paris.createdAt, legacy.createdAt);
   assert.deepEqual(paris.owners, legacy.owners, 'aucun bien perdu ni réattribué');
   assert.deepEqual(paris.members.pabsent000000000, legacy.members.pabsent000000000);
   assert.equal(paris.city, 'paris');
-  assert.deepEqual([tls.code, tls.city, tls.room], ['toulouse:amis', 'toulouse', 'amis']);
-  assert.deepEqual(tls.owners, {});
   // le profil n'a changé que par ses champs vivants (lastSeen, temps de jeu) : même jeton, même argent, mêmes voitures
   const now = await store.getPlayer(alice.id), was = JSON.parse(before);
   for (const k of ['id', 'tokenHash', 'money', 'cars', 'activeCar', 'cooldowns']) assert.deepEqual(now[k], was[k], k);

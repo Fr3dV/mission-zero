@@ -7,10 +7,11 @@ import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import * as M from './missions.js';
 import * as P from './properties.js';
-import { LEVELS as BASE_LEVELS, MISSION_TYPES, STEP_KINDS, PROPERTY_KINDS, SELL_BACK_RATIO, levelForMissionsDone, missionPathLength, missionRouteLength, missionMinDuration, missionHasMeasuredRoute } from './content-core.js';
+import { LEVELS as BASE_LEVELS, MISSION_TYPES, STEP_KINDS, PROPERTY_KINDS, SELL_BACK_RATIO, LEGEND_STAR_EVERY, starsFor, levelForMissionsDone, missionPathLength, missionRouteLength, missionMinDuration, missionHasMeasuredRoute } from './content-core.js';
 import { CITIES, CITY_ID, CITY_IDS, geoFor } from './cities.js';
 import { LANDMARKS_BY_CITY } from './landmarks.js';
-import { VEHICLES, VEHICLE_BY_ID, STARTING_MONEY } from './catalog.js';
+import { VEHICLES, VEHICLE_BY_ID, STARTING_MONEY, PAINTS, PAINT_BY_COLOR, HORNS, HORN_BY_ID } from './catalog.js';
+import { JOB_MIN_M, JOB_MAX_M } from './jobs.js';
 import * as PARIS_PLACES from './cities/paris/places.js';
 import * as TOULOUSE_PLACES from './cities/toulouse/places.js';
 import { MISSING_LANDMARKS as PARIS_MISSING } from './cities/paris/missions.js';
@@ -19,10 +20,33 @@ import { MISSING_LANDMARKS as TOULOUSE_MISSING } from './cities/toulouse/mission
 const PLACES = { paris: PARIS_PLACES, toulouse: TOULOUSE_PLACES };
 const MISSING = { paris: PARIS_MISSING, toulouse: TOULOUSE_MISSING };
 // Attendus par ville : volumes, fourchettes de prix et de récompenses, préfixe des ids.
+//   first = mission d'index 0 (lue par index dans server/test) ; historic = ids d'avant le contrat v6, dans l'ordre ;
+//   intro = mission d'introduction ; returns = missions « retour » ajoutées au pied de l'arrivée de `from` ;
+//   minRdv = nombre minimal de points de rendez-vous.
 const EXPECT = {
-  paris: { minMissions: 20, maxReward: 60000, props: [28, 40], price: [15000, 5000000], idPrefix: null },
-  toulouse: { minMissions: 24, maxReward: 80000, props: [30, 40], price: [12000, 2500000], idPrefix: 'tls_' },
+  paris: {
+    minMissions: 20, maxReward: 60000, props: [28, 40], price: [15000, 5000000], idPrefix: null,
+    first: 'croissants_elysee', intro: 'premiers_tours_de_roue', minRdv: 40,
+    returns: { from: 'livraison_eiffel', ids: ['retour_tour_eiffel', 'souvenirs_grand_palais'] },
+    historic: ['croissants_elysee', 'livraison_eiffel', 'taxi_touristes', 'photo_concorde', 'taxi_gare', 'clm_champs', 'coursier_rive_gauche', 'taxi_opera_louvre', 'tour_ouest', 'voiturier_ritz', 'tour_ponts', 'photo_montmartre', 'visite_guidee', 'fleurs_montmartre', 'coursier_grands_magasins', 'convoi_tesla', 'gp_rive_droite', 'taxi_vip_mode', 'poursuite_ballon', 'photo_grands_classiques', 'convoi_porsche', 'grand_tour', 'coursier_nuit_blanche', 'boucle_seine', 'convoi_aventador', 'cortege_officiel', 'gp_mission_zero'],
+  },
+  toulouse: {
+    minMissions: 24, maxReward: 80000, props: [30, 40], price: [12000, 2500000], idPrefix: 'tls_',
+    first: 'tls_chocolatines_capitole', intro: 'tls_premiers_tours_de_roue', minRdv: 60,
+    returns: { from: 'tls_photo_ville_rose', ids: ['tls_retour_matabiau', 'tls_fenetra_victor_hugo'] },
+    historic: ['tls_chocolatines_capitole', 'tls_taxi_matabiau', 'tls_photo_ville_rose', 'tls_violettes_wilson', 'tls_saucisse_saint_pierre', 'tls_clm_boulevards', 'tls_coursier_marches', 'tls_taxi_purpan', 'tls_tour_ponts', 'tls_voiturier_capitole', 'tls_supporters_stadium', 'tls_navette_mirail', 'tls_navette_paul_sabatier', 'tls_canal_ecluses', 'tls_photo_garonne', 'tls_cassoulet_balma', 'tls_supporters_wallon', 'tls_coursier_violettes', 'tls_montee_pech_david', 'tls_taxi_aeroport', 'tls_convoi_tesla', 'tls_photo_espace', 'tls_poursuite_ballon', 'tls_gp_garonne', 'tls_taxi_star_zenith', 'tls_convoi_pieces_avion', 'tls_convoi_porsche', 'tls_photo_fusee_avion', 'tls_grand_tour', 'tls_coursier_ouest', 'tls_tour_rocade', 'tls_convoi_aventador', 'tls_cortege_spatial'],
+  },
 };
+/** Plafond de missions par ville : le budget de S.PROFILE (3 300 octets, une entrée de cooldown par mission) le suppose. */
+const MAX_MISSIONS_PER_CITY = 36;
+/** Niveau 1 : distance maximale PAR LA ROUTE (m) entre une arrivée et le départ de niveau 1 le plus proche. */
+const NEXT_START_ROAD_MAX = 700;
+/** Niveau 1 : au-delà de L1_DETOUR_FREE_M mètres de route, un parcours ne dépasse pas L1_DETOUR_MAX × son vol d'oiseau. */
+const L1_DETOUR_FREE_M = 2000, L1_DETOUR_MAX = 2.5;
+/** Conditions de déblocage connues de economy.unlocked() (contrat v6). */
+const UNLOCK_KEYS = ['level', 'streak', 'fares', 'escapes', 'dares', 'combo', 'stars'];
+const unlockOk = (u) => u && typeof u === 'object' && Object.keys(u).length === 1 && UNLOCK_KEYS.includes(Object.keys(u)[0]) && Number.isInteger(Object.values(u)[0]) && Object.values(u)[0] > 0;
+const dist = (a, b) => Math.hypot(a.x - b.x, a.z - b.z);
 const MAX_SPEED = Math.max(...VEHICLES.map((v) => v.maxSpeed));
 const isNum = (v) => typeof v === 'number' && Number.isFinite(v);
 const inBounds = (b, p) => p.x >= b.minX && p.x <= b.maxX && p.z >= b.minZ && p.z <= b.maxZ;
@@ -51,6 +75,7 @@ test('sélecteurs : ville courante, tables toutes villes, ids uniques globalemen
     concessions: CITY_IDS.flatMap((c) => PLACES[c].DEALERS.map((d) => d.id)),
     parkings: CITY_IDS.flatMap((c) => PLACES[c].PUBLIC_GARAGES.map((d) => d.id)),
     collection: CITY_IDS.flatMap((c) => PLACES[c].COLLECTIBLES.map((d) => d.id)),
+    'rendez-vous': CITY_IDS.flatMap((c) => PLACES[c].RDV_POINTS.map((d) => d.id)),
   };
   for (const [name, ids] of Object.entries(families)) {
     const dup = ids.filter((id, i) => ids.indexOf(id) !== i);
@@ -94,6 +119,77 @@ test('progression : niveaux globaux', () => {
   M.LEVELS.forEach((l, i) => { assert.equal(l.level, BASE_LEVELS[i].level); assert.equal(l.missionsDone, BASE_LEVELS[i].missionsDone); });
   assert.ok(SELL_BACK_RATIO > 0 && SELL_BACK_RATIO < 1);
   assert.equal(P.SELL_BACK_RATIO, SELL_BACK_RATIO);
+  // les seuils de niveau sont historiques (profils serveur) : le contrat v6 n'y touche pas
+  assert.deepEqual(BASE_LEVELS.map((l) => [l.level, l.missionsDone, l.title]), [[1, 0, 'Stagiaire'], [2, 3, 'Coursier'], [3, 8, 'Chauffeur'], [4, 15, 'Pilote'], [5, 25, 'As du volant'], [6, 40, 'Légende']]);
+});
+
+test('progression : étoiles de Légende (contrat v6)', () => {
+  assert.equal(LEGEND_STAR_EVERY, 20);
+  assert.equal(M.starsFor, starsFor, 'shared/missions.js réexporte starsFor');
+  assert.equal(M.LEGEND_STAR_EVERY, LEGEND_STAR_EVERY);
+  const last = BASE_LEVELS.at(-1).missionsDone;
+  for (const [n, stars] of [[0, 0], [39, 0], [40, 0], [59, 0], [60, 1], [79, 1], [80, 2], [100, 3], [1040, 50]]) assert.equal(starsFor(n), stars, `starsFor(${n})`);
+  for (let n = 0; n < 400; n++) {
+    assert.equal(starsFor(n), Math.max(0, Math.floor((n - last) / LEGEND_STAR_EVERY)));
+    assert.ok(starsFor(n + 1) >= starsFor(n), 'les étoiles ne décroissent jamais');
+    if (starsFor(n) > 0) assert.equal(levelForMissionsDone(n), BASE_LEVELS.length, 'pas d\'étoile avant le dernier niveau');
+  }
+  // entrées douteuses (profil incomplet, valeur réseau) : jamais NaN ni négatif
+  for (const bad of [undefined, null, NaN, -5, 'abc', {}, Infinity]) assert.equal(starsFor(bad), 0, `starsFor(${String(bad)})`);
+  assert.equal(starsFor(), 0);
+  assert.equal(starsFor('60'), 1);
+});
+
+test("catalogue : véhicules inchangés, teintes et klaxons de l'Atelier (contrat v6)", () => {
+  // aucun id ni prix de véhicule ne bouge (garages et profils serveur)
+  assert.deepEqual(VEHICLES.map((v) => [v.id, v.price]), [['citadine', 0], ['taxi', 12000], ['tesla_model3', 45000], ['tesla_models', 110000], ['tesla_cybertruck', 95000], ['porsche_911', 230000], ['porsche_taycan', 160000], ['porsche_cayenne', 105000], ['lambo_huracan', 260000], ['lambo_aventador', 450000], ['lambo_urus', 240000]]);
+
+  // ---- teintes : nuancier fermé de 12, dont 4 exclusives ----
+  assert.equal(PAINTS.length, 12);
+  assert.equal(new Set(PAINTS.map((p) => p.id)).size, 12, 'ids de teinte en double');
+  assert.equal(new Set(PAINTS.map((p) => p.color)).size, 12, 'teintes en double');
+  assert.equal(new Set(PAINTS.map((p) => p.name)).size, 12, 'noms de teinte en double');
+  const catalogColors = new Set(VEHICLES.flatMap((v) => v.colors));
+  for (const p of PAINTS) {
+    const where = `teinte ${p.id}`;
+    assert.ok(/^[a-z0-9_]+$/.test(p.id), `${where}: id`);
+    assert.ok(typeof p.name === 'string' && p.name.length > 2, `${where}: name`);
+    assert.ok(/^#[0-9a-f]{6}$/.test(p.color), `${where}: format #rrggbb en minuscules (${p.color})`);
+    assert.ok(!catalogColors.has(p.color), `${where}: doublon d'une teinte catalogue (spec.colors)`);
+    assert.equal(PAINT_BY_COLOR[p.color], p, `${where}: PAINT_BY_COLOR`);
+    assert.deepEqual(Object.keys(p).sort(), p.unlock ? ['color', 'id', 'name', 'price', 'unlock'] : ['color', 'id', 'name', 'price'], `${where}: champs`);
+    if (p.unlock) { assert.ok(unlockOk(p.unlock), `${where}: unlock inconnu ${JSON.stringify(p.unlock)}`); assert.equal(p.price, 0, `${where}: une exclusive est gratuite`); }
+    else assert.equal(p.price, 1500, `${where}: prix du nuancier`);
+  }
+  for (const v of VEHICLES) for (const c of v.colors) assert.ok(/^#[0-9a-f]{6}$/.test(c), `${v.id}: teinte catalogue ${c}`);
+  assert.equal(Object.keys(PAINT_BY_COLOR).length, 12);
+  assert.deepEqual(PAINTS.filter((p) => p.unlock).map((p) => p.unlock), [{ streak: 5 }, { combo: 10000 }, { level: 6 }, { stars: 3 }]);
+  assert.equal(PAINTS.filter((p) => !p.unlock).length, 8);
+
+  // ---- klaxons : 9, ids et conditions du contrat, mélodie de 2 s au plus ----
+  const expected = { std: undefined, pouet: { level: 2 }, deuxtons: { fares: 10 }, cocorico: { streak: 3 }, cucaracha: { dares: 1 }, camion: { escapes: 1 }, secanto: { level: 4 }, fanfare: { combo: 5000 }, legende: { stars: 1 } };
+  assert.deepEqual(HORNS.map((h) => h.id), Object.keys(expected));
+  assert.equal(new Set(HORNS.map((h) => h.name)).size, HORNS.length, 'noms de klaxon en double');
+  for (const h of HORNS) {
+    const where = `klaxon ${h.id}`;
+    assert.equal(HORN_BY_ID[h.id], h, `${where}: HORN_BY_ID`);
+    assert.ok(typeof h.name === 'string' && h.name.length > 2, `${where}: name`);
+    assert.deepEqual(h.unlock, expected[h.id], `${where}: unlock`);
+    if (h.unlock) assert.ok(unlockOk(h.unlock), `${where}: unlock inconnu`);
+    assert.deepEqual(Object.keys(h).sort(), h.unlock ? ['id', 'name', 'notes', 'unlock'] : ['id', 'name', 'notes'], `${where}: champs`);
+    assert.ok(Array.isArray(h.notes) && h.notes.length >= 1 && h.notes.length <= 16, `${where}: notes`);
+    let total = 0;
+    for (const n of h.notes) {
+      assert.ok(Array.isArray(n) && n.length === 2, `${where}: note [Hz, s]`);
+      assert.ok(isNum(n[0]) && n[0] >= 100 && n[0] <= 2000, `${where}: fréquence ${n[0]} Hz hors de la plage audible d'un klaxon`);
+      assert.ok(isNum(n[1]) && n[1] >= 0.05 && n[1] <= 1, `${where}: durée de note ${n[1]} s`);
+      total += n[1];
+    }
+    assert.ok(total <= 2 + 1e-9, `${where}: ${total.toFixed(2)} s (2 s au plus)`);
+  }
+  assert.equal(Object.keys(HORN_BY_ID).length, 9);
+  // tout ce qui se débloque par le niveau reste atteignable
+  for (const o of [...PAINTS, ...HORNS]) if (o.unlock?.level) assert.ok(o.unlock.level <= BASE_LEVELS.length, `${o.id}: niveau ${o.unlock.level} inexistant`);
 });
 
 for (const city of CITY_IDS) {
@@ -254,10 +350,104 @@ for (const city of CITY_IDS) {
     for (const [name, q] of Object.entries(places.PLACE)) assert.ok(isNum(q.x) && isNum(q.z) && inBounds(BOUNDS, q), `repère ${name} hors carte`);
   });
 
+  test(`${city} — missions : ids historiques, plafond, mission d'introduction, missions « retour » (contrat v6)`, () => {
+    // les missions d'avant le contrat v6 gardent leur id ET leur rang (server/test lit MISSIONS_BY_CITY[ville][0]) :
+    // les nouvelles sont ajoutées après
+    assert.equal(MISSIONS[0].id, exp.first);
+    assert.equal(MISSIONS[0].level, 1);
+    assert.deepEqual(MISSIONS.slice(0, exp.historic.length).map((m) => m.id), exp.historic, 'ids historiques renommés, supprimés ou déplacés');
+    assert.ok(MISSIONS.length <= MAX_MISSIONS_PER_CITY, `${MISSIONS.length} missions : le budget de S.PROFILE en suppose ${MAX_MISSIONS_PER_CITY} au plus`);
+    const byId = Object.fromEntries(MISSIONS.map((m) => [m.id, m]));
+    const l1 = MISSIONS.filter((m) => m.level === 1);
+    const last = (m) => m.steps.at(-1);
+
+    // ---- introduction : exactement une, de niveau 1, en voiture, au pied du point d'apparition ----
+    const intros = MISSIONS.filter((m) => 'intro' in m);
+    assert.deepEqual(intros.map((m) => m.id), [exp.intro], 'exactement une mission intro par ville');
+    const intro = intros[0];
+    assert.equal(intro.intro, true);
+    assert.equal(intro.level, 1);
+    assert.equal(intro.type, 'taxi');
+    assert.equal(intro.requireVehicle, true, "l'intro se fait en voiture");
+    assert.ok(!intro.vehicle && !intro.vehicleMinPrice && !intro.maxDamage && !intro.timeLimitSec && !intro.legTimeSec, "l'intro se joue avec la Citadine, sans chrono ni casse éliminatoire");
+    assert.ok(dist(intro.start, places.SPAWN) < 150, `intro à ${dist(intro.start, places.SPAWN).toFixed(0)} m du point d'apparition`);
+    assert.ok(intro.reward >= 900 && intro.reward <= 1300, `intro: gain ${intro.reward}`);
+    assert.ok(missionHasMeasuredRoute(intro), 'intro: distance routière mesurée (ROUTE_M)');
+    const introLen = missionRouteLength(intro);
+    assert.ok(introLen >= 800 && introLen <= 1200, `intro: ${introLen.toFixed(0)} m par la route (800 à 1 200)`);
+    assert.ok(MISSIONS.indexOf(intro) >= exp.historic.length, "l'intro est ajoutée après les missions historiques");
+
+    // ---- missions « retour » : au pied de l'arrivée d'une mission qui laissait le joueur loin de tout ----
+    const from = byId[exp.returns.from];
+    assert.ok(from && from.level === 1, `mission ${exp.returns.from}`);
+    const rets = exp.returns.ids.map((id) => byId[id]);
+    assert.ok(rets.every(Boolean), 'missions retour manquantes');
+    assert.deepEqual(rets.map((m) => m.type).sort(), ['delivery', 'taxi'], 'un retour en taxi, un retour en livraison');
+    for (const m of rets) {
+      const where = `mission ${m.id}`;
+      assert.equal(m.level, 1, where);
+      assert.ok(m.reward >= 800 && m.reward <= 1500, `${where}: gain ${m.reward} hors de la fourchette du niveau 1`);
+      assert.ok(dist(m.start, last(from)) < 150, `${where}: départ à ${dist(m.start, last(from)).toFixed(0)} m de l'arrivée de ${from.id}`);
+      const d = Math.min(...l1.filter((o) => o !== m).map((o) => dist(o.start, last(m))));
+      assert.ok(d < 300, `${where}: arrivée à ${d.toFixed(0)} m du départ de niveau 1 le plus proche`);
+      assert.ok(MISSIONS.indexOf(m) >= exp.historic.length, `${where}: ajoutée après les missions historiques`);
+    }
+    // les gains du niveau 1 restent dans la fourchette historique, nouvelles missions comprises
+    for (const m of l1) assert.ok(m.reward >= 800 && m.reward <= 1800, `mission ${m.id}: gain ${m.reward}`);
+    // toute arrivée de niveau 1 est à deux pas d'un AUTRE départ de niveau 1 (le joueur n'est jamais laissé sans cap)
+    for (const m of l1) {
+      const d = Math.min(...l1.filter((o) => o !== m).map((o) => dist(o.start, last(m))));
+      assert.ok(d < 400, `mission ${m.id}: arrivée à ${d.toFixed(0)} m du départ de niveau 1 le plus proche`);
+    }
+    // une mission à pied de niveau 1 reste une balade (mesure routière, donc majorante)
+    for (const m of l1) if (m.type === 'photo') assert.ok(missionRouteLength(m) < 2500, `mission ${m.id}: ${missionRouteLength(m).toFixed(0)} m à pied`);
+    // au moins une mission de niveau 1 à pied et une en voiture partent à moins de 150 m du point d'apparition
+    assert.ok(l1.some((m) => !m.requireVehicle && dist(m.start, places.SPAWN) < 150), 'aucune mission à pied près du point d\'apparition');
+  });
+
+  test(`${city} — points de rendez-vous : volume, ids, libellés, emprise, monuments, couverture des missions (contrat v6)`, () => {
+    const pts = places.RDV_POINTS;
+    assert.ok(Array.isArray(pts) && pts.length >= exp.minRdv, `${pts?.length} points de rendez-vous (au moins ${exp.minRdv})`);
+    assert.equal(new Set(pts.map((p) => p.id)).size, pts.length, 'ids de rendez-vous en double');
+    assert.equal(new Set(pts.map((p) => p.label)).size, pts.length, 'libellés de rendez-vous en double');
+    const visible = LANDMARKS_BY_CITY[city].filter((l) => !l.hidden);
+    for (const p of pts) {
+      const where = `rendez-vous ${p.id}`;
+      assert.ok(idOk(p.id) && p.id.startsWith(`${exp.idPrefix || ''}rdv_`), `${where}: id`);
+      assert.deepEqual(Object.keys(p).sort(), p.lm ? ['id', 'label', 'lm', 'x', 'z'] : ['id', 'label', 'x', 'z'], `${where}: champs`);
+      // libellé affichable avec son article, utilisable tel quel après « vers », « devant », « à », « près de »
+      assert.ok(typeof p.label === 'string' && /^(la |l')\S/.test(p.label) && p.label.length <= 40, `${where}: libellé « ${p.label} »`);
+      assert.ok(isNum(p.x) && isNum(p.z) && inBounds(BOUNDS, p), `${where}: hors carte`);
+      // hors du disque de TOUT monument (y compris les compléments d'emprise masqués), avec 10 m de marge
+      for (const l of LANDMARKS_BY_CITY[city]) assert.ok(dist(l, p) > l.radius + 10, `${where}: dans le disque de ${l.id} (${dist(l, p).toFixed(0)} m pour un rayon de ${l.radius})`);
+      if ('lm' in p) {
+        assert.equal(p.lm, true, `${where}: lm`);
+        assert.ok(visible.some((l) => dist(l, p) <= l.radius + 200), `${where}: lm sans monument visible à moins de 200 m`);
+      }
+    }
+    assert.ok(pts.filter((p) => p.lm).length >= 12, 'trop peu de rendez-vous au bord d\'un monument (clients touristes)');
+    // deux points ne se confondent pas
+    for (let i = 0; i < pts.length; i++) for (let j = i + 1; j < pts.length; j++) assert.ok(dist(pts[i], pts[j]) > 40, `${pts[i].id} et ${pts[j].id} à ${dist(pts[i], pts[j]).toFixed(0)} m l'un de l'autre`);
+    // couverture : tout départ et toute étape de mission a un rendez-vous dans la couronne où le serveur tire une
+    // course de taxi (JOB_MIN_M..JOB_MAX_M de shared/jobs.js, lues ici pour que la garantie suive la règle du
+    // serveur : hors couronne, pickSpot se replie sur le point le plus proche au-delà du minimum, donc une course
+    // plus longue que prévu), et un entre 900 et 2 000 m (Chiche : DARE_MIN_M / DARE_MAX_M de server/game.js)
+    assert.ok(JOB_MIN_M > 0 && JOB_MAX_M > JOB_MIN_M, 'couronne des courses de taxi');
+    const ring = (q, a, b) => pts.some((p) => { const d = dist(p, q); return d >= a && d <= b; });
+    const taxi = `aucun rendez-vous entre ${JOB_MIN_M} et ${JOB_MAX_M} m (course de taxi)`;
+    for (const m of MISSIONS) for (const [i, q] of [m.start, ...m.steps].entries()) {
+      const where = `mission ${m.id}, ${i ? `étape ${i - 1}` : 'départ'}`;
+      assert.ok(ring(q, JOB_MIN_M, JOB_MAX_M), `${where}: ${taxi}`);
+      assert.ok(ring(q, 900, 2000), `${where}: aucun rendez-vous entre 900 et 2 000 m`);
+    }
+    // … ainsi que le point d'apparition, les concessions et les parkings publics
+    for (const q of [places.SPAWN, ...places.DEALERS, ...places.PUBLIC_GARAGES]) assert.ok(ring(q, JOB_MIN_M, JOB_MAX_M), `${q.id || 'SPAWN'}: ${taxi}`);
+  });
+
   // ---- tests liés au réseau routier de la ville (ignorés tant que le fichier n'est pas généré) ----
   const roadsFile = new URL('.' + CITIES[city].files.roads.replace(/^\/shared/, ''), import.meta.url);
   test(`${city} — réseau routier : points proches d'une chaussée, distances et chronos tenables, GPS rapide`, { skip: !existsSync(roadsFile) && `${CITIES[city].files.roads} absent` }, async () => {
-    const { createRouter, createRoadIndex, snapStepToRoad, isWalkable } = await import('../client/src/gameplay/gps.js');
+    const { createRouter, createRoadIndex, snapStepToRoad, isWalkable, isStreet, isDrivable } = await import('../client/src/gameplay/gps.js');
     const wd = JSON.parse(readFileSync(roadsFile, 'utf8'));
     const router = createRouter(wd), roads = createRoadIndex(wd);
     assert.ok(router.nodeCount > 100 && roads.count > 100);
@@ -303,6 +493,66 @@ for (const city of CITY_IDS) {
     for (const d of [...places.DEALERS, ...places.PUBLIC_GARAGES]) {
       const n = roads.nearest(d.x, d.z, 500, isWalkable);
       assert.ok(n && n.dist <= 160, `${d.id}: à ${n ? n.dist.toFixed(0) : '∞'} m d'une rue`);
+    }
+    // points de rendez-vous (contrat v6) : SUR une rue carrossable au niveau du sol (ni voie rapide, ni trémie, ni
+    // tablier, ni voie de desserte), sans autre chaussée plus proche à un autre niveau, et joignables par le GPS
+    // depuis le point d'apparition comme vers lui (une arrivée de course n'est pas recalée : elle doit être exacte)
+    for (const p of places.RDV_POINTS) {
+      const where = `rendez-vous ${p.id}`;
+      const s = roads.nearest(p.x, p.z, 60, isStreet, 0);
+      assert.ok(s && s.dist <= 6, `${where}: à ${s ? s.dist.toFixed(1) : '∞'} m de l'axe d'une rue carrossable`);
+      assert.ok(Math.abs(s.ele) < 0.05, `${where}: rue dénivelée (ele ${s.ele.toFixed(2)})`);
+      const n = roads.nearest(p.x, p.z, 60, isDrivable);
+      assert.ok(n && n.dist <= 6 && Math.abs(n.ele) < 0.05, `${where}: la chaussée la plus proche (${n?.road?.name || '?'}) est à ${n ? n.dist.toFixed(1) : '∞'} m, ele ${n ? n.ele.toFixed(2) : '?'}`);
+      for (const [a, b, sens] of [[places.SPAWN, p, 'aller'], [p, places.SPAWN, 'retour']]) {
+        const r = router.route(a.x, a.z, b.x, b.z, { metric, budgetMs: 1000 });
+        assert.ok(r.routed && !r.partial, `${where}: ${sens} non routé depuis le point d'apparition`);
+      }
+      // le graphe passe au pied du point : l'itinéraire d'aller s'achève à moins de 25 m
+      const r = router.route(places.SPAWN.x, places.SPAWN.z, p.x, p.z, { metric, budgetMs: 1000 });
+      const end = r.path[r.path.length - 2];
+      assert.ok(Math.hypot(end[0] - p.x, end[1] - p.z) <= 25, `${where}: graphe routier à ${Math.hypot(end[0] - p.x, end[1] - p.z).toFixed(0)} m`);
+    }
+    // mission d'introduction et missions « retour » : départ résolu comme le fait le client (rue carrossable la
+    // plus proche pour une mission en voiture), toujours à moins de 150 m de sa référence
+    {
+      const resolve = (m) => roads.nearest(m.start.x, m.start.z, 400, m.requireVehicle ? isStreet : isWalkable, 0);
+      const intro = MISSIONS.find((m) => m.intro), s = resolve(intro);
+      assert.ok(s && Math.hypot(s.x - places.SPAWN.x, s.z - places.SPAWN.z) < 150, `intro: départ recalé à ${s ? Math.hypot(s.x - places.SPAWN.x, s.z - places.SPAWN.z).toFixed(0) : '∞'} m du point d'apparition`);
+      assert.ok(s.dist <= 12, `intro: départ à ${s.dist.toFixed(0)} m d'une rue carrossable (il doit être sur la chaussée)`);
+      const from = MISSIONS.find((m) => m.id === exp.returns.from), end = snapStepToRoad(roads, from.steps.at(-1));
+      for (const id of exp.returns.ids) {
+        const q = resolve(MISSIONS.find((m) => m.id === id));
+        assert.ok(q && Math.hypot(q.x - end.x, q.z - end.z) < 150, `mission ${id}: départ recalé à ${q ? Math.hypot(q.x - end.x, q.z - end.z).toFixed(0) : '∞'} m de l'arrivée recalée de ${from.id}`);
+      }
+    }
+    // enchaînement de niveau 1 PAR LA ROUTE (graphe orienté : sens uniques compris). À vol d'oiseau, une arrivée peut
+    // être à 100 m d'un départ et à 1,5 km de ruban GPS (rue à issue unique) : on mesure donc l'itinéraire réel
+    // entre chaque arrivée recalée et le départ résolu (comme le client) de niveau 1 le plus proche.
+    {
+      assert.ok(router.directed, 'le graphe routier doit être orienté pour juger les enchaînements');
+      const l1 = MISSIONS.filter((m) => m.level === 1);
+      const startOf = (m) => roads.nearest(m.start.x, m.start.z, 400, m.requireVehicle ? isStreet : isWalkable, 0) || m.start;
+      for (const m of l1) {
+        const end = snapStepToRoad(roads, m.steps.at(-1));
+        let best = Infinity, to = null;
+        for (const o of l1) {
+          if (o === m) continue;
+          const s = startOf(o);
+          const r = router.route(end.x, end.z, s.x, s.z, { metric, fromEle: end.ele, toEle: s.ele, budgetMs: 1000 });
+          if (!r.partial && r.length < best) { best = r.length; to = o.id; }
+        }
+        assert.ok(best < NEXT_START_ROAD_MAX, `mission ${m.id}: le départ de niveau 1 le plus proche de son arrivée (${to}) est à ${best.toFixed(0)} m par la route (moins de ${NEXT_START_ROAD_MAX} m attendus)`);
+      }
+      // pas de livraison « à 800 m » qui demande 3 km de boulevards : au niveau 1, un parcours de plus de 2 km par la
+      // route ne dépasse pas 2,5 fois son vol d'oiseau
+      for (const m of l1) {
+        if (m.anyOrder) continue;
+        let prev = m.start, real = 0;
+        for (const s of m.steps) { const q = snapStepToRoad(roads, s); real += router.route(prev.x, prev.z, q.x, q.z, { metric, fromEle: prev.ele, toEle: q.ele, budgetMs: 1000 }).length; prev = q; }
+        const air = missionPathLength(m);
+        assert.ok(real <= L1_DETOUR_FREE_M || real <= air * L1_DETOUR_MAX, `mission ${m.id}: ${real.toFixed(0)} m par la route pour ${air.toFixed(0)} m à vol d'oiseau (détour × ${(real / air).toFixed(1)})`);
+      }
     }
     // performance du GPS : la plus longue traversée de la carte, plusieurs fois (première exécution = échauffement)
     const { minX, maxX, minZ, maxZ } = BOUNDS, k = 0.42;

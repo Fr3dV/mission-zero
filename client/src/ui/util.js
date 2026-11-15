@@ -1,5 +1,12 @@
 // Outils DOM, icônes SVG inline et formats — module interface.
 
+/** Typographie française : espace insécable devant « : ; ! ? % » et à l'intérieur des guillemets, pour qu'aucun signe ne passe
+ *  seul à la ligne. Appliquée par h() à tout texte affiché (attribut `text` et enfants texte) ; idempotente. */
+export function typo(s) {
+  if (typeof s !== 'string' || s.length < 3 || s.indexOf(' ') < 0) return s;
+  return s.replace(/ ([:;!?»%])/g, '\u00a0$1').replace(/« /g, '«\u00a0');
+}
+
 /** Crée un élément. attrs : class, text, html, style, dataset, on<Event>, sinon attribut. */
 export function h(tag, attrs, ...kids) {
   const el = document.createElement(tag);
@@ -8,7 +15,7 @@ export function h(tag, attrs, ...kids) {
       const v = attrs[k];
       if (v == null || v === false) continue;
       if (k === 'class') el.className = v;
-      else if (k === 'text') el.textContent = v;
+      else if (k === 'text') el.textContent = typo(v);
       else if (k === 'html') el.innerHTML = v;
       else if (k === 'style') el.style.cssText = v;
       else if (k === 'dataset') Object.assign(el.dataset, v);
@@ -23,7 +30,7 @@ function append(el, kids) {
   for (const c of kids) {
     if (c == null || c === false) continue;
     if (Array.isArray(c)) append(el, c);
-    else el.appendChild(c instanceof Node ? c : document.createTextNode(String(c)));
+    else el.appendChild(c instanceof Node ? c : document.createTextNode(typo(String(c))));
   }
 }
 
@@ -57,6 +64,25 @@ const P = {
   key: '<circle cx="8" cy="15" r="3.5"/><path d="M10.5 12.5 19 4M15.5 7.5l2.5 2.5M13 10l2 2"/>',
   help: '<circle cx="12" cy="12" r="8.5"/><path d="M9.5 9.5a2.5 2.5 0 1 1 3.5 2.3c-.7.4-1 .9-1 1.7"/><circle cx="12" cy="16.8" r=".7" fill="currentColor"/>',
   flag: '<path d="M6 21V4M6 4.5h11l-2.2 3.5L17 11.5H6"/>',
+  star: '<path d="M12 3.6l2.5 5.3 5.7.7-4.2 4 1.1 5.8L12 16.6l-5.1 2.8 1.1-5.8-4.2-4 5.7-.7z"/>',
+  // képi (calot cylindrique + visière) : pastille d'avis de recherche
+  kepi: '<path d="M6.5 12.5V8c0-1.3 2.5-2.3 5.5-2.3s5.5 1 5.5 2.3v4.5"/><path d="M6.5 10.2c1.4.8 3.4 1.2 5.5 1.2s4.1-.4 5.5-1.2"/><path d="M5.5 12.6c1.6 1 3.9 1.6 6.5 1.6 4.4 0 7.4-.2 9.5 2.6-3 1-6.2 1.4-9.5 1.4-4.2 0-7.5-1.8-7.5-4.4 0-.5.4-.9 1-1.2z"/>',
+  // main (même pictogramme que le bouton tactile « Interagir » du module joueur)
+  hand: '<path d="M8 12V6a1.6 1.6 0 013.2 0v5M11.2 10V4.6a1.6 1.6 0 013.2 0V11M14.4 7a1.6 1.6 0 013.2 0v8a6 6 0 01-11 3.2L4 14.5a1.6 1.6 0 012.6-1.8L8 14"/>',
+  route: '<circle cx="6" cy="18" r="2.2"/><circle cx="18" cy="6" r="2.2"/><path d="M8.2 18H14a3 3 0 0 0 0-6h-4a3 3 0 0 1 0-6h5.8"/>',
+  coin: '<circle cx="12" cy="12" r="8.5"/><path d="M9 8.5h6l-6 7h6M9.5 12h5"/>',
+  // carnet de bord (onglet Carnet, fiche du matin)
+  book: '<path d="M6 3.5h11.5v17H6a1.5 1.5 0 0 1-1.5-1.5V5A1.5 1.5 0 0 1 6 3.5z"/><path d="M8.5 3.5v17M11.5 8h3.5M11.5 11.5h3.5"/>',
+  // trompe de klaxon
+  horn: '<path d="M4 10v4h3l6 4.5v-13L7 10z"/><path d="M16 9.2a4 4 0 0 1 0 5.6M18.4 6.8a7.4 7.4 0 0 1 0 10.4"/>',
+  // boutons de l'écran tactile (mêmes tracés que le module joueur) : manette virtuelle, accélérer, freiner, sauter
+  stick: '<circle cx="12" cy="12" r="8.5"/><circle cx="12" cy="12" r="3.2"/>',
+  up: '<path d="M12 19V5M5 12l7-7 7 7"/>',
+  down: '<path d="M12 5v14M5 12l7 7 7-7"/>',
+  jump: '<path d="M5 15l7-7 7 7M5 20h14"/>',
+  swipe: '<path d="M4 12h16M8 8l-4 4 4 4M16 8l4 4-4 4"/>',
+  // goutte de peinture (Atelier)
+  drop: '<path d="M12 3.5c3.2 4.2 5.5 7.2 5.5 10.2a5.5 5.5 0 0 1-11 0c0-3 2.3-6 5.5-10.2z"/><path d="M9.3 14.2a2.8 2.8 0 0 0 2.2 2.6"/>',
 };
 
 /** Icône SVG inline (trait, couleur héritée). */
@@ -73,6 +99,16 @@ export function fill(el, ...kids) { el.replaceChildren(); append(el, kids); retu
 export const clamp = (v, a, b) => (v < a ? a : v > b ? b : v);
 export const fmtInt = (n) => Math.round(Number(n) || 0).toLocaleString('fr-FR');
 export const zc = (n) => `Ƶ ${fmtInt(n)}`;
+/** Mission vedette du jour ENCORE À FAIRE (payée double) : son id, sinon null. `journal` = store.journal (toléré absent).
+ *  Convention du contrat v6 : les récompenses circulent au tarif de base, c'est l'interface qui double à l'affichage. */
+export function starTodoId(journal) {
+  const j = journal;
+  if (!j || typeof j.star !== 'string') return null;
+  const d1 = Array.isArray(j.list) ? j.list.find((d) => d?.kind === 'star') : null;
+  return d1 && (d1.claimed || d1.have >= d1.goal) ? null : j.star;
+}
+/** Récompense à afficher pour la mission `id` : doublée si c'est la vedette encore à faire. */
+export const starReward = (journal, id, reward) => (id != null && id === starTodoId(journal) ? reward * 2 : reward);
 /** Distance lisible : mètres (arrondis à 10) jusqu'à 1 000 m, kilomètres au-delà. */
 export function fmtDist(m) {
   if (!isFinite(m)) return '';
@@ -82,6 +118,42 @@ export function fmtDist(m) {
 export function fmtClock(sec) {
   sec = Math.max(0, Math.ceil(sec));
   return `${Math.floor(sec / 60)}:${String(sec % 60).padStart(2, '0')}`;
+}
+/** Durée écoulée m:ss (arrondie vers le bas : un chrono n'annonce jamais une seconde pas encore courue). */
+export function fmtTime(sec) {
+  sec = Math.max(0, Math.floor(Number(sec) || 0));
+  return `${Math.floor(sec / 60)}:${String(sec % 60).padStart(2, '0')}`;
+}
+/** Durée lisible : « 14 h 20 », « 25 min », « moins d'une minute ». */
+export function fmtDur(sec) {
+  sec = Math.max(0, Math.floor(Number(sec) || 0));
+  const H = Math.floor(sec / 3600), M = Math.floor((sec % 3600) / 60);
+  return H ? `${H}\u00a0h\u00a0${String(M).padStart(2, '0')}` : M ? `${M}\u00a0min` : 'moins d’une minute';
+}
+/** Temps officiel d'un record, aux dixièmes : « 2:14,3 ». */
+export function fmtRecord(sec) {
+  const d = Math.max(0, Math.round((Number(sec) || 0) * 10)), s = Math.floor(d / 10);
+  return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')},${d % 10}`;
+}
+/** « de Tom », « d’Alice » : élision devant une voyelle ou un h (même règle que le gameplay et le serveur, chacun sa copie). */
+export const de = (name) => (/^([aeiouàâäéèêëîïôöùûüh]|y(?![aeiouéè]))/i.test(String(name ?? '').trim()) ? `d’${name}` : `de ${name}`);
+/** Texte destiné à un élément mis en capitales par le style (étiquette, ligne de la pile de style) : les mesures gardent leur
+ *  unité en minuscules (« 400 m », « 2,4 km », « 1,2 s », « 142 km/h », « /h »). Rend une chaîne ou une liste de nœuds pour h(). */
+const UNIT_RE = /(\d[\d\u00a0\u202f.,]*[\u00a0\u202f ]?(?:km\/h|km|min|m|s|h)|\/h)(?![A-Za-zÀ-ÿ])/;
+export function keepUnits(text) {
+  const s = String(text ?? '');
+  const parts = s.split(UNIT_RE);
+  if (parts.length < 2) return s;
+  return parts.map((p, i) => (!p ? null : i % 2 ? h('span', { class: 'mz-nocap', text: p }) : p));
+}
+/** Étiquette (texte court encadré), avec icône facultative. */
+export function badge(text, cls = '', ico) {
+  const t = keepUnits(text); // plusieurs nœuds : regroupés, l'étiquette est une boîte flex (pas d'écart au milieu de « 110 m »)
+  return h('span', { class: 'mz-badge ' + cls }, ico ? icon(ico, 12) : null, Array.isArray(t) ? h('span', null, t) : t);
+}
+/** Touche à presser dans un encart du HUD : « E » au clavier, pictogramme du bouton Interagir en tactile. */
+export function keyChip(key, touch) {
+  return touch ? h('span', { class: 'mz-keychip is-touch', title: 'Bouton Interagir' }, icon('hand', 14)) : h('kbd', { class: 'mz-keychip', text: key });
 }
 export function fmtHour(hh) {
   const t = (((Number(hh) || 0) % 24) + 24) % 24;
@@ -104,6 +176,7 @@ export const lsSet = (k, v) => { try { localStorage.setItem(k, v); } catch { /* 
 /** Bouton à double validation : 1er clic arme (« Confirmer… »), 2e clic exécute. */
 export function confirmButton(label, confirmLabel, onConfirm, cls = 'mz-btn') {
   let armed = false, timer = 0;
+  label = typo(label); confirmLabel = typo(confirmLabel); // posés par textContent : hors du passage de h()
   const b = h('button', { class: cls, type: 'button', text: label });
   b.addEventListener('click', () => {
     if (b.disabled) return;

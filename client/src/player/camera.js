@@ -2,6 +2,9 @@
 // tremblement, regard arrière, 3 vues), anti-traversée des murs, jamais sous le sol.
 // Niveaux superposés : ctx.heightAt reçoit la hauteur de la caméra ; elle reste SOUS un tablier ou une dalle
 // quand le joueur est dessous (jamais « posée » dessus), et sur le tablier quand il est dessus.
+// Effets « fun » (contrat v6) : kick(deg) = coup de champ bref, sway = décalage latéral en dérive (lecture de
+// vehicle.driftAngle), orbit({x, z, y, dur}) = tour de présentation interrompu par toute entrée. Les préférences
+// (ctx.ui.prefs.fx, prefers-reduced-motion) sont lues au moment de chaque effet, jamais à la création.
 import { STEP_UP } from '@shared/terrain.js';
 const TAU = Math.PI * 2;
 const wrap = (a) => { a = (a + Math.PI) % TAU; if (a < 0) a += TAU; return a - Math.PI; };
@@ -11,6 +14,10 @@ const dampAngle = (cur, target, rate, dt) => cur + wrap(target - cur) * (1 - Mat
 
 export const CAMERA_VIEWS = ['proche', 'loin', 'capot'];
 const BASE_FOV = 60;
+const KICK_MAX = 8;                        // degrés de champ ajoutés au plus par les coups cumulés
+const SWAY_MAX = 0.6, SWAY_MIN = 0.08, SWAY_FULL = 0.55; // m ; angle de dérive (rad) où le décalage commence / est complet
+const ORBIT_MAX = 3.4, ORBIT_SWEEP = 2.6;  // s (le contrat dit 3,5 au plus, image de fin comprise) ; rad parcourus par une orbite de durée maximale
+const ORBIT_MIN = 3.4;                     // m : distance minimale de la caméra au centre de la voiture pendant l'orbite (jamais dans la carrosserie)
 
 export function createCameraRig(ctx, player, input) {
   const { camera, collision, heightAt } = ctx;
@@ -27,8 +34,34 @@ export function createCameraRig(ctx, player, input) {
     nextView() { rig.view = (rig.view + 1) % CAMERA_VIEWS.length; return rig.viewName; },
     setView(v) { const i = typeof v === 'number' ? v : CAMERA_VIEWS.indexOf(v); if (i >= 0) rig.view = i % CAMERA_VIEWS.length; },
     shake(amount = 0.5) { rig.trauma = Math.min(1, rig.trauma + amount); },
+    /** Coup de champ : +deg degrés d'un coup, retombés à moins de 0,2° en 0,6 s. Sans effet si les effets sont coupés. */
+    kick(deg = 4) {
+      const k = fxScale();
+      if (k > 0 && Number.isFinite(deg)) kickAmt = clamp(kickAmt + deg * k, -KICK_MAX, KICK_MAX);
+    },
+    /** décalage latéral courant (m, signé, <= 0,6) dû à la dérive ; 0 en ligne droite, à pied et effets coupés */
+    get sway() { return swayS; },
+    /** true pendant un tour de présentation */
+    get orbiting() { return O.on; },
+    /**
+     * Tour de présentation autour d'un point (voiture livrée…) : { x, z, y?, dur <= 3,5 s, r? }.
+     * Toute entrée du joueur l'interrompt ; la main est rendue par transition(). Effets coupés : plan fixe, sans rotation.
+     */
+    orbit(o = {}) {
+      if (!Number.isFinite(o.x) || !Number.isFinite(o.z)) return false;
+      const y = Number.isFinite(o.y) ? o.y : heightAt ? heightAt(o.x, o.z, player.pos.y) : player.pos.y;
+      O.x = o.x; O.z = o.z; O.y = Number.isFinite(y) ? y : player.pos.y;
+      O.dur = clamp(Number.isFinite(o.dur) ? o.dur : 3, 0.4, ORBIT_MAX); O.t = 0;
+      const dx = camera.position.x - o.x, dz = camera.position.z - o.z, d = Math.hypot(dx, dz);
+      O.a0 = d > 0.5 ? Math.atan2(dx, dz) : rig.yaw;
+      O.r = clamp(Number.isFinite(o.r) ? o.r : d, 6, 9);
+      O.sweep = ORBIT_SWEEP * (O.dur / ORBIT_MAX) * fxScale();
+      O.act0 = input.activity; O.lim = 99; O.on = true;
+      rig.transition();
+      return true;
+    },
     /** Replace instantanément la caméra derrière le joueur. */
-    snap(yaw = player.yaw) { rig.yaw = yaw; orbitYaw = 0; orbitPitch = 0; chaseYaw = yaw; limit = 99; blend = 1; hasPos = false; },
+    snap(yaw = player.yaw) { rig.yaw = yaw; orbitYaw = 0; orbitPitch = 0; chaseYaw = yaw; limit = 99; blend = 1; hasPos = false; O.on = false; swayS = 0; },
     /** Démarre un fondu depuis la position actuelle (changement de mode). */
     transition() { blend = 0; fromPos.copy(camera.position); fromLook.copy(look); },
     update,
@@ -37,6 +70,25 @@ export function createCameraRig(ctx, player, input) {
   const look = new V3(), fromPos = new V3(), fromLook = new V3(), want = new V3(), target = new V3();
   let focusS = 0, fx0 = 0, fz0 = 0, downS = 0, orbitYaw = 0, orbitPitch = 0, chaseYaw = 0, limit = 99, blend = 1, hasPos = false;
   let distV = 7, spSmooth = 0, accSmooth = 0, lastSpeed = 0, reverseT = 0, shakeT = 0, backSmooth = 0;
+  let kickAmt = 0, swayS = 0, motion = null;
+  const O = { on: false, x: 0, y: 0, z: 0, t: 0, dur: 3, a0: 0, r: 7, sweep: 0, act0: 0, lim: 99 };
+
+  /** Intensité des effets de caméra : 1 = complets, 0,5 = discrets, 0 = coupés (réglage ou prefers-reduced-motion). */
+  function fxScale() {
+    const fx = ctx.ui?.prefs?.fx;
+    if (fx === 'off') return 0;
+    if (motion === null) { try { motion = typeof matchMedia === 'function' ? matchMedia('(prefers-reduced-motion: reduce)') : false; } catch { motion = false; } }
+    if (motion && motion.matches) return 0;
+    return fx === 'soft' ? 0.5 : 1;
+  }
+  // figures et réceptions : seules celles de MA voiture comptent (les événements style:* ne concernent que le joueur local)
+  ctx.bus?.on?.('style:trick', (e) => { if (e?.kind === 'near') rig.kick(4); });
+  ctx.bus?.on?.('style:bank', (e) => { rig.kick(clamp(1 + (e?.pts || 0) / 4000, 1, 2.5)); });
+  ctx.bus?.on?.('vehicle:landed', (e) => {
+    if (!e?.vehicle || e.vehicle !== player.vehicle) return;
+    const k = fxScale();
+    if (k > 0) rig.shake(clamp((e.landV || 0) / 14, 0.08, 0.7) * k); // secousse proportionnelle à la vitesse de réception
+  });
 
   /** Distance maximale libre entre la cible et la caméra (obstacles statiques). */
   function freeDistance(tx, ty, tz, dx, dy, dz, dist) {
@@ -62,7 +114,32 @@ export function createCameraRig(ctx, player, input) {
     let fovTarget = BASE_FOV, dist, hideCharacter = false;
     let shakeAmp = 0;
 
-    if (!v) {
+    // tour de présentation : toute entrée (touche, bouton, manette, doigt, souris) rend la main
+    if (O.on) {
+      O.t += dt;
+      if (O.t >= O.dur || input.activity !== O.act0 || st.moveX !== 0 || st.moveY !== 0 || st.throttle > 0.05 || st.brake > 0.05
+        || st.lookDX !== 0 || st.lookDY !== 0 || st.zoom !== 0 || st.jump || st.handbrake) { O.on = false; rig.transition(); }
+    }
+    if (O.on) {
+      rig.tooClose = false;
+      const u = O.t / O.dur, a = O.a0 + O.sweep * u * u * (3 - 2 * u), pitch = 0.3;
+      const cp = Math.cos(pitch), dx = Math.sin(a) * cp, dy = Math.sin(pitch), dz = Math.cos(a) * cp;
+      target.set(O.x, O.y + 0.85, O.z);
+      let free = freeDistance(target.x, target.y, target.z, dx, dy, dz, O.r);
+      if (free < ORBIT_MIN) {
+        // obstacle tout près de la voiture. Fin (réverbère, tronc, poteau : la voie est de nouveau libre 1,6 m plus loin, jusqu'au
+        // bout du rayon) : la caméra garde son rayon et le laisse passer devant elle. Épais (façade) : plancher ci-dessous.
+        const s = free + 1.6, rest = O.r - s;
+        if (rest > 0.5 && freeDistance(target.x + dx * s, target.y + dy * s, target.z + dz * s, dx, dy, dz, rest) >= rest) free = O.r;
+      }
+      O.lim = free < O.lim ? free : Math.min(free, O.lim + 5 * dt);
+      // plancher juste hors carrosserie (demi-diagonale du plus gros véhicule : 3,05 m) : jamais de plan dans l'habitacle ;
+      // un mur proche n'est dépassé que de quelques décimètres
+      const d = Math.min(O.r, Math.max(O.lim, ORBIT_MIN));
+      want.set(target.x + dx * d, target.y + dy * d, target.z + dz * d);
+      look.copy(target);
+      swayS = 0;
+    } else if (!v) {
       // ---------------- à pied : orbite libre
       rig.yaw = wrap(rig.yaw - st.lookDX * sens);
       rig.pitch = clamp(rig.pitch + st.lookDY * sens, -0.5, 1.25);
@@ -91,7 +168,7 @@ export function createCameraRig(ctx, player, input) {
       want.set(target.x + dx * d + Math.cos(rig.yaw) * sh, target.y + dy * d, target.z + dz * d - Math.sin(rig.yaw) * sh);
       look.set(target.x + Math.cos(rig.yaw) * sh, target.y + 0.05, target.z - Math.sin(rig.yaw) * sh);
       fovTarget = BASE_FOV + (player.speed > 4.5 ? 4 : 0);
-      chaseYaw = rig.yaw; orbitYaw = 0; orbitPitch = 0; spSmooth = 0; lastSpeed = 0; accSmooth = 0;
+      chaseYaw = rig.yaw; orbitYaw = 0; orbitPitch = 0; spSmooth = 0; lastSpeed = 0; accSmooth = 0; swayS = 0;
     } else {
       // ---------------- en voiture : poursuite
       rig.tooClose = false;
@@ -126,7 +203,7 @@ export function createCameraRig(ctx, player, input) {
         fovTarget = 70 + 18 * spSmooth;
         shakeAmp = 0.006 * clamp((spSmooth - 0.5) / 0.4, 0, 1);
         limit = 99; hideCharacter = false;
-        dist = 0;
+        dist = 0; swayS = 0;
       } else {
         const far = CAMERA_VIEWS[rig.view] === 'loin';
         const k = len / 4.4;
@@ -141,6 +218,12 @@ export function createCameraRig(ctx, player, input) {
         limit = free < limit ? Math.max(free, limit - 30 * dt) : Math.min(free, limit + 6 * dt);
         const d = Math.min(distV, Math.max(limit, 1.6));
         want.set(target.x + dx * d, target.y + dy * d, target.z + dz * d);
+        // dérive : la caméra glisse du côté opposé à la glisse (elle passe derrière la trajectoire), 0,6 m au plus
+        const da = v.driftAngle || 0, am = Math.abs(da);
+        let sw = 0;
+        if (am > SWAY_MIN) { const u = Math.min(1, (am - SWAY_MIN) / (SWAY_FULL - SWAY_MIN)); sw = -Math.sign(da) * SWAY_MAX * u * u * (3 - 2 * u) * fxScale(); }
+        swayS = damp(swayS, sw, 4, dt); if (sw === 0 && Math.abs(swayS) < 1e-3) swayS = 0;
+        if (swayS !== 0) { want.x += Math.cos(yaw) * swayS; want.z -= Math.sin(yaw) * swayS; }
         // on regarde un peu en avant de la voiture
         const ahead = (1.2 + 3.2 * spSmooth) * (1 - 2 * backSmooth);
         look.set(v.pos.x + fx * ahead, vy + hgt * 0.75, v.pos.z + fz * ahead);
@@ -152,6 +235,7 @@ export function createCameraRig(ctx, player, input) {
     // secousses (vitesse + chocs)
     rig.trauma = Math.max(0, rig.trauma - dt * 1.6);
     shakeAmp += rig.trauma * rig.trauma * 0.22;
+    if (shakeAmp > 0 && fxScale() === 0) shakeAmp = 0; // effets coupés : image stable
     if (shakeAmp > 0) {
       shakeT += dt * 38;
       want.x += (Math.sin(shakeT * 1.31) + Math.sin(shakeT * 2.77 + 1.3)) * 0.5 * shakeAmp;
@@ -186,7 +270,10 @@ export function createCameraRig(ctx, player, input) {
 
     camera.lookAt(look);
     rig.fov = damp(rig.fov, fovTarget, 3.5, dt);
-    if (Math.abs(camera.fov - rig.fov) > 0.02) { camera.fov = rig.fov; camera.updateProjectionMatrix(); }
+    // coup de champ : franc à l'impact, il retombe seul (4° -> moins de 0,1° en 0,6 s) sans toucher au champ de base
+    const fov = rig.fov + kickAmt;
+    if (kickAmt !== 0) { kickAmt *= Math.exp(-6.5 * dt); if (Math.abs(kickAmt) < 0.02) kickAmt = 0; }
+    if (Math.abs(camera.fov - fov) > 0.02) { camera.fov = fov; camera.updateProjectionMatrix(); }
     return hideCharacter;
   }
   return rig;

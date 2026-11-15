@@ -221,8 +221,16 @@ const now = () => (typeof performance !== 'undefined' ? performance.now() : Date
  *   opts.metric   'time' (défaut : préfère les voies rapides, coût = longueur / vitesse) ou 'distance'
  *   opts.fromEle / opts.toEle   élévations relatives du départ / de l'arrivée (niveaux superposés)
  *   opts.budgetMs  temps de calcul maximal (défaut 30 ms) ; au-delà, itinéraire partiel + ligne droite.
+ *
+ * Tronçons hors chaussée : le graphe ne couvre ni les places piétonnes ni les parvis, donc l'itinéraire relie
+ * en ligne droite le départ et l'arrivée à leur point d'accroche sur la chaussée. `routerOpts.blocked(x0, z0, x1, z1, ele)`
+ * (facultatif, fourni par le client : monuments, immeubles) dit si un tel tronçon est barré. On préfère alors une
+ * chaussée d'où l'accès est dégagé ; s'il n'y en a pas, l'itinéraire S'ARRÊTE au point d'accroche (cutEnd) ou en
+ * part (cutStart) plutôt que de traverser l'obstacle. Sans `blocked`, le comportement est celui d'avant.
  */
-export function createRouter(worldData, cell = 120) {
+export function createRouter(worldData, cell = 120, routerOpts = {}) {
+  const blockedFn = typeof routerOpts?.blocked === 'function' ? routerOpts.blocked : null;
+  const legBlocked = (x0, z0, x1, z1, ele) => { try { return !!blockedFn(x0, z0, x1, z1, ele); } catch { return false; } };
   const gNodes = worldData?.graph?.nodes || [];
   const gEdges = worldData?.graph?.edges || [];
   const gEle = worldData?.graph?.nodeEle || null;
@@ -273,8 +281,11 @@ export function createRouter(worldData, cell = 120) {
   for (let j = 0; j < m; j++) { sax[j] = X[eA[j]]; saz[j] = Z[eA[j]]; sbx[j] = X[eB[j]]; sbz[j] = Z[eB[j]]; }
   const grid = buildGrid({ n: m, ax: sax, az: saz, bx: sbx, bz: sbz }, cell);
 
-  /** Jusqu'à `max` arêtes les plus proches de (x, z) : [{ j, t, d, px, pz }], la meilleure d'abord. */
-  function nearestEdges(x, z, eleHint, component, max = 4, maxDist = 2500) {
+  /**
+   * Jusqu'à `max` arêtes les plus proches de (x, z) : [{ j, t, d, px, pz }], la meilleure d'abord.
+   * spread = écart de distance admis par rapport à la meilleure (m).
+   */
+  function nearestEdges(x, z, eleHint, component, max = 4, maxDist = 2500, spread = 14) {
     const out = [];
     const useEle = Number.isFinite(eleHint);
     let worst = maxDist;
@@ -292,13 +303,38 @@ export function createRouter(worldData, cell = 120) {
       out.sort((p, q) => p.d - q.d);
       if (out.length > max) out.length = max;
       // on ne garde que les arêtes quasi aussi proches que la meilleure (les deux sens d'une rue, un carrefour)
-      const lim = out[0].d + 14;
+      const lim = out[0].d + spread;
       while (out.length > 1 && out[out.length - 1].d > lim) out.pop();
       worst = out.length >= max ? out[out.length - 1].d : Math.min(maxDist, lim);
       // borne d'arrêt de la recherche par anneaux : la plus mauvaise distance encore acceptable
       return worst;
     });
     return out;
+  }
+
+  const LEG_FREE = 3;     // un tronçon hors chaussée plus court que ça n'est pas contrôlé
+  const LEG_SPREAD = 160; // on cherche un accès dégagé jusqu'à cette distance au-delà de la chaussée la plus proche
+  const eleAt = (e) => E[eA[e.j]] + (E[eB[e.j]] - E[eA[e.j]]) * e.t;
+  const legFree = (e, x, z) => Math.hypot(e.px - x, e.pz - z) <= LEG_FREE || !legBlocked(e.px, e.pz, x, z, eleAt(e));
+  /**
+   * Arêtes d'accroche de (x, z) : les plus proches, sans celles dont le tronçon hors chaussée est barré.
+   * Si aucune n'offre un accès dégagé, on garde les plus proches et la liste porte `cut = true`.
+   */
+  function anchors(x, z, eleHint, component) {
+    const near = nearestEdges(x, z, eleHint, component);
+    if (!blockedFn || !near.length) return near;
+    let free = near.filter((e) => legFree(e, x, z));
+    if (free.length === near.length) return near;
+    if (!free.length) {
+      const wide = nearestEdges(x, z, eleHint, component, 24, Math.min(2500, near[0].d + LEG_SPREAD), LEG_SPREAD);
+      for (const e of wide) {
+        if (free.length >= 4 || (free.length && e.d > free[0].d + 14)) break;
+        if (legFree(e, x, z)) free.push(e);
+      }
+    }
+    if (free.length) return free;
+    near.cut = true;
+    return near;
   }
 
   const g = new Float32Array(n);
@@ -315,14 +351,26 @@ export function createRouter(worldData, cell = 120) {
     const t0 = now();
     const air = Math.hypot(bx - ax, bz - az);
     const straight = (extra = {}) => ({ path: [[ax, az], [bx, bz]], length: air, time: air / 8, routed: false, partial: false, ms: now() - t0, ...extra });
-    if (!n || !m || air < 30) return straight();
+    if (!n || !m) return straight();
+    // tout près : ligne droite, sauf si elle est barrée (deux côtés d'un monument) — on passe alors par la chaussée
+    if (air < 30 && !(blockedFn && air > LEG_FREE && legBlocked(ax, az, bx, bz, opts.fromEle))) return straight();
     const byTime = opts.metric !== 'distance';
     const budget = opts.budgetMs ?? 30;
-    const goals = nearestEdges(bx, bz, opts.toEle, -1);
+    const goals = anchors(bx, bz, opts.toEle, -1);
     if (!goals.length) return straight();
     const component = comp[eA[goals[0].j]];
-    const starts = nearestEdges(ax, az, opts.fromEle, component);
+    const starts = anchors(ax, az, opts.fromEle, component);
     if (!starts.length) return straight();
+    // aucun accès dégagé : l'itinéraire s'arrête au point d'accroche (cutEnd) ou en part (cutStart)
+    const cutStart = !!starts.cut, cutEnd = !!goals.cut;
+    const finish = (path, extra) => {
+      let length = 0;
+      for (let i = 1; i < path.length; i++) length += Math.hypot(path[i][0] - path[i - 1][0], path[i][1] - path[i - 1][1]);
+      // la distance annoncée compte quand même les tronçons non tracés
+      if (cutStart) length += Math.hypot(path[0][0] - ax, path[0][1] - az);
+      if (cutEnd) length += Math.hypot(path[path.length - 1][0] - bx, path[path.length - 1][1] - bz);
+      return { path, length, routed: true, cutStart, cutEnd, ms: now() - t0, ...extra };
+    };
 
     run++;
     heap.clear();
@@ -345,8 +393,11 @@ export function createRouter(worldData, cell = 120) {
     for (const st of starts) for (const gl of goals) {
       if (st.j === gl.j && gl.t >= st.t) {
         const len = Math.hypot(gl.px - st.px, gl.pz - st.pz);
-        const path = [[ax, az], [st.px, st.pz], [gl.px, gl.pz], [bx, bz]];
-        return { path, length: st.d + len + gl.d, time: len / (eLen[st.j] / eTime[st.j]), routed: true, partial: false, ms: now() - t0 };
+        const path = [];
+        if (!cutStart) path.push([ax, az]);
+        path.push([st.px, st.pz, eleAt(st)], [gl.px, gl.pz, eleAt(gl)]);
+        if (!cutEnd) path.push([bx, bz]);
+        return finish(path, { time: len / (eLen[st.j] / eTime[st.j]), partial: false });
       }
     }
 
@@ -380,22 +431,24 @@ export function createRouter(worldData, cell = 120) {
     const mid = [];
     for (let u = end; u >= 0; u = from[u]) mid.push(u);
     mid.reverse();
-    const path = [[ax, az]];
+    const path = [];
+    if (!cutStart) path.push([ax, az]);
     // point d'accroche sur la chaussée de départ
     const first = mid[0];
     let st = starts[0];
     for (const s of starts) if (eB[s.j] === first) { st = s; break; }
-    if (st.d > 3) path.push([st.px, st.pz, E[eA[st.j]] + (E[eB[st.j]] - E[eA[st.j]]) * st.t]);
+    if (st.d > 3 || cutStart) path.push([st.px, st.pz, eleAt(st)]);
     for (const u of mid) path.push([X[u], Z[u], E[u]]);
     if (!partial) {
       const gl = goals[goalEdge[end]];
-      if (gl && (gl.t > 0.02 || gl.d > 3)) path.push([gl.px, gl.pz, E[eA[gl.j]] + (E[eB[gl.j]] - E[eA[gl.j]]) * gl.t]);
+      if (gl && (gl.t > 0.02 || gl.d > 3 || cutEnd)) path.push([gl.px, gl.pz, eleAt(gl)]);
     }
-    path.push([bx, bz]);
-    let length = 0;
-    for (let i = 1; i < path.length; i++) length += Math.hypot(path[i][0] - path[i - 1][0], path[i][1] - path[i - 1][1]);
+    // itinéraire partiel (budget dépassé) : la ligne droite finale reste, elle sera recalculée en route
+    if (!cutEnd || partial) path.push([bx, bz]);
     const time = partial ? g[end] + bestH : bestGoalCost;
-    return { path, length, time: byTime ? time : length / 10, routed: true, partial, ms: now() - t0, expanded: pops };
+    const r = finish(path, { partial, expanded: pops });
+    r.time = byTime ? time : r.length / 10;
+    return r;
   }
 
   /** Nœud du graphe le plus proche (compatibilité). */

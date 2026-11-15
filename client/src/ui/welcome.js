@@ -4,7 +4,7 @@
 // La ville est lue une fois dans `?city=` : choisir une autre ville = recharger la page avec le bon paramètre.
 import { bus as coreBus } from '../core/bus.js';
 import { CITY, CITY_ID, CITIES, DEFAULT_CITY } from '@shared/cities.js';
-import { h, icon, lsGet, lsSet, copyText, clamp } from './util.js';
+import { h, icon, lsGet, lsSet, copyText, clamp, typo } from './util.js';
 import { cityArt, cityLine } from './cityart.js';
 import { controlsGrid } from './panels.js';
 
@@ -75,10 +75,10 @@ function createShell() {
   function paintProgress(label) {
     const f = prog.ready ? 1 : prog.sawData ? 0.5 * (prog.total ? prog.done / prog.total : 0) + 0.5 * (prog.mod / STEPS.length) : prog.mod / STEPS.length;
     if (f > prog.frac || prog.ready) { prog.frac = f; prog.t = performance.now(); bootWait.hidden = true; }
-    const pct = `${Math.round(clamp(prog.frac, 0, 1) * 100)} %`;
+    const pct = `${Math.round(clamp(prog.frac, 0, 1) * 100)}\u00a0%`;
     bootBar.style.transform = `scaleX(${clamp(prog.frac, 0.02, 1)})`;
     bootPct.textContent = pct;
-    if (label) bootStep.textContent = label;
+    if (label) bootStep.textContent = typo(label);
     const cs = cardState.get(CITY_ID);
     if (cs && !prog.ready && !prog.failed) cs.textContent = `Chargement ${pct}`;
   }
@@ -105,16 +105,16 @@ function createShell() {
     const idle = performance.now() - prog.t;
     if (idle < 7000) return;
     const heavy = prog.sawData && prog.done < prog.total;
-    bootWait.textContent = heavy
+    bootWait.textContent = typo(heavy
       ? `Les données de ${city.name} sont volumineuses : le premier chargement peut prendre une à deux minutes selon la connexion. Les suivants seront bien plus rapides.`
-      : `${city.name} se construit, encore un instant…`;
+      : `${city.name} se construit, encore un instant…`);
     bootWait.hidden = false;
   }, 1000);
   const notice = h('p', { class: 'mz-notice', hidden: true });
   function fail(text) {
     if (prog.ready) return;
     prog.failed = true; bootWait.hidden = true;
-    notice.textContent = text; notice.hidden = false; boot.classList.add('is-failed');
+    notice.textContent = typo(text); notice.hidden = false; boot.classList.add('is-failed');
     const cs = cardState.get(CITY_ID); if (cs) cs.textContent = 'Indisponible';
   }
   // Seul un rejet pendant le téléchargement des données (avant le premier module) est tenu pour un échec du chargement :
@@ -167,8 +167,9 @@ function createShell() {
     onPlay?.(name, room());
   }
 
-  const howto = h('aside', { class: 'mz-howto', hidden: true }, h('span', { class: 'mz-eyebrow', text: 'Commandes' }), controlsGrid(),
-    h('p', { class: 'mz-hint', text: 'Sur mobile : joystick à gauche, boutons à droite, en mode paysage.' }));
+  // écran tactile (tablette comprise) : la légende des boutons à l'écran, jamais les touches du clavier
+  const howto = h('aside', { class: 'mz-howto', hidden: true }, h('span', { class: 'mz-eyebrow', text: 'Commandes' }), controlsGrid(null, !!coarse),
+    coarse ? null : h('p', { class: 'mz-hint', text: 'Sur mobile : joystick à gauche, boutons à droite, en mode paysage.' }));
   const n = cityIds.length;
   const welcome = h('div', { class: 'mz-welcome' + (autostart ? ' is-auto' : '') },
     h('div', { html: cityLine(redirecting ? saved : city.id), class: 'mz-skywrap' }),
@@ -198,7 +199,7 @@ function createShell() {
       if (!coarse) setTimeout(() => (nameIn.value ? playBtn : nameIn).focus(), 50);
     },
     /** Avertissement lisible sous les cartes (données manquantes, repli…). */
-    notice(text) { notice.textContent = text; notice.hidden = !text; },
+    notice(text) { notice.textContent = typo(text); notice.hidden = !text; },
     fail,
     setNet(state) {
       const txt = { online: 'Serveur en ligne', offline: 'Hors ligne — progression enregistrée sur cet appareil', connecting: 'Connexion au serveur…', reconnecting: 'Reconnexion…' }[state] || state;

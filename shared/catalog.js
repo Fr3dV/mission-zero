@@ -19,3 +19,70 @@ export const VEHICLES = [
 
 export const VEHICLE_BY_ID = Object.fromEntries(VEHICLES.map((v) => [v.id, v]));
 export const STARTER_VEHICLE = 'citadine';
+
+// ---- L'Atelier (contrat v6) : teintes et klaxons signature --------------------------------------
+// `unlock` = condition de déblocage, lue côté SERVEUR dans des valeurs qui ne décroissent jamais
+// (rien ne se reverrouille) : { level?, streak?, fares?, escapes?, dares?, combo?, stars? }
+//   level = niveau du joueur, streak = meilleure série de jours, fares = courses de taxi, escapes = cavales
+//   réussies, dares = Chiches gagnés, combo = meilleur combo de style, stars = étoiles de Légende.
+// Absent = disponible d'emblée.
+
+/**
+ * Nuancier FERMÉ de l'Atelier : 8 teintes payantes et 4 exclusives (gratuites une fois la condition remplie).
+ * Aucune n'est en doublon d'une teinte catalogue (spec.colors, repeinte à 500 Ƶ) ni du bleu des képis.
+ * Format : { id, name, color: '#rrggbb' (minuscules), price, unlock? }.
+ */
+export const PAINTS = [
+  { id: 'menthe', name: 'Vert menthe', color: '#3ddc97', price: 1500 },
+  { id: 'corail', name: 'Corail', color: '#ff6b6b', price: 1500 },
+  { id: 'lavande', name: 'Lavande', color: '#9d8df1', price: 1500 },
+  { id: 'turquoise', name: 'Turquoise', color: '#00b4d8', price: 1500 },
+  { id: 'rose_bonbon', name: 'Rose bonbon', color: '#ff5d8f', price: 1500 },
+  { id: 'vert_anglais', name: 'Vert anglais', color: '#1b4332', price: 1500 },
+  { id: 'caramel', name: 'Caramel', color: '#c68642', price: 1500 },
+  { id: 'creme', name: 'Crème', color: '#f1e3c6', price: 1500 },
+  // exclusives : cadenassées tant que la condition n'est pas remplie
+  { id: 'aurore', name: 'Orange aurore', color: '#ffb347', price: 0, unlock: { streak: 5 } },
+  { id: 'cascade', name: 'Magenta cascadeur', color: '#e0109c', price: 0, unlock: { combo: 10000 } },
+  { id: 'violet_zero', name: 'Violet Zéro', color: '#7b2cbf', price: 0, unlock: { level: 6 } },
+  { id: 'or_legende', name: 'Or de Légende', color: '#d4af37', price: 0, unlock: { stars: 3 } },
+];
+export const PAINT_BY_COLOR = Object.fromEntries(PAINTS.map((p) => [p.color, p]));
+
+// Hauteurs de notes (Hz), gamme tempérée.
+const N = {
+  Mib3: 155.56, Re4: 293.66, Fa4: 349.23, Sol4: 392.0, La4: 440.0, Sib4: 466.16, Si4: 493.88,
+  Do5: 523.25, Re5: 587.33, Mi5: 659.25, Sol5: 783.99, Si5: 987.77,
+};
+
+/**
+ * Klaxons signature. `notes` = mélodie [[fréquence Hz, durée s], …], jouée d'un trait (2 s au plus, sans silence).
+ * Airs traditionnels du domaine public ou sonneries originales uniquement.
+ * Format : { id, name, unlock?, notes }.
+ */
+export const HORNS = [
+  { id: 'std', name: "Klaxon d'origine", notes: [[420, 0.35]] },
+  { id: 'pouet', name: 'Pouet', unlock: { level: 2 }, notes: [[N.Sib4, 0.1], [N.Fa4, 0.2]] },
+  { id: 'deuxtons', name: 'Deux-tons', unlock: { fares: 10 }, notes: [[N.La4, 0.26], [N.Re5, 0.26], [N.La4, 0.26], [N.Re5, 0.3]] },
+  // chant du coq : trois notes qui montent, la dernière tenue puis retombée
+  { id: 'cocorico', name: 'Cocorico', unlock: { streak: 3 }, notes: [[N.Re5, 0.12], [N.Re5, 0.1], [N.Sol5, 0.16], [N.Si5, 0.42], [N.Sol5, 0.2]] },
+  // « La Cucaracha », air traditionnel
+  {
+    id: 'cucaracha', name: 'La Cucaracha', unlock: { dares: 1 },
+    notes: [[N.Sol4, 0.11], [N.Sol4, 0.11], [N.Sol4, 0.11], [N.Do5, 0.28], [N.Mi5, 0.3], [N.Sol4, 0.11], [N.Sol4, 0.11], [N.Sol4, 0.11], [N.Do5, 0.28], [N.Mi5, 0.3]],
+  },
+  { id: 'camion', name: 'Corne de camion', unlock: { escapes: 1 }, notes: [[N.Mib3, 0.3], [N.Mib3, 0.9]] },
+  // « Se Canto », hymne occitan traditionnel (celui qu'on chante au Stadium)
+  {
+    id: 'secanto', name: 'Se Canto', unlock: { level: 4 },
+    notes: [[N.Re4, 0.14], [N.Sol4, 0.14], [N.Sol4, 0.14], [N.La4, 0.14], [N.Si4, 0.28], [N.Si4, 0.14], [N.La4, 0.14], [N.La4, 0.14], [N.Si4, 0.14], [N.Sol4, 0.4]],
+  },
+  // sonnerie originale
+  { id: 'fanfare', name: 'Fanfare', unlock: { combo: 5000 }, notes: [[N.Do5, 0.14], [N.Do5, 0.14], [N.Do5, 0.14], [N.Mi5, 0.28], [N.Do5, 0.14], [N.Mi5, 0.14], [N.Sol5, 0.5]] },
+  // « Une petite musique de nuit » (Mozart, 1787)
+  {
+    id: 'legende', name: 'Klaxon de Légende', unlock: { stars: 1 },
+    notes: [[N.Sol4, 0.3], [N.Re4, 0.15], [N.Sol4, 0.3], [N.Re4, 0.15], [N.Sol4, 0.15], [N.Re4, 0.15], [N.Sol4, 0.15], [N.Si4, 0.15], [N.Re5, 0.4]],
+  },
+];
+export const HORN_BY_ID = Object.fromEntries(HORNS.map((h) => [h.id, h]));

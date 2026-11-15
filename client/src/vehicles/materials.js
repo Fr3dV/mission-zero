@@ -7,8 +7,16 @@ import { CITY } from '@shared/cities.js';
 // Atlas (canvas 512×512) : texel blanc, plaques d'immatriculation françaises, lumineux « TAXI ».
 const ATLAS = 512;
 const rectUV = (x, y, w, h) => [x / ATLAS, 1 - (y + h) / ATLAS, (x + w) / ATLAS, 1 - y / ATLAS]; // [u0,v0,u1,v1]
+// Plaques : 3 grandes (376×80 : celle par défaut de chaque modèle, donc de la voiture personnelle et des vitrines) puis
+// 6 petites (160×34, bande basse de l'atlas) réservées aux voitures du trafic. Chaque voiture choisit la sienne par un
+// uniform de SON matériau d'optiques (voir createLightsMaterial) : aucune géométrie ni draw call en plus.
+const PLATE_W = 376, PLATE_H = 80, PLATE_K = 0.425;
+const PLATE_SLOTS = [
+  [8, 48, 1], [8, 136, 1], [8, 224, 1],
+  [8, 424, PLATE_K], [176, 424, PLATE_K], [344, 424, PLATE_K], [8, 466, PLATE_K], [176, 466, PLATE_K], [344, 466, PLATE_K],
+];
 export const ATLAS_UV = {
-  plates: [rectUV(8, 48, 376, 80), rectUV(8, 136, 376, 80), rectUV(8, 224, 376, 80)],
+  plates: PLATE_SLOTS.map(([x, y, k]) => rectUV(x, y, PLATE_W * k, PLATE_H * k)),
   taxi: rectUV(8, 320, 256, 96),
   taxiBack: rectUV(272, 320, 96, 96),
 };
@@ -25,8 +33,9 @@ export function getAtlas() {
   const g = c.getContext('2d');
   g.fillStyle = '#fff'; g.fillRect(0, 0, ATLAS, 44);
   // plaques : fond blanc réfléchissant, bandes bleues (F à gauche, département à droite)
-  [48, 136, 224].forEach((y, i) => {
-    const x = 8, w = 376, h = 80;
+  PLATE_SLOTS.forEach(([px, py, pk], i) => {
+    const x = 0, y = 0, w = PLATE_W, h = PLATE_H;
+    g.save(); g.translate(px, py); g.scale(pk, pk);
     g.fillStyle = '#f4f4f1'; g.fillRect(x, y, w, h);
     g.strokeStyle = '#15151a'; g.lineWidth = 3; g.strokeRect(x + 1.5, y + 1.5, w - 3, h - 3);
     g.fillStyle = '#123a9c'; g.fillRect(x + 4, y + 4, 34, h - 8); g.fillRect(x + w - 38, y + 4, 34, h - 8);
@@ -35,6 +44,7 @@ export function getAtlas() {
     g.fillText('F', x + 21, y + 58); g.font = 'bold 20px Arial, sans-serif'; g.fillText(String(CITY?.plate || '75').slice(0, 3), x + w - 21, y + 56);   // suffixe départemental de la ville courante
     g.fillStyle = '#101014'; g.font = 'bold 54px "Arial Narrow", Arial, sans-serif';
     g.fillText(plateText(i + 3), x + w / 2, y + h / 2 + 3, w - 96);
+    g.restore();
   });
   // lumineux TAXI
   g.fillStyle = '#f6f3e6'; g.fillRect(8, 320, 256, 96);
@@ -238,23 +248,30 @@ export function getGlass() {
   return (_glass = m);
 }
 
-// Canaux lumineux des optiques.
-export const CH = { HEAD: 0, TAIL: 1, BRAKE: 2, REVERSE: 3, BLINK_L: 4, BLINK_R: 5, DRL: 6, SIGN: 7 };
-/** Matériau des optiques : un par voiture (uniform d'intensité par canal), programme partagé. */
+// Canaux lumineux des optiques. BEACON_L / BEACON_R : les deux feux du gyrophare ; OFF : jamais allumé (socle du
+// gyrophare) ; PLATE : jamais allumé, et l'UV (0..1 sur la plaque) est replacé dans l'atlas par l'uniform `plate`.
+export const CH = { HEAD: 0, TAIL: 1, BRAKE: 2, REVERSE: 3, BLINK_L: 4, BLINK_R: 5, DRL: 6, SIGN: 7, BEACON_L: 8, BEACON_R: 9, OFF: 10, PLATE: 11 };
+/**
+ * Matériau des optiques : un par voiture (uniforms d'intensité par canal et de plaque), programme partagé.
+ * userData.lint = intensités (Float32Array) ; userData.plate = [u0, v0, largeur, hauteur] de la plaque dans l'atlas.
+ */
 export function createLightsMaterial() {
-  const lint = { value: new Float32Array(8) };
+  const lint = { value: new Float32Array(12) };
+  const r0 = ATLAS_UV.plates[0];
+  const plate = { value: new Float32Array([r0[0], r0[1], r0[2] - r0[0], r0[3] - r0[1]]) };
   const m = new THREE.MeshStandardMaterial({ vertexColors: true, map: getAtlas(), roughness: 0.22, metalness: 0.0 });
   m.onBeforeCompile = (sh) => {
-    sh.uniforms.lint = lint;
+    sh.uniforms.lint = lint; sh.uniforms.plate = plate;
     sh.vertexShader = sh.vertexShader
-      .replace('#include <common>', '#include <common>\nattribute float lch;\nuniform float lint[8];\nvarying float vLi;')
+      .replace('#include <common>', '#include <common>\nattribute float lch;\nuniform float lint[12];\nuniform vec4 plate;\nvarying float vLi;')
+      .replace('#include <uv_vertex>', '#include <uv_vertex>\n#ifdef USE_MAP\nif (lch > 10.5) vMapUv = plate.xy + uv * plate.zw;\n#endif')
       .replace('#include <begin_vertex>', '#include <begin_vertex>\nvLi = lint[int(lch + 0.5)];');
     sh.fragmentShader = sh.fragmentShader
       .replace('#include <common>', '#include <common>\nvarying float vLi;')
       .replace('#include <emissivemap_fragment>', '#include <emissivemap_fragment>\ntotalEmissiveRadiance += diffuseColor.rgb * vLi;');
   };
-  m.customProgramCacheKey = () => 'mz-veh-lights';
-  m.userData.lint = lint.value;
+  m.customProgramCacheKey = () => 'mz-veh-lights2';
+  m.userData.lint = lint.value; m.userData.plate = plate.value;
   m.envMapIntensity = 0.6;
   return m;
 }

@@ -215,3 +215,28 @@ export function createTrafficVoices(ac, out, noise, count = 4) {
     },
   };
 }
+
+// Sirène deux tons (« pin-pon ») en boucle pour la voiturette des képis : un seul oscillateur dont la hauteur
+// alterne entre la (435 Hz) et ré (580 Hz) sous l'effet d'un LFO carré. Niveau et panoramique sont pilotés par
+// set() ; à niveau nul elle ne coûte rien à l'image (aucun appel à l'API audio).
+export function createSiren(ac, out) {
+  const g = ac.createGain(); g.gain.value = 0;
+  const pan = ac.createStereoPanner();
+  const osc = ac.createOscillator(); osc.type = 'square'; osc.frequency.value = 507.5;
+  const lfo = ac.createOscillator(); lfo.type = 'square'; lfo.frequency.value = 0.9;   // un pin-pon ≈ 1,1 s
+  const dev = ac.createGain(); dev.gain.value = 72.5; lfo.connect(dev).connect(osc.frequency);
+  const bp = ac.createBiquadFilter(); bp.type = 'bandpass'; bp.frequency.value = 1100; bp.Q.value = 0.6;
+  osc.connect(bp).connect(g).connect(pan).connect(out);
+  osc.start(); lfo.start();
+  let level = 0, panV = 0;
+  return {
+    gain: g, pan,
+    get level() { return level; },
+    /** level 0..1 (cible du GainNode), p −1..1 (gauche..droite), t = ac.currentTime. */
+    set(lvl, p, t) {
+      if (lvl <= 0) { if (level === 0) return; level = 0; g.gain.setTargetAtTime(0, t, 0.12); return; }
+      level = lvl; g.gain.setTargetAtTime(lvl, t, 0.15);
+      if (Math.abs(p - panV) > 0.01) { panV = p; pan.pan.setTargetAtTime(p, t, 0.1); }
+    },
+  };
+}

@@ -1,5 +1,5 @@
 // Bonus : courte boucle générative façon jazz manouche / accordéon (100 % synthétique, aucune œuvre existante).
-// Jouée dans les menus (avant la connexion). Planification par anticipation depuis update().
+// Jouée dans les menus (avant la connexion), puis fondue en douceur à l'entrée en ville. Planification par anticipation depuis update().
 const A2 = 110;
 const st = (n) => A2 * 2 ** (n / 12);
 // grille en la mineur : Am6 | Am6 | Dm6 | Dm6 | E7 | E7 | Am6 | E7
@@ -12,7 +12,7 @@ const SCALE = [0, 2, 3, 5, 7, 8, 11]; // la mineur harmonique
 export function createMusic(ac, out) {
   const bus = ac.createGain(); bus.gain.value = 0; bus.connect(out);
   const BEAT = 60 / 188;
-  let playing = false, nextT = 0, beat = 0, deg = 7, rest = 0;
+  let playing = false, stopAt = 0, nextT = 0, beat = 0, deg = 7, rest = 0;
 
   function pluck(t, f, vol, dur) {
     const o = ac.createOscillator(), g = ac.createGain(), lp = ac.createBiquadFilter();
@@ -57,10 +57,24 @@ export function createMusic(ac, out) {
   }
   return {
     get playing() { return playing; },
-    start() { if (playing) return; playing = true; nextT = ac.currentTime + 0.1; beat = 0; bus.gain.cancelScheduledValues(ac.currentTime); bus.gain.setTargetAtTime(0.5, ac.currentTime, 0.3); },
-    stop() { if (!playing) return; playing = false; bus.gain.setTargetAtTime(0, ac.currentTime, 0.5); },
+    get fading() { return stopAt > 0; },
+    get gain() { return bus; },
+    start() {
+      if (playing && !stopAt) return;
+      if (!playing) { nextT = ac.currentTime + 0.1; beat = 0; }
+      playing = true; stopAt = 0;
+      bus.gain.cancelScheduledValues(ac.currentTime); bus.gain.setTargetAtTime(0.5, ac.currentTime, 0.3);
+    },
+    // Fondu de sortie linéaire sur `fade` secondes : la pompe continue de jouer pendant le fondu, puis s'arrête.
+    stop(fade = 0.5) {
+      if (!playing || stopAt) return;
+      const t = ac.currentTime, v = bus.gain.value;
+      stopAt = t + Math.max(0.05, fade);
+      bus.gain.cancelScheduledValues(t); bus.gain.setValueAtTime(v, t); bus.gain.linearRampToValueAtTime(0, stopAt);
+    },
     update() {
       if (!playing) return;
+      if (stopAt && ac.currentTime >= stopAt) { playing = false; stopAt = 0; return; }
       if (nextT < ac.currentTime - 0.5) nextT = ac.currentTime + 0.05; // onglet resté en arrière-plan
       while (nextT < ac.currentTime + 0.25) { scheduleBeat(nextT, beat++); nextT += BEAT; }
     },

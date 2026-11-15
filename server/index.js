@@ -2,6 +2,8 @@
 // PROPRIÉTAIRE : agent "serveur/réseau".
 // Variables d'environnement : PORT (8080), STORE (file | memory | firestore), DATA_DIR / DATA_FILE (store fichier),
 // FIRESTORE_PROJECT / FIRESTORE_DATABASE / FIRESTORE_PREFIX (store Firestore), MAX_CONNECTIONS (1000),
+// HELLO_BURST (40 : hello admis en rafale depuis une même adresse, puis un toutes les 2 s ; 0 = sans limite — l'adresse
+// est le dernier élément de x-forwarded-for, posé par Cloud Run),
 // STATIC_CACHE_DIR (.data/static-cache), STATIC_CACHE_MAX_MB (256), STATIC_PREWARM (0 = pas de pré-compression).
 import { startServer } from './app.js';
 import { createStore, MemoryStore } from './store/index.js';

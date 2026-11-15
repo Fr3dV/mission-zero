@@ -6,25 +6,43 @@ import { startServer } from './app.js';
 import { createStatic } from './static.js';
 import { MemoryStore } from './store/memory.js';
 import { newProfile } from '../shared/economy.js';
-import { PROTOCOL_VERSION, encode, decode } from '../shared/protocol.js';
+import { PROTOCOL_VERSION, encode, decode, encodeState } from '../shared/protocol.js';
 
-export async function boot({ store = new MemoryStore(), staticHandler = createStatic({ cacheDir: null }), ...opts } = {}) {
-  const clock = { t: Date.now() };
+/**
+ * Serveur de test. Options utiles : `store`, `at` (heure de départ de l'horloge pilotable, ms), `rand` (générateur
+ * [0, 1) du serveur : destinations et clients du taxi, arrivée du Chiche), `rentIntervalMs`.
+ */
+export async function boot({ store = new MemoryStore(), staticHandler = createStatic({ cacheDir: null }), at = Date.now(), ...opts } = {}) {
+  const clock = { t: at };
   // statique : cache en mémoire seulement, les tests n'écrivent rien dans .data/
   const app = await startServer({ port: 0, store, staticHandler, now: () => clock.t, ...opts });
   return { ...app, clock, advance(sec) { clock.t += sec * 1000; } };
 }
 
 let seq = 0;
-/** Crée directement un compte dans le store (avec un solde choisi) et retourne son jeton. */
-export function seedPlayer(store, { name = 'Riche', money = 1_000_000 } = {}) {
+/**
+ * Crée directement un compte dans le store (avec un solde choisi) et retourne son jeton.
+ * `done` = missions déjà réussies (niveau) ; `edit(profil)` = retouche libre avant l'écriture ;
+ * `raw` = enregistrement écrit tel quel à la place d'un profil neuf (profil d'un ancien format : id et tokenHash sont posés ici).
+ */
+export function seedPlayer(store, { name = 'Riche', money = 1_000_000, done = 0, edit = null, raw = null } = {}) {
   const id = 'p' + String(++seq).padStart(16, '0');
   const secret = 'secret-de-test-' + String(seq).padStart(8, '0');
-  const p = newProfile(id, name);
-  p.money = money;
+  const p = raw ? { ...raw, id } : newProfile(id, name);
+  if (!raw) { p.money = money; p.stats.missionsDone = done; }
   p.tokenHash = createHash('sha256').update(secret).digest('hex');
+  edit?.(p);
   store.putPlayer(p);
   return { id, token: `${id}.${secret}` };
+}
+
+/** Compte les écritures d'un store : { players, rooms } (compteurs vivants). */
+export function countWrites(store) {
+  const n = { players: 0, rooms: 0 };
+  const putPlayer = store.putPlayer.bind(store), putRoom = store.putRoom.bind(store);
+  store.putPlayer = (rec) => { n.players++; return putPlayer(rec); };
+  store.putRoom = (rec) => { n.rooms++; return putRoom(rec); };
+  return n;
 }
 
 export class Client {
@@ -68,6 +86,36 @@ export async function join(app, { name = 'Alice', room = 'test', token, city } =
   c.send('hello', { v: PROTOCOL_VERSION, name, room, token, city });
   c.welcome = await c.next('welcome');
   return c;
+}
+
+/** Envoie un état de position : à pied par défaut, au volant si `car` (modèle du catalogue) est donné. */
+export function sendState(c, x, z, { car = null, speed = car ? 15 : 0, anim = car ? 'drive' : 'idle' } = {}) {
+  c.pos = { x, z };
+  c.send('st', { s: encodeState({ x, y: 0, z, yaw: 0, speed, mode: car ? 'vehicle' : 'foot', anim, vehicleType: car, vehicleColor: null }) });
+}
+
+/** Pose le joueur quelque part : l'horloge avance de 2 s, si bien qu'un grand saut est admis comme téléportation. */
+export async function place(app, c, x, z, opts) {
+  app.advance(2);
+  sendState(c, x, z, opts);
+  await c.sync();
+}
+
+/** Fait rouler le joueur jusqu'à (x, z) par pas plausibles (200 m toutes les 2 s au plus) : jamais une téléportation. */
+export async function drive(app, c, x, z, opts = {}) {
+  const from = c.pos, d = Math.hypot(x - from.x, z - from.z), n = Math.max(1, Math.ceil(d / (opts.step || 200)));
+  for (let i = 1; i <= n; i++) {
+    app.advance(2);
+    sendState(c, from.x + ((x - from.x) * i) / n, from.z + ((z - from.z) * i) / n, { car: 'citadine', ...opts });
+    await c.sync();
+  }
+}
+
+/** Ferme un client et attend que le serveur l'ait détaché (avant de faire avancer l'horloge, par exemple). */
+export async function quit(app, c) {
+  const n = app.game.stats().connections;
+  await c.close();
+  for (let i = 0; i < 400 && app.game.stats().connections >= n; i++) await new Promise((r) => setTimeout(r, 5));
 }
 
 /** État du joueur tel que le serveur le diffuse : [id, x, y, z, yaw, speed, mode, anim, …] (après traitement de tout ce qui a été envoyé). */

@@ -1,7 +1,10 @@
 // Joueurs distants : tampon d'instantanés, interpolation (~120 ms de retard), rendu des avatars,
 // de leurs voitures et des étiquettes de pseudo. N'utilise que les contrats de player (createCharacter)
 // et vehicles (spawn / setTransform / remove), importés ou appelés défensivement.
+// Contrat v6 (lot player) : chutes visibles (au PASSAGE à 'lying' l'avatar est renversé une fois, puis 'getup'),
+// 'stumble', bulles express et onde de klaxon sur net:emote, étoiles de Légende « pseudo ★n » refaites sur net:look.
 import * as playerModule from '../player/index.js';
+import { createBubble } from '../player/bubbles.js';
 import { INTERP_DELAY_MS, decodeState } from '@shared/protocol.js';
 
 const MAX_EXTRAPOLATION_MS = 220;
@@ -30,12 +33,15 @@ export function createRemotes(ctx, players) {
   labelRoot.name = 'net:étiquettes';
   labelRoot.frustumCulled = false;
   scene.add(labelRoot);
-  function makeLabel(name, color) {
+  /** Étiquette « pseudo » ou « pseudo ★n » (n = étoiles de Légende, dorées). */
+  function makeLabel(name, color, stars = 0) {
     const H = 64, font = '700 36px system-ui, -apple-system, "Segoe UI", sans-serif';
     const canvas = document.createElement('canvas');
     let g = canvas.getContext('2d');
     g.font = font;
-    const W = Math.ceil(Math.min(420, g.measureText(name).width + 64));
+    const tag = stars > 0 ? '★' + stars : '', tagW = tag ? g.measureText(tag).width + 12 : 0;
+    const nameW = Math.min(g.measureText(name).width, 356 - tagW);
+    const W = Math.ceil(nameW + tagW + 64);
     canvas.width = W; canvas.height = H; // redimensionner réinitialise le contexte
     g = canvas.getContext('2d');
     g.font = font;
@@ -46,14 +52,15 @@ export function createRemotes(ctx, players) {
     g.fillStyle = color;
     g.beginPath(); g.arc(24, H / 2, 8, 0, Math.PI * 2); g.fill();
     g.fillStyle = '#ffffff'; g.textAlign = 'left'; g.textBaseline = 'middle';
-    g.fillText(name, 42, H / 2 + 2, W - 58);
+    g.fillText(name, 42, H / 2 + 2, nameW);
+    if (tag) { g.fillStyle = '#ffd24a'; g.fillText(tag, 42 + nameW + 12, H / 2 + 2); }
     const tex = new THREE.CanvasTexture(canvas);
     tex.colorSpace = THREE.SRGBColorSpace;
     tex.generateMipmaps = false; tex.minFilter = THREE.LinearFilter; // texte net même réduit
     const mat = new THREE.SpriteMaterial({ map: tex, transparent: true, depthWrite: false, fog: false, toneMapped: false });
     const sprite = new THREE.Sprite(mat);
-    sprite.renderOrder = 10;
-    sprite.name = 'pseudo:' + name;
+    sprite.renderOrder = 25; // au-dessus des icônes de marqueurs (22), sous la bulle (26)
+    sprite.name = 'pseudo:' + name + (tag ? ' ' + tag : '');
     sprite.userData.aspect = W / H;
     return sprite;
   }
@@ -83,7 +90,7 @@ export function createRemotes(ctx, players) {
     if (!e.char) return;
     try { e.char.dispose?.(); } catch { /* module joueur en cours de réécriture */ }
     e.char.group?.removeFromParent();
-    e.char = null;
+    e.char = null; e.anim = null;
   }
 
   // ------------------------------------------------------------------ voiture
@@ -110,7 +117,12 @@ export function createRemotes(ctx, players) {
     let e = entries.get(id);
     if (!e) {
       const name = players.get(id)?.name || 'Joueur';
-      e = { id, name, color: PALETTE[hash(id) % PALETTE.length], buf: [], char: null, vehicle: null, vehicleKey: null, label: null, lastRx: 0 };
+      e = {
+        id, name, color: PALETTE[hash(id) % PALETTE.length], buf: [], char: null, vehicle: null, vehicleKey: null, label: null, lastRx: 0,
+        st: starsOf(players.get(id)), // étoiles de Légende affichées sur l'étiquette
+        anim: null,                   // dernière animation réseau appliquée à l'avatar (null = avatar pas encore montré)
+        fx: null,                     // bulle express + onde de klaxon (créées au premier net:emote)
+      };
       entries.set(id, e);
     }
     return e;
@@ -119,8 +131,60 @@ export function createRemotes(ctx, players) {
     const e = entries.get(id);
     if (!e) return;
     dropVehicle(e); dropCharacter(e); disposeLabel(e);
+    e.fx?.dispose(); e.fx = null;
     entries.delete(id);
   }
+
+  // ------------------------------------------------------------------ étoiles, bulles express, klaxon (contrat v6)
+  const starsOf = (info) => { const n = Math.floor(+info?.st || 0); return n > 0 ? Math.min(n, 99) : 0; };
+  /** Mode tranquille : lu au moment de l'usage (ctx.ui est créé après le réseau). */
+  const quiet = () => !!ctx.ui?.prefs?.quiet;
+  // net:look { id } : niveau, étoiles ou klaxon d'un joueur ont changé -> l'étiquette est refaite si ses étoiles ont changé
+  ctx.bus?.on?.('net:look', (m) => {
+    const e = m && entries.get(m.id);
+    if (!e) return;
+    const st = starsOf(players.get(e.id));
+    if (st !== e.st) { e.st = st; disposeLabel(e); }
+  });
+  // net:emote { id, k } : k = 0 klaxon (petite onde sur l'étiquette), 1..4 bulle affichée 3 s au-dessus du pseudo
+  ctx.bus?.on?.('net:emote', (m) => {
+    const e = m && entries.get(m.id);
+    if (!e || quiet()) return;
+    const k = m.k | 0;
+    if (k < 0 || k > 4) return;
+    if (!e.fx) e.fx = createBubble(THREE, labelRoot);
+    if (k === 0) e.fx.honk(); else e.fx.show(k);
+  });
+
+  // ------------------------------------------------------------------ animation de l'avatar à pied
+  /** Direction et vitesse de la chute : le déplacement réel entre les deux derniers échantillons, sinon droit devant à 6 m/s. */
+  const fall = { x: 0, z: -1, speed: 6 };
+  function fallDir(e, s) {
+    const n = e.buf.length, b = n > 1 ? e.buf[n - 1] : null, a = b ? e.buf[n - 2] : null;
+    fall.x = -Math.sin(s.yaw); fall.z = -Math.cos(s.yaw); fall.speed = 6;
+    if (a && b.t > a.t) {
+      const dx = b.x - a.x, dz = b.z - a.z, d = Math.hypot(dx, dz), v = d / ((b.t - a.t) / 1000);
+      if (d > 0.08 && d < TELEPORT_DIST && v > 1.5) { fall.x = dx / d; fall.z = dz / d; fall.speed = Math.max(4, Math.min(14, v)); }
+    }
+    return fall;
+  }
+  function applyAnim(e, ch, anim, speed, s) {
+    const prev = e.anim;
+    e.anim = anim;
+    if (anim === 'lying') {
+      if (prev === 'lying') return;      // déjà renversé : la chute puis la pose au sol se déroulent seules
+      if (prev !== null && ch.knock) {   // PASSAGE à 'lying' : renversé une seule fois
+        const d = fallDir(e, s);
+        ch.knock({ dirX: d.x, dirZ: d.z, speed: d.speed });
+      } else { ch.setState?.({ anim: 'lying', speed: 0 }); ch.snap?.(); } // déjà à terre à son apparition : pas de chute rejouée
+      return;
+    }
+    // 'stumble' se joue une fois par passage (l'animation revient seule à 'idle' : on ne la relance pas tant que l'état dure)
+    if (anim === 'stumble' && prev === 'stumble') return;
+    animArg.anim = anim; animArg.speed = speed;
+    ch.setState?.(animArg);              // 'getup' est ignoré tant que la chute n'est pas terminée, puis appliqué
+  }
+  const animArg = { anim: 'idle', speed: 0 }; // argument réutilisé (aucune allocation par image)
 
   /** Instantané serveur : { ts, p: [[id, ...état], ...] }. */
   function onSnapshot(m, selfId) {
@@ -173,11 +237,14 @@ export function createRemotes(ctx, players) {
       const info = players.get(e.id);
       if (!info) { remove(e.id); continue; } // le joueur a quitté la salle
       if (info.name && info.name !== e.name) { e.name = info.name; disposeLabel(e); }
+      const st = starsOf(info);
+      if (st !== e.st) { e.st = st; disposeLabel(e); }
       const s = local - e.lastRx > STALE_MS ? null : sample(e, t);
       if (!s) {
         dropVehicle(e);
         if (e.char) e.char.group.visible = false;
         if (e.label) e.label.visible = false;
+        e.anim = null; e.fx?.clear();
         continue;
       }
       let top = 1.95, y = s.y;
@@ -188,22 +255,27 @@ export function createRemotes(ctx, players) {
         y = v.pos?.y ?? ctx.heightAt?.(s.x, s.z) ?? s.y;
         top = (v.spec?.height || 1.5) + 0.35;
         if (e.char) e.char.group.visible = false;
+        e.anim = null;
       } else {
         const ch = ensureCharacter(e);
         ch.group.visible = true;
         ch.group.position.set(s.x, s.y, s.z);
         ch.group.rotation.y = s.yaw;
-        try { ch.setState?.({ anim: inCar ? 'sit' : s.anim, speed: Math.abs(s.speed) }); ch.update?.(dt); } catch { /* idem */ }
+        try { applyAnim(e, ch, inCar ? 'sit' : s.anim, Math.abs(s.speed), s); ch.update?.(dt); } catch { /* idem */ }
+        top -= 1.15 * (ch.down || 0); // renversé : l'étiquette descend avec lui
       }
       // étiquette : taille compensée par la distance, masquée au loin
       const dist = Math.hypot(cam.x - s.x, cam.y - y, cam.z - s.z);
+      const k = Math.max(0.42, Math.min(10, dist * 0.042)); // hauteur en mètres : taille apparente constante au-delà de ~12 m
       if (dist < LABEL_MAX_DIST) {
-        if (!e.label) { e.label = makeLabel(e.name, e.color); labelRoot.add(e.label); }
-        const k = Math.max(0.42, Math.min(10, dist * 0.042)); // hauteur en mètres : taille apparente constante au-delà de ~12 m
+        if (!e.label) { e.label = makeLabel(e.name, e.color, e.st); labelRoot.add(e.label); }
+        const kp = e.fx ? k * (1 + 0.14 * e.fx.pulse) : k;   // klaxon : l'étiquette bat une fois
         e.label.visible = true;
-        e.label.scale.set(k * e.label.userData.aspect, k, 1);
+        e.label.scale.set(kp * e.label.userData.aspect, kp, 1);
         e.label.position.set(s.x, y + top + k * 0.5, s.z);
       } else if (e.label) e.label.visible = false;
+      // bulle express et onde de klaxon : au-dessus de l'étiquette, bornées comme elle, masquées en mode tranquille
+      if (e.fx?.active) e.fx.update(dt, s.x, y + top + k, s.z, k, dist < LABEL_MAX_DIST && !quiet());
       // état lisible par l'UI (minicarte, liste des joueurs)
       info.x = s.x; info.y = y; info.z = s.z; info.yaw = s.yaw; info.speed = s.speed; info.mode = s.mode; info.vehicleType = inCar ? s.vehicleType : null;
     }

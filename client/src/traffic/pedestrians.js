@@ -18,6 +18,12 @@
 //   3 FUITE   s'éloigne en courant ('flee', sinon 'run'), ou en boitant s'il a été heurté fort ; puis retour à sa promenade
 //   4 BADAUD  s'arrête et regarde un accident à distance (ou proteste, tourné vers sa voiture volée)
 //   5 ÉJECTÉ  conducteur sorti de sa voiture (vol) : titube 1,2 s, puis proteste (4) ou s'enfuit (3)
+//
+// Contrat v6 :
+//   - `pedestrian:dodge {x, z, vehicle, pedestrian}` : l'esquive s'est armée à cause du véhicule du joueur local lancé à
+//     plus de 6 m/s et aucun `pedestrian:hit` n'a suivi dans la seconde (au plus un par piéton toutes les 3 s) ;
+//   - les unités de police (driver === 'police') ne sont pas vues : ni choc, ni esquive, ni panique ;
+//   - klaxon du joueur (onHorn) : sursaut des piétons à moins de 12 m.
 import { createCharacter } from '../player/index.js';
 import { baseHeightAt } from '@shared/terrain.js';
 import { F_WALK, F_ELEV, KIND_STREET, KIND_QUAY } from './graph.js';
@@ -72,17 +78,20 @@ export function createPedestrians(T) {
   const vX = new Float32Array(MAXV), vZ = new Float32Array(MAXV), vY = new Float32Array(MAXV), vFx = new Float32Array(MAXV), vFz = new Float32Array(MAXV);
   const vHl = new Float32Array(MAXV), vHw = new Float32Array(MAXV), vSp = new Float32Array(MAXV), vVx = new Float32Array(MAXV), vVz = new Float32Array(MAXV);
   const vAI = new Uint8Array(MAXV), vRef = new Array(MAXV).fill(null);
-  let nV = 0;
+  let nV = 0, vMine = -1; // vMine : indice du véhicule conduit par le joueur local (−1 s'il est à pied)
   function gatherVehicles() {
-    nV = 0;
+    nV = 0; vMine = -1;
     const list = ctx.vehicles && ctx.vehicles.list;
     if (!list) return;
     const R = T.PED_RADIUS + 70, fx = T.fx, fz = T.fz;
+    const pl = ctx.player, mine = pl && pl.mode === 'vehicle' ? pl.vehicle : null;
     for (let i = 0; i < list.length && nV < MAXV; i++) {
       const v = list[i];
+      if (v.driver === 'police') continue; // unité de police (contrat v6) : ni choc, ni esquive, ni panique — elle n'existe pas pour les piétons
       const dx = v.pos.x - fx, dz = v.pos.z - fz;
       if (dx > R || dx < -R || dz > R || dz < -R) continue;
       const k = nV++, sp = v.speed || 0, f1 = -Math.sin(v.yaw), f2 = -Math.cos(v.yaw);
+      if (v === mine) vMine = k;
       vX[k] = v.pos.x; vZ[k] = v.pos.z; vY[k] = v.pos.y; vFx[k] = f1; vFz[k] = f2; vSp[k] = sp;
       vHl[k] = v.spec ? v.spec.length * 0.5 : 2.2; vHw[k] = v.spec ? v.spec.width * 0.5 : 0.95;
       if (v.vel && !v.remote) { vVx[k] = v.vel.x; vVz[k] = v.vel.z; } else { vVx[k] = f1 * sp; vVz[k] = f2 * sp; }
@@ -212,6 +221,7 @@ export function createPedestrians(T) {
     const rx = -vFz[i], rz = vFx[i], side = l >= 0 ? 1 : -1, lat = (0.25 + 0.5 * Math.min(1, Math.abs(l) / vHw[i])) * 0.5 * rel;
     const first = p.mode !== 1;
     p.mode = 1; p.onRoad = true; p.dodgeT = 0; p.hitCd = 0.6; p.threatT = 0;
+    p.dgT = 0; p.dgV = null; // renversé : ce n'était pas une esquive
     // projeté un peu plus vite que la voiture, vers l'avant et sur le côté où il a été pris
     p.vx = vVx[i] * 1.05 + rx * side * lat; p.vz = vVz[i] * 1.05 + rz * side * lat;
     p.vy = Math.min(1.2 + rel * 0.22, 5.5); if (p.hy < 0.05) p.hy = 0.05;
@@ -235,6 +245,7 @@ export function createPedestrians(T) {
   function bump(p, i, l, rel) {
     const v = vRef[i], rx = -vFz[i], rz = vFx[i], side = l >= 0 ? 1 : -1;
     p.hitCd = 1.5; p.ddx = rx * side; p.ddz = rz * side; p.dodgeT = 0.9; p.threatT = 9; // il s'écarte vivement
+    p.dgT = 0; p.dgV = null; // bousculé : ce n'était pas une esquive
     if (p.mode === 4) p.mode = 0;
     setAnim(p, 'stumble', 3, 'run');
     ctx.bus.emit('pedestrian:hit', { x: p.x, y: p.y, z: p.z, speed: rel, vehicle: v, severity: 'bump', pedestrian: p });
@@ -307,7 +318,7 @@ export function createPedestrians(T) {
 
   /** Contacts (balayés, donc sans effet tunnel) et menaces pour un piéton ; `full` = avec la partie esquive. */
   function vehicles(p, dt, full) {
-    let threat = false, tdx = 0, tdz = 0, near = false;
+    let threat = false, tdx = 0, tdz = 0, near = false, mine = false;
     const down = p.mode === 1, py = p.y;
     for (let i = 0; i < nV; i++) {
       const dx = p.x - vX[i], dz = p.z - vZ[i];
@@ -347,6 +358,7 @@ export function createPedestrians(T) {
         if (ff > -1 && ff < hl + ahead && al < hw + (asp > 8 && !vAI[i] ? 1.4 : 0.9)) {
           const sign = al < 0.15 ? (p.idx & 1 ? 1 : -1) : (l >= 0 ? 1 : -1);
           threat = true; tdx = -fz * sign; tdz = fx * sign;
+          if (i === vMine && asp > 6) mine = true; // c'est le joueur, lancé à plus de 6 m/s, qui le fait sauter de côté
           // voiture lancée sur le trottoir : panique autour
           if (asp > 8 && !vAI[i] && !p.onRoad && al < hw + 0.9) alarm(p.x, p.z, asp, true, py);
         }
@@ -356,7 +368,11 @@ export function createPedestrians(T) {
     p.carNear = near;
     if (threat) {
       p.threatT += 0.12;
-      if (p.threatT >= p.react && (p.mode === 0 || p.mode === 4)) { p.mode = 0; p.ddx = tdx; p.ddz = tdz; p.dodgeT = 0.7; }
+      if (p.threatT >= p.react && (p.mode === 0 || p.mode === 4)) {
+        // esquive qui S'ARME à cause du joueur : `pedestrian:dodge` partira dans 1 s si aucun choc ne suit (voir step)
+        if (mine && p.dodgeT <= 0 && p.dgT <= 0 && p.dgCd <= 0) { p.dgT = 1; p.dgV = vRef[vMine]; }
+        p.mode = 0; p.ddx = tdx; p.ddz = tdz; p.dodgeT = 0.7;
+      }
     } else p.threatT = 0;
   }
 
@@ -375,6 +391,8 @@ export function createPedestrians(T) {
       react: Math.random() < 0.25 ? 0.7 + Math.random() * 0.6 : 0.12 + Math.random() * 0.3, threatT: 0,
       mode: 0, vx: 0, vz: 0, vy: 0, hy: 0, downT: 0, getT: 0, hitCd: 0, hurt: false, srcX: 0, srcZ: 0,
       needSnap: false, fdx: 0, fdz: 0, fleeT: 0, watchT: 0, wx: 0, wz: 0, tilt: 0, tiltTarget: 0, yOff: 0, hasKnock: typeof ch.knock === 'function',
+      // esquive réussie devant le joueur (contrat v6) : dgT = délai avant `pedestrian:dodge`, dgV = son véhicule, dgCd = repos
+      dgT: 0, dgV: null, dgCd: 0,
       // flânerie : 0 = trottoirs du graphe, 1 = rue piétonne (fi = indice, fk = sommet visé, fdir, fo = décalage), 2 = place (fi = zone)
       free: 0, fi: 0, fk: 0, fdir: 1, fo: 0, gy: 0, xing: false, roadT: 0,
     };
@@ -385,6 +403,7 @@ export function createPedestrians(T) {
     p.x = x; p.z = z; p.active = true; activeCount++;
     p.onRoad = false; p.dodgeT = 0; p.stallT = 0; p.stalls = 0; p.crossCd = 5 + Math.random() * 20;
     p.mode = 0; p.vx = p.vz = p.vy = p.hy = 0; p.downT = 0; p.hitCd = 0; p.hurt = false; p.threatT = 0;
+    p.dgT = 0; p.dgV = null; p.dgCd = 0;
     p.tilt = p.tiltTarget = 0; p.group.rotation.x = 0; p.yOff = 0; p.needSnap = false; p.free = 0; p.idle = false; p.roadT = 0;
     p.hasKnock = typeof p.ch.knock === 'function';
     p.group.visible = true;
@@ -523,6 +542,13 @@ export function createPedestrians(T) {
   // ---------------------------------------------------------------- boucle
   function step(p, dt) {
     if (p.hitCd > 0) p.hitCd -= dt;
+    if (p.dgCd > 0) p.dgCd -= dt;
+    if (p.dgT > 0 && (p.dgT -= dt) <= 0) {
+      // une seconde sans choc après avoir sauté de côté devant le joueur : esquive réussie (une par piéton toutes les 3 s)
+      const v = p.dgV;
+      p.dgT = 0; p.dgV = null; p.dgCd = 3;
+      if (v && p.mode !== 1 && p.mode !== 2) ctx.bus.emit('pedestrian:dodge', { x: p.x, z: p.z, vehicle: v, pedestrian: p });
+    }
     p.scanT -= dt;
     const full = p.scanT <= 0;
     if (full) p.scanT = p.dodgeT > 0 ? 0 : 0.12;
@@ -688,8 +714,32 @@ export function createPedestrians(T) {
     }
   }
 
+  /**
+   * `player:horn {x, z, vehicle}` : les piétons à moins de 12 m (du même niveau) sursautent et s'écartent — de côté
+   * par rapport à l'axe de la voiture qui klaxonne, sinon en s'éloignant du bruit. Mode esquive existant, sans
+   * `pedestrian:dodge` (ce n'est pas une figure).
+   */
+  function onHorn(e) {
+    if (!e || !isFinite(e.x) || !isFinite(e.z)) return;
+    const v = e.vehicle, y = v && v.pos ? v.pos.y : T.fy;
+    const hfx = v ? -Math.sin(v.yaw) : 0, hfz = v ? -Math.cos(v.yaw) : 0;
+    for (let i = 0; i < peds.length; i++) {
+      const p = peds[i];
+      if (!p.active || (p.mode !== 0 && p.mode !== 4) || p.needSnap || p.dodgeT > 0) continue;
+      if (p.y - y > LEVEL || y - p.y > LEVEL) continue;
+      const dx = p.x - e.x, dz = p.z - e.z, d2 = dx * dx + dz * dz;
+      if (d2 > 144) continue;
+      if (v) {
+        const l = dz * hfx - dx * hfz, sign = l > 0.15 ? 1 : l < -0.15 ? -1 : p.idx & 1 ? 1 : -1;
+        p.ddx = -hfz * sign; p.ddz = hfx * sign;
+      } else if (d2 > 0.04) { const d = Math.sqrt(d2); p.ddx = dx / d; p.ddz = dz / d; }
+      else { const a = Math.random() * 6.283; p.ddx = Math.cos(a); p.ddz = Math.sin(a); }
+      p.mode = 0; p.dodgeT = 0.4 + Math.random() * 0.25;
+    }
+  }
+
   return {
-    update, list: peds, alarm, probe, promenades: proms.length,
+    update, onHorn, list: peds, alarm, probe, promenades: proms.length,
     setTarget(n) { target = n; },
     get activeCount() { return activeCount; },
     dispose() { for (const p of peds) { p.group.removeFromParent(); p.ch.dispose && p.ch.dispose(); } peds.length = 0; activeCount = 0; },

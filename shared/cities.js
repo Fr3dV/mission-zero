@@ -49,6 +49,9 @@ export const CITIES = {
 
 export const CITY_IDS = Object.keys(CITIES);
 
+/** Ville connue : clé PROPRE du registre (« constructor », « __proto__ » ou « toString » ne sont pas des villes). */
+const known = (id) => typeof id === 'string' && Object.hasOwn(CITIES, id);
+
 /** Ville courante : `?city=` dans le navigateur, variable MZ_CITY sous Node (tests, outils), sinon Paris. */
 export function currentCityId() {
   let id = null;
@@ -56,20 +59,20 @@ export function currentCityId() {
     if (typeof location !== 'undefined' && location.search) id = new URLSearchParams(location.search).get('city');
     else if (typeof process !== 'undefined' && process.env) id = process.env.MZ_CITY || null;
   } catch { /* environnement sans location ni process */ }
-  return id && CITIES[id] ? id : DEFAULT_CITY;
+  return known(id) ? id : DEFAULT_CITY;
 }
 export const CITY_ID = currentCityId();
 export const CITY = CITIES[CITY_ID];
 
 /** Nettoie un identifiant de ville reçu du réseau. */
-export const sanitizeCity = (id) => (typeof id === 'string' && CITIES[id] ? id : DEFAULT_CITY);
+export const sanitizeCity = (id) => (known(id) ? id : DEFAULT_CITY);
 
 const M_PER_DEG_LAT = 111320;
 const geoCache = new Map();
 
 /** Projection et emprise d'une ville : { city, ORIGIN, BBOX, BOUNDS, lonLatToXZ(lon, lat), xzToLonLat(x, z) }. */
 export function geoFor(id) {
-  const city = CITIES[id] || CITIES[DEFAULT_CITY];
+  const city = known(id) ? CITIES[id] : CITIES[DEFAULT_CITY];
   let g = geoCache.get(city.id);
   if (g) return g;
   const ORIGIN = city.origin, BBOX = city.bbox;

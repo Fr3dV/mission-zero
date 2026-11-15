@@ -14,6 +14,7 @@ const STEER_MARGIN = 2.0, STEER_SLOW_V = 120;
 const LAUNCH = 0.7;           // part de la vitesse ascensionnelle conservée au décollage
 const DROOP = 0.09;          // débattement en détente : sous cet écart au sol, les roues touchent encore
 export const SAFE_DROP_V = 5.4;   // vitesse verticale d'une chute de 1,5 m : en dessous, réception sans dégât
+const DRIFT_MIN_V = 3;        // vitesse (m/s) sous laquelle l'angle de dérive publié (vehicle.driftAngle) est nul
 const clamp = (v, a, b) => (v < a ? a : v > b ? b : v);
 const smooth = (a, b, x) => { const t = clamp((x - a) / (b - a), 0, 1); return t * t * (3 - 2 * t); };
 
@@ -69,7 +70,12 @@ export function initPhysics(v, info, def) {
     fxm: null, hit: null, scrape: 0, wob: 0, pending: null, brokeShape: null, brokeT: 0,
     // vertical : yb = hauteur balistique de la caisse, vy sa vitesse, gap = écart au sol, air = roues décollées
     yb: v.pos.y, vy: 0, gap: 0, air: false, airT: 0, landV: 0, slopeF: 0, slopeL: 0, sF: 0, sL: 0, ht: s.width * 0.4,
+    // télémétrie de saut (contrat v6) : airD = distance parcourue roues décollées ; landT / landD = durée et distance du
+    // saut qui vient de se terminer (valables pendant l'image de la réception, 0 sinon)
+    airD: 0, landT: 0, landD: 0,
   };
+  // télémétrie de style (contrat v6) : driftAngle = angle de dérive lissé (rad, signé), airborne = roues décollées
+  v.driftAngle = 0; v.airborne = false;
 }
 
 /** Passe un véhicule en mode réveillé (après un choc, une prise en main…). */
@@ -243,7 +249,7 @@ function collideStatic(v, ctx) {
 }
 
 /** Recale l'état vertical sur la hauteur courante (téléportation, réveil, passage cinématique → dynamique). */
-export function resetVertical(v) { const p = v.phys; p.yb = v.pos.y; p.vy = 0; p.gap = 0; p.air = false; p.airT = 0; p.landV = 0; }
+export function resetVertical(v) { const p = v.phys; p.yb = v.pos.y; p.vy = 0; p.gap = 0; p.air = false; p.airT = 0; p.landV = 0; p.airD = 0; p.landT = 0; p.landD = 0; v.airborne = false; }
 
 /** Impulsion (N·s, repère monde) appliquée au véhicule ; point d'application optionnel (monde) → lacet. */
 export function applyImpulse(v, ix, iz, px, pz) {
@@ -265,7 +271,7 @@ export function stepVehicle(v, dt, ctx) {
   const p = v.phys, s = v.spec, c = v.controls;
   const hasDriver = v.driver != null;
   const sp0 = Math.hypot(v.vel.x, v.vel.z);
-  if (!hasDriver && sp0 < 0.05 && Math.abs(v.yawRate) < 0.05 && !p.air && p.gap < 0.01) { resetVertical(v); p.sleeping = true; v.speed = 0; v.vel.x = v.vel.z = 0; v.yawRate = 0; v.slip = 0; p.ax = p.ay = 0; v.rpm = 0; v.gear = 0; p.brakeOn = false; return 0; }
+  if (!hasDriver && sp0 < 0.05 && Math.abs(v.yawRate) < 0.05 && !p.air && p.gap < 0.01) { resetVertical(v); p.sleeping = true; v.speed = 0; v.vel.x = v.vel.z = 0; v.yawRate = 0; v.slip = 0; p.ax = p.ay = 0; v.rpm = 0; v.gear = 0; p.brakeOn = false; v.driftAngle = 0; return 0; }
   p.sleeping = false;
 
   // direction : débattement limité par la vitesse (reste proche de la limite d'adhérence), lissage, contre-braquage assisté
@@ -349,16 +355,19 @@ export function stepVehicle(v, dt, ctx) {
   const vyG = clamp(sFn * vfN + p.sL * vlN, -40, 40);
   p.vy -= G * dt;
   let yb = p.yb + p.vy * dt;
-  p.landV = 0;
+  p.landV = 0; p.landT = 0; p.landD = 0;
   if (yb <= g) {
     // au sol : la caisse épouse la chaussée ; à la réception d'un saut, la vitesse relative est absorbée
-    if (p.air) { p.landV = Math.max(0, vyG - p.vy); p.air = false; }
+    // (durée et distance du vol relevées AVANT leur remise à zéro : événement vehicle:landed)
+    if (p.air) { p.landV = Math.max(0, vyG - p.vy); p.air = false; p.landT = p.airT; p.landD = p.airD; }
     // la suspension absorbe une partie de l'élan vertical en montée : sauts « légers », plafonnés
-    yb = g; p.vy = vyG > 0 ? Math.min(vyG * LAUNCH, 6) : vyG; p.gap = 0; p.airT = 0;
+    yb = g; p.vy = vyG > 0 ? Math.min(vyG * LAUNCH, 6) : vyG; p.gap = 0; p.airT = 0; p.airD = 0;
   } else {
     p.gap = yb - g;
-    if (p.gap > DROOP) { p.air = true; p.airT += dt; }       // en deçà, la suspension en détente garde les roues au sol
+    // en deçà de DROOP, la suspension en détente garde les roues au sol
+    if (p.gap > DROOP) { p.air = true; p.airT += dt; p.airD += Math.hypot(v.pos.x - x0, v.pos.z - z0); }
   }
+  v.airborne = p.air;
   p.yb = yb;
   v.pos.y = yb - Math.min(p.gap, DROOP);                     // hauteur des roues
 
@@ -375,6 +384,15 @@ export function stepVehicle(v, dt, ctx) {
   v.slip += (slip - v.slip) * Math.min(1, dt * 10);
   if (v.wrecked) { v.rpm = 0; v.gear = 0; }
   p.slide = slide;
+  // angle de dérive (télémétrie de style, sans effet sur la conduite) : atan2(vitesse latérale, |vitesse longitudinale|),
+  // > 0 = la caisse glisse vers sa droite (nez pointé à gauche de la trajectoire : dérive en virage à gauche), < 0 = vers sa
+  // gauche (virage à droite). Nul sous 3 m/s (voiture calée contre un obstacle, manœuvre), fondu jusqu'à 5 m/s, lissé.
+  const spN = Math.hypot(v.vel.x, v.vel.z);
+  if (spN < DRIFT_MIN_V) v.driftAngle = 0;
+  else {
+    const vlD = v.vel.x * Math.cos(v.yaw) - v.vel.z * Math.sin(v.yaw);
+    v.driftAngle += (Math.atan2(vlD, Math.abs(v.speed)) * smooth(DRIFT_MIN_V, DRIFT_MIN_V + 2, spN) - v.driftAngle) * Math.min(1, dt * 10);
+  }
   return impact;
 }
 

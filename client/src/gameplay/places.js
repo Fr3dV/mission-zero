@@ -18,3 +18,8 @@ export const PUBLIC_GARAGES = C.PUBLIC_GARAGES;
 /** Objets à collectionner : [{ id, label, x, z, snap? }] et leurs textes { name, found, color, allFound }. */
 export const COLLECTIBLES = C.COLLECTIBLES;
 export const COLLECTIBLE = C.COLLECTIBLE;
+/**
+ * Points de rendez-vous (taxi libre, Chiche) : [{ id, label, x, z, lm? }], sur une rue carrossable.
+ * Livrés par les données de la ville (contrat v6) ; liste vide tant qu'elles ne les fournissent pas.
+ */
+export const RDV_POINTS = C.RDV_POINTS || [];

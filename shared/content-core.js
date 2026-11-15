@@ -15,7 +15,10 @@
 //   timeLimitSec? (chrono global), legTimeSec? (chrono remis à zéro à chaque étape : poursuites),
 //   anyOrder? (étapes dans l'ordre de son choix), requireVehicle?, vehicle? { typeId, provided },
 //   vehicleMinPrice? (standing exigé par le client), maxDamage? (convoyage : cumul d'impacts toléré),
-//   passenger? { name, color }.
+//   passenger? { name, color },
+//   intro? (true = mission d'introduction proposée d'office au nouveau joueur : EXACTEMENT une par ville,
+//           de niveau 1, en voiture (requireVehicle), départ à moins de 150 m du SPAWN de la ville ; rejouable
+//           comme les autres, sans règle serveur particulière ; jamais tirée comme mission vedette du jour).
 //
 // Types : delivery | taxi | race | tour | courier | convoy | photo
 // kind d'étape : goto (défaut) | checkpoint | pickup | dropoff | stop | photo
@@ -40,6 +43,14 @@ export function levelForMissionsDone(n = 0) {
   let lv = 1;
   for (const l of LEVELS) if (n >= l.missionsDone) lv = l.level;
   return lv;
+}
+
+/** Étoiles de Légende : une toutes les LEGEND_STAR_EVERY missions réussies au-delà du dernier niveau. */
+export const LEGEND_STAR_EVERY = 20;
+/** Nombre d'étoiles de Légende pour `missionsDone` missions réussies (0 avant 60 ; ne décroît jamais). */
+export function starsFor(missionsDone = 0) {
+  const n = Number.isFinite(+missionsDone) ? +missionsDone : 0;
+  return Math.max(0, Math.floor((n - LEVELS[LEVELS.length - 1].missionsDone) / LEGEND_STAR_EVERY));
 }
 
 export const MISSION_TYPES = {

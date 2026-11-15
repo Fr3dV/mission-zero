@@ -257,6 +257,7 @@ function shapeGrids(d) {
 }
 
 const PROJ_DIR = { front: [0, 0, -1], rear: [0, 0, 1], side: [1, 0, 0], top: [0, 1, 0] };
+const PLATE_UV = [0, 0, 1, 1];
 
 function addDecal(P, d, out) {
   const proj = d.p || 'front';
@@ -270,7 +271,7 @@ function addDecal(P, d, out) {
   const target = d.m === 'light' ? out.lights : d.m === 'glass' ? out.glassDecals : out.decals;
   const style = { color: d.c ?? 0x050505, rough: d.r ?? (d.m === 'light' ? 0.2 : 0.6), metal: d.mt ?? 0, fx: d.fx ?? 0 };
   const fxS = d.fxScale ?? 1;
-  const uvRect = d.plate != null ? ATLAS_UV.plates[d.plate % ATLAS_UV.plates.length] : null;
+  const uvRect = d.plate != null ? PLATE_UV : null;         // plaque : UV 0..1, replacé dans l'atlas par le matériau des optiques
   for (const g of shapeGrids(d)) {
     const { nu, nv } = g, W = nv + 1;
     const pts = [], nrm = [], prm = [];
@@ -581,7 +582,8 @@ export function buildCar(spec, def, lod = false, shared = null) {
     const pl = def.plates || {};
     const plate = (proj, y, idx) => {
       const w = 0.26, h = 0.055, s = proj === 'front' ? 1 : -1;
-      addDecal(P, { p: proj, center: true, quad: [[s * w, y - h], [-s * w, y - h], [-s * w, y + h], [s * w, y + h]], sub: [8, 2], c: 0xffffff, r: 0.45, plate: idx, lift: 0.009 }, out);
+      // dans la géométrie des optiques (canal PLATE, jamais allumé) : le numéro est choisi par voiture, sans draw call en plus
+      addDecal(P, { p: proj, center: true, quad: [[s * w, y - h], [-s * w, y - h], [-s * w, y + h], [s * w, y + h]], sub: [8, 2], c: 0xffffff, r: 0.45, m: 'light', ch: CH.PLATE, plate: idx, lift: 0.009 }, out);
     };
     if (pl.front != null) plate('front', pl.front, def.plateIdx ?? 0);
     if (pl.rear != null) plate('rear', pl.rear, def.plateIdx ?? 0);

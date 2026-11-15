@@ -188,8 +188,9 @@ function breakLamps(v, end, s) {
   if (arr[idx]) return false;
   arr[idx] = 1;
   const C = ensureClones(v), R = v.vis.info.regions, zl = end > 0 ? R.lampZR : R.lampZF;
-  const c = C.lights, pa = c.base, col = c.geo.attributes.color.array;
-  for (let o = 0; o < pa.length; o += 3) if (pa[o] * s > 0.02 && (end > 0 ? pa[o + 2] > zl : pa[o + 2] < zl)) { col[o] *= 0.04; col[o + 1] *= 0.04; col[o + 2] *= 0.04; }
+  const c = C.lights, pa = c.base, col = c.geo.attributes.color.array, lch = c.geo.attributes.lch?.array;
+  // (les plaques partagent la géométrie des optiques, canal > 9 : elles ne s'éteignent pas avec le phare voisin)
+  for (let o = 0; o < pa.length; o += 3) if (pa[o] * s > 0.02 && (end > 0 ? pa[o + 2] > zl : pa[o + 2] < zl) && !(lch && lch[o / 3] > 9.5)) { col[o] *= 0.04; col[o + 1] *= 0.04; col[o + 2] *= 0.04; }
   c.geo.attributes.color.needsUpdate = true;
   // glace de l'optique fissurée
   const g = C.glass, gp = g.base, pb = g.geo.attributes.pbr.array;

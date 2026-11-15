@@ -371,6 +371,76 @@ const RAW = [
       S(PLACE.etoile, "Arrivée — place de l'Étoile", { kind: 'checkpoint', radius: 22 }),
     ],
   },
+
+  // ============ Niveau 1 — premiers tours de roue et missions « retour » (contrat v6) ============
+  // Ajoutées APRÈS les missions historiques (le serveur et ses tests lisent MISSIONS[0]) : l'ordre du tableau
+  // n'est pas un ordre d'affichage. Chaque arrivée de niveau 1 est à moins de 400 m d'un autre départ de niveau 1.
+  {
+    // mission d'introduction (intro) : en voiture, départ à deux pas du point d'apparition, droit devant le joueur
+    id: 'premiers_tours_de_roue', level: 1, type: 'taxi', reward: 1000, cooldownSec: 90, requireVehicle: true, intro: true,
+    title: 'Premiers tours de roue',
+    description: "Montrez-moi ce que vous savez faire ! Mon neveu vous attend à l'entrée des Champs-Élysées, au pied de l'Obélisque : remontez l'avenue jusqu'au rond-point, huit cents mètres tout droit, sans rayer la Citadine.",
+    giver: { name: 'Monsieur Zéro', role: 'Patron' },
+    passenger: { name: 'Zéphyr', color: '#7b2cbf' },
+    start: PLACE.concordeDepart,
+    steps: [
+      S(PLACE.concordeDepart, 'Prendre le neveu de Monsieur Zéro', { kind: 'pickup', holdSec: 2 }),
+      S(PLACE.rondPoint, 'Rond-point des Champs-Élysées', { kind: 'dropoff', holdSec: 1.5, radius: 16 }),
+    ],
+  },
+  {
+    // retour de livraison_eiffel (taxi) : ramène à la Concorde
+    id: 'retour_tour_eiffel', level: 1, type: 'taxi', reward: 1500, cooldownSec: 120, requireVehicle: true,
+    title: 'Les jambes en coton',
+    description: "Deux visiteurs redescendent de la Tour Eiffel par l'escalier : des centaines de marches, et plus un mollet valide. Ramenez-les à leur hôtel, place de la Concorde.",
+    giver: { name: 'Hans & Greta', role: 'Visiteurs' },
+    passenger: { name: 'Hans', color: '#2a9d8f' },
+    start: PLACE.eiffelQuai,
+    steps: [
+      S(PLACE.eiffelQuai, 'Prendre les visiteurs', { kind: 'pickup', holdSec: 2 }),
+      S(PLACE.concordeNord, 'Place de la Concorde', { kind: 'dropoff', holdSec: 1.5, radius: 16 }),
+    ],
+  },
+  {
+    // retour de livraison_eiffel (livraison) : ramène aux Champs-Élysées
+    id: 'souvenirs_grand_palais', level: 1, type: 'delivery', reward: 1400, cooldownSec: 120,
+    title: 'Deux cents tours Eiffel',
+    description: "La boutique du Grand Palais est en rupture de tours Eiffel miniatures. Un carton plein attend au pied de la vraie : livrez-le avenue Winston-Churchill.",
+    giver: { name: 'Zéro Colis', role: 'Messagerie' },
+    start: PLACE.eiffelQuai,
+    steps: [S(PLACE.grandPalaisChurchill, 'Grand Palais — avenue Winston-Churchill')],
+  },
+  {
+    // départ à deux pas de l'Élysée, du Grand Palais et du rond-point (arrivées de croissants_elysee, photo_concorde et de l'intro)
+    id: 'valise_marigny', level: 1, type: 'delivery', reward: 1100, cooldownSec: 100,
+    title: 'La valise du ténor',
+    description: "Un ténor étourdi a laissé sa valise dans sa loge du théâtre Marigny, et son train part de Saint-Lazare. Rapportez-la-lui cour de Rome avant le coup de sifflet.",
+    giver: { name: 'Mme Rideau', role: 'Habilleuse' },
+    start: PLACE.marigny, pace: 8,
+    steps: [S(PLACE.courDeRome, 'Gare Saint-Lazare — cour de Rome')],
+  },
+  {
+    // départ à deux pas du Louvre (arrivée de taxi_touristes)
+    id: 'taxi_palais_royal', level: 1, type: 'taxi', reward: 1200, cooldownSec: 120, requireVehicle: true,
+    title: 'Entracte gourmand',
+    description: "Une comédienne de la Comédie-Française a vingt minutes d'entracte et une envie de macarons. Prenez-la place du Palais-Royal et filez à la Madeleine.",
+    giver: { name: 'Mlle Molière', role: 'Comédienne' },
+    passenger: { name: 'Mlle Molière', color: '#d62828' },
+    start: PLACE.palaisRoyalPlace,
+    steps: [
+      S(PLACE.palaisRoyalPlace, 'Prendre la comédienne', { kind: 'pickup', holdSec: 2 }),
+      S(PLACE.madeleinePlace, 'Place de la Madeleine', { kind: 'dropoff', holdSec: 1.5 }),
+    ],
+  },
+  {
+    // départ à la gare Saint-Lazare (arrivée de taxi_gare et de valise_marigny)
+    id: 'journaux_saint_lazare', level: 1, type: 'delivery', reward: 900, cooldownSec: 90,
+    title: 'Dernière édition',
+    description: "Les journaux du soir viennent d'arriver gare Saint-Lazare. Portez le paquet au kiosque de la place de l'Opéra avant la sortie des bureaux.",
+    giver: { name: 'Marcel', role: 'Kiosquier' },
+    start: PLACE.courDeRome,
+    steps: [S(PLACE.operaPlace, "Kiosque de la place de l'Opéra")],
+  },
 ];
 
 
@@ -403,6 +473,12 @@ export const ROUTE_M = {
   convoi_aventador: [5801],
   cortege_officiel: [57, 1364, 754, 4841],
   gp_mission_zero: [649, 1774, 2019, 1539, 2457, 1283, 935, 804, 2248, 1589, 2995, 1467],
+  premiers_tours_de_roue: [0, 873],
+  retour_tour_eiffel: [92, 3039],
+  souvenirs_grand_palais: [2748],
+  valise_marigny: [1490],
+  taxi_palais_royal: [11, 1663],
+  journaux_saint_lazare: [830],
 };
 
 export const MISSIONS = buildMissions(tools, RAW, ROUTE_M);

@@ -24,7 +24,9 @@ const RAW = [
     description: "Ici on dit chocolatine, et monsieur le maire en a commandé trente. Filez des Carmes à la place du Capitole avant qu'elles ne refroidissent.",
     giver: { name: 'Mme Fournil', role: 'Boulangère' },
     start: PLACE.carmes, pace: 8,
-    steps: [S(PLACE.capitole, 'Place du Capitole')],
+    // arrivée à l'angle sud-ouest de la place (rue Dominique-Baudis) : les départs de niveau 1 du Capitole sont au pied,
+    // par la route aussi (l'ancienne arrivée, rue Romiguières, en était à 1,5 km de sens uniques pour 117 m)
+    steps: [S(PLACE.capitoleSud, 'Place du Capitole')],
   },
   {
     id: 'tls_taxi_matabiau', level: 1, type: 'taxi', reward: 1500, cooldownSec: 120, requireVehicle: true,
@@ -41,12 +43,13 @@ const RAW = [
   {
     id: 'tls_photo_ville_rose', level: 1, type: 'photo', reward: 1300, cooldownSec: 150,
     title: 'Trois cartes postales roses',
-    description: "L'office de tourisme veut trois clichés : le Capitole, Saint-Sernin et les Jacobins. À pied, bien cadrés, et sans le doigt devant l'objectif.",
+    // (contrat v6) balade raccourcie à moins de 2,5 km : la Daurade remplace Saint-Sernin, départ côté point d'apparition
+    description: "L'office de tourisme veut trois clichés : le Capitole, la Daurade au bord de la Garonne et les Jacobins. À pied, bien cadrés, et sans le doigt devant l'objectif.",
     giver: { name: 'Office de tourisme', role: 'Donjon du Capitole' },
-    start: PLACE.capitole,
+    start: PLACE.capitoleSud,
     steps: [
       S(front('tls_capitole', 1.15), 'Photographier le Capitole', { ...PHOTO, lookAt: 'tls_capitole', snap: false }),
-      S(front('tls_saintsernin', 0.95), 'Photographier Saint-Sernin', { ...PHOTO, lookAt: 'tls_saintsernin', snap: false }),
+      S(front('tls_daurade', 1.2), 'Photographier la Daurade', { ...PHOTO, lookAt: 'tls_daurade' }),
       S(front('tls_jacobins', 0.95), 'Photographier les Jacobins', { ...PHOTO, lookAt: 'tls_jacobins', snap: false }),
     ],
   },
@@ -61,10 +64,12 @@ const RAW = [
   {
     id: 'tls_saucisse_saint_pierre', level: 1, type: 'delivery', reward: 1200, cooldownSec: 120,
     title: 'Un mètre de saucisse',
-    description: "Le bar à tapas de la place Saint-Pierre est à sec : livrez un mètre de saucisse de Toulouse depuis le marché Victor-Hugo.",
+    // (id historique) la livraison ne va plus place Saint-Pierre : on n'y entre en voiture que par 3,3 km de boulevards
+    // pour 1 km. D'une halle à l'autre : 1,4 km par la place Wilson et Saint-Georges, arrivée au départ des chocolatines.
+    description: "Le bar à tapas du marché des Carmes est à sec : livrez-lui un mètre de saucisse de Toulouse depuis le marché Victor-Hugo, d'une halle à l'autre par la place Wilson et Saint-Georges.",
     giver: { name: 'Maison Garcia', role: 'Charcutier du marché' },
     start: PLACE.victorHugo,
-    steps: [S(PLACE.saintPierre, 'Place Saint-Pierre')],
+    steps: [S(PLACE.carmes, 'Marché des Carmes')],
   },
 
   // ============ Niveau 2 — Coursier (centre et faubourgs) ============
@@ -122,7 +127,7 @@ const RAW = [
   {
     id: 'tls_voiturier_capitole', level: 2, type: 'convoy', reward: 4000, cooldownSec: 300, requireVehicle: true,
     title: 'Voiturier du grand hôtel',
-    description: "Le voiturier du grand hôtel de la place du Capitole est débordé. Garez le Cayenne d'un client au parking des Carmes… sans une rayure.",
+    description: "Le voiturier du grand hôtel de la rue Romiguières, à deux pas du Capitole, est débordé. Garez le Cayenne d'un client au parking des Carmes… sans une rayure.",
     giver: { name: 'Firmin', role: 'Chef voiturier' },
     vehicle: { typeId: 'porsche_cayenne', provided: true }, maxDamage: 30,
     start: PLACE.capitole,
@@ -206,7 +211,7 @@ const RAW = [
   {
     id: 'tls_supporters_wallon', level: 3, type: 'taxi', reward: 6000, cooldownSec: 420, requireVehicle: true,
     title: 'Rouge et noir',
-    description: "Jour de match pour le Stade. Prenez la bande place du Capitole, passez chercher les copains à Compans, et tous à Ernest-Wallon avant le coup d'envoi !",
+    description: "Jour de match pour le Stade. Prenez la bande rue Romiguières, à deux pas du Capitole, passez chercher les copains à Compans, et tous à Ernest-Wallon avant le coup d'envoi !",
     giver: { name: 'Les Rouge et Noir', role: 'Supporters' },
     passenger: { name: 'Les supporters', color: '#c1121f' },
     start: PLACE.capitole, pace: 11,
@@ -318,7 +323,8 @@ const RAW = [
     start: PLACE.aeroport, pace: 14,
     steps: [
       S(PLACE.aeroport, 'Prendre la chanteuse', { kind: 'pickup', holdSec: 2, radius: 18 }),
-      S(PLACE.capitole, 'Hôtel du Capitole', { kind: 'stop', holdSec: 4 }),
+      // l'hôtel donne sur la place : arrêt à l'angle sud-ouest (PLACE.capitole est rue Romiguières, sans vue sur la place)
+      S(PLACE.capitoleSud, 'Hôtel du Capitole', { kind: 'stop', holdSec: 4 }),
       S(PLACE.zenith, 'Zénith de Toulouse', { kind: 'dropoff', holdSec: 2, radius: 18 }),
     ],
   },
@@ -429,9 +435,50 @@ const RAW = [
     steps: [
       S(PLACE.aeroport, "Prendre l'astronaute", { kind: 'pickup', holdSec: 2, radius: 18 }),
       S(PLACE.airbusLagardere, "Usine d'assemblage", { kind: 'stop', holdSec: 4, radius: 18 }),
-      S(PLACE.capitole, 'Réception au Capitole', { kind: 'stop', holdSec: 4, radius: 14 }),
+      S(PLACE.capitoleSud, 'Réception au Capitole', { kind: 'stop', holdSec: 4, radius: 14 }), // sur la place, face à l'hôtel de ville
       S(PLACE.citeEspace, "Cité de l'espace", { kind: 'dropoff', holdSec: 2, radius: 18 }),
     ],
+  },
+
+  // ============ Niveau 1 — premiers tours de roue et missions « retour » (contrat v6) ============
+  // Ajoutées APRÈS les missions historiques (le serveur et ses tests lisent MISSIONS[0]) : l'ordre du tableau
+  // n'est pas un ordre d'affichage. Chaque arrivée de niveau 1 est à moins de 400 m d'un autre départ de niveau 1,
+  // et à moins de 700 m PAR LA ROUTE (sens uniques compris : shared/missions.test.js le mesure sur le graphe).
+  {
+    // mission d'introduction (intro) : en voiture, départ à deux pas du point d'apparition
+    id: 'tls_premiers_tours_de_roue', level: 1, type: 'taxi', reward: 1000, cooldownSec: 90, requireVehicle: true, intro: true,
+    title: 'Premiers tours de roue',
+    description: "Montrez-moi ce que vous savez faire ! Ma nièce vous attend au coin de la place du Capitole : descendez jusqu'au marché des Carmes par la rue Peyrolières et la rue des Couteliers. C'est étroit : tout doux sur la brique.",
+    giver: { name: 'Monsieur Zéro', role: 'Patron' },
+    passenger: { name: 'Zélie', color: '#7b2cbf' },
+    start: PLACE.gambetta,
+    steps: [
+      S(PLACE.gambetta, 'Prendre la nièce de Monsieur Zéro', { kind: 'pickup', holdSec: 2 }),
+      S(PLACE.carmesOuest, 'Marché des Carmes', { kind: 'dropoff', holdSec: 1.5 }),
+    ],
+  },
+  {
+    // retour de tls_photo_ville_rose (taxi) : ramène à la gare, où partent deux autres missions de niveau 1
+    id: 'tls_retour_matabiau', level: 1, type: 'taxi', reward: 1500, cooldownSec: 120, requireVehicle: true,
+    title: 'Le train de 18 h 12',
+    description: "Une visiteuse s'est attardée sous le palmier des Jacobins et son train ne l'attendra pas. Prenez-la rue Pargaminières et filez à la gare Matabiau.",
+    giver: { name: 'Mme Flâneuse', role: 'Voyageuse' },
+    passenger: { name: 'Mme Flâneuse', color: '#e76f51' },
+    start: PLACE.pargaminieres, pace: 7,
+    steps: [
+      S(PLACE.pargaminieres, 'Prendre la voyageuse', { kind: 'pickup', holdSec: 2 }),
+      S(PLACE.matabiau, 'Gare Matabiau', { kind: 'dropoff', holdSec: 1.5, radius: 16 }),
+    ],
+  },
+  {
+    // retour de tls_photo_ville_rose (livraison) : ramène au marché des Carmes, au pied du départ des chocolatines.
+    // (l'id garde « victor_hugo » : la halle Victor-Hugo, à 800 m, demandait 2,9 km de boulevards depuis les Jacobins)
+    id: 'tls_fenetra_victor_hugo', level: 1, type: 'delivery', reward: 1100, cooldownSec: 100,
+    title: 'Trois fénétras pour la halle',
+    description: "Le fénétra, c'est LE gâteau toulousain : abricot, amandes et citron confit. Le pâtissier de la rue Larrey en envoie trois à la halle des Carmes. Descendez par la rue Peyrolières et la rue des Couteliers, à pied ou en voiture, mais sans les retourner.",
+    giver: { name: 'M. Amandier', role: 'Pâtissier' },
+    start: PLACE.larrey,
+    steps: [S(PLACE.carmesOuest, 'Halle des Carmes')],
   },
 ];
 
@@ -441,36 +488,39 @@ const RAW = [
 // Table vide ou incomplète = repli sur le vol d'oiseau × 1,35 (voir content-core.js).
 // À régénérer si les positions ou les données changent (shared/missions.test.js le vérifie quand roads.json est présent).
 export const ROUTE_M = {
-  tls_chocolatines_capitole: [1372],
+  tls_chocolatines_capitole: [1036],
   tls_taxi_matabiau: [8, 1228],
-  tls_photo_ville_rose: [1591, 2991, 1392],
+  tls_photo_ville_rose: [83, 568, 1304],
   tls_violettes_wilson: [1911],
-  tls_saucisse_saint_pierre: [3304],
+  tls_saucisse_saint_pierre: [1381],
   tls_clm_boulevards: [896, 1382, 635, 2064],
-  tls_taxi_purpan: [26, 4678],
+  tls_taxi_purpan: [0, 4781],
   tls_tour_ponts: [388, 1402, 1935, 1989],
-  tls_voiturier_capitole: [2573],
+  tls_voiturier_capitole: [1350],
   tls_supporters_stadium: [1, 3502],
   tls_navette_mirail: [7, 7524],
   tls_navette_paul_sabatier: [0, 4903, 2393],
-  tls_canal_ecluses: [713, 1026, 1482, 1074, 2704, 2126],
+  tls_canal_ecluses: [713, 1035, 1491, 1074, 2704, 2126],
   tls_photo_garonne: [789, 259, 1384],
   tls_cassoulet_balma: [6752],
-  tls_supporters_wallon: [26, 919, 3050],
+  tls_supporters_wallon: [0, 1022, 3050],
   tls_montee_pech_david: [1547, 3783, 1916],
   tls_taxi_aeroport: [23, 10504],
   tls_convoi_tesla: [5122],
   tls_photo_espace: [2498, 4012, 1537],
   tls_poursuite_ballon: [1986, 2073, 1464, 2563, 1912, 523],
   tls_gp_garonne: [1176, 1046, 2018, 2191, 1701, 1423, 1074],
-  tls_taxi_star_zenith: [1, 9864, 4684],
+  tls_taxi_star_zenith: [1, 10053, 3374],
   tls_convoi_pieces_avion: [21034],
   tls_convoi_porsche: [21040],
-  tls_photo_fusee_avion: [8180, 20374, 4873],
-  tls_grand_tour: [2377, 2370, 2034, 1637, 3719, 4012, 5939, 2996],
+  tls_photo_fusee_avion: [6279, 20374, 4873],
+  tls_grand_tour: [2458, 2370, 2034, 1637, 3719, 4012, 5939, 2996],
   tls_tour_rocade: [4815, 2356, 4880, 2313, 3324, 2678, 2848, 2306, 1930, 1476, 2752, 2330],
   tls_convoi_aventador: [15975],
-  tls_cortege_spatial: [1, 5489, 14700, 8157],
+  tls_cortege_spatial: [1, 5489, 14889, 6178],
+  tls_premiers_tours_de_roue: [3, 994],
+  tls_retour_matabiau: [0, 2906],
+  tls_fenetra_victor_hugo: [1366],
 };
 
 export const MISSIONS = buildMissions(tools, RAW, ROUTE_M);

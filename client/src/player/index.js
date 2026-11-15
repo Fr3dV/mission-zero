@@ -5,6 +5,7 @@ import { STEP_UP } from '@shared/terrain.js';
 import { createCharacter, SIT_ROOT_Y, KNOCK_SPEED } from './character.js';
 import { createInput } from './input.js';
 import { createCameraRig, CAMERA_VIEWS } from './camera.js';
+import { createBubble, createSpriteRoot } from './bubbles.js';
 
 export { createCharacter };
 
@@ -19,6 +20,11 @@ const ENTER_DIST = 4, EXIT_MAX_SPEED = 15 / 3.6;
 const LEVEL_GAP = 2.5;   // écart vertical au-delà duquel un véhicule est sur un autre niveau (pont, trémie) : ignoré
 const FALL_START = 0.4;  // le sol se dérobe de plus que ça : chute par gravité
 const STUMBLE_DROP = 3;  // hauteur de chute (m) au-delà de laquelle la réception fait tituber
+const AIR_CATCH = 0.3;   // en l'air, une surface jusqu'à 30 cm au-dessus des pieds (marche, bordure) rattrape encore le joueur
+const HORN_PER_SEC = 2;  // klaxons émis au plus par seconde glissante (contrat v6)
+const EXIT_HINT_SEC = 5; // l'invite « F — Descendre » s'efface après ce temps d'arrêt
+// accords des invites : « le Taxi Parisien », « le Tesla Cybertruck » ; le reste du catalogue s'accorde au féminin
+const MASCULINE = new Set(['taxi', 'tesla_cybertruck']);
 const VIEW_LABEL = { proche: 'Caméra proche', loin: 'Caméra éloignée', capot: 'Caméra capot' };
 
 export function createPlayer(ctx) {
@@ -74,6 +80,7 @@ export function createPlayer(ctx) {
   let J = null; // vol de voiture en cours
   let K = null, immuneUntil = 0, hitBy = null, hitClosing = 0, hitNx = 0, hitNz = 0, hitVx = 0, hitVz = 0, hitSide = 1, hitRx = 1, hitRz = 0;
   let promptText = null, promptTimer = 0, lastExitToast = -10;
+  let stopT = 0, promptV = null, promptSteal = false, promptStr = null;
 
   // ------------------------------------------------------------------ pastille d'indication (repli si l'UI ne gère pas player:prompt)
   let chip = null;
@@ -104,13 +111,24 @@ export function createPlayer(ctx) {
   }
 
   // ------------------------------------------------------------------ véhicules
-  const vehicleName = (v) => v.spec?.name || 'le véhicule';
+  /** Nom du véhicule avec son article : « la Citadine », « le Taxi Parisien », « l'… » (spec.article prime s'il existe un jour). */
+  function vehicleName(v) {
+    const name = v.spec?.name;
+    if (!name) return 'le véhicule';
+    if (typeof v.spec.article === 'string') return v.spec.article + (/['’]$/.test(v.spec.article) ? '' : ' ') + name;
+    if (/^[aeiouyhàâäéèêëîïôöùûü]/i.test(name)) return "l'" + name;
+    return (MASCULINE.has(v.typeId ?? v.spec.id) ? 'le ' : 'la ') + name;
+  }
   function nearestFreeVehicle() {
     return ctx.vehicles?.nearest?.(p.pos.x, p.pos.z, ENTER_DIST, (v) => !v.driver && !v.remote && sameLevel(v)) || null;
   }
   const dist2 = (v) => (v.pos.x - p.pos.x) ** 2 + (v.pos.z - p.pos.z) ** 2;
-  /** Véhicule visé par F : une voiture libre, sinon une voiture conduite par l'IA à l'arrêt ou presque (vol). */
+  /** Véhicule visé par F : la voiture personnelle si elle est à portée, sinon une voiture libre, sinon une voiture conduite par l'IA à l'arrêt ou presque (vol). */
   function vehicleTarget() {
+    // priorité à SA voiture : garée dans le trafic, elle ne doit jamais céder la touche F à la voiture d'à côté
+    const mine = ctx.gameplay?.personalCar;
+    if (mine && mine.pos && !mine.driver && !mine.remote && dist2(mine) <= ENTER_DIST * ENTER_DIST && sameLevel(mine)
+      && (!ctx.vehicles?.list || ctx.vehicles.list.includes(mine))) { tgt.v = mine; tgt.steal = false; return tgt; }
     const free = nearestFreeVehicle();
     const ai = ctx.vehicles?.nearest?.(p.pos.x, p.pos.z, ENTER_DIST, (v) => v.driver === 'ai' && Math.abs(v.speed || 0) <= STEAL_MAX_SPEED && sameLevel(v)) || null;
     if (ai && (!free || Math.sqrt(dist2(ai)) + 0.5 < Math.sqrt(dist2(free)))) { tgt.v = ai; tgt.steal = true; }
@@ -359,6 +377,27 @@ export function createPlayer(ctx) {
     else cam.footDist = [3.2, 4.6, 6.5][cam.view];
   });
   bus.on('vehicle:crash', (e) => { if (e?.vehicle && e.vehicle === p.vehicle) cam.shake(clamp((e.impact || 5) / 25, 0.15, 0.9)); });
+  // klaxon (H), bulles express (1 à 4), « Chiche ! » (G) : contrat v6. Les entrées sont déjà muettes quand un menu est ouvert
+  // ou qu'un champ a le focus (input.js) ; le klaxon est en plus borné à 2 par seconde glissante, en voiture comme à pied.
+  const hornAt = new Float64Array(HORN_PER_SEC).fill(-1e9);
+  let hornI = 0;
+  input.on('horn', () => {
+    const now = performance.now();
+    if (now - hornAt[hornI] < 1000) return; // hornAt[hornI] = le plus ancien des 2 derniers klaxons
+    hornAt[hornI] = now; hornI = (hornI + 1) % HORN_PER_SEC;
+    bus.emit('player:horn', { x: p.pos.x, z: p.pos.z, vehicle: p.vehicle || null });
+  });
+  for (let k = 1; k <= 4; k++) input.on('emote' + k, () => bus.emit('player:emote', { k }));
+  input.on('dare', () => bus.emit('player:dare', {}));
+  // retour visuel de ses propres bulles (les amis les voient via net:emote, voir net/remotes.js) ; rien si le serveur ne
+  // sait pas les relayer (capacité 'fun1' absente d'un store.feat connu)
+  let myBubble = null;
+  bus.on('player:emote', (e) => {
+    const feat = ctx.store?.feat;
+    if (Array.isArray(feat) && !feat.includes('fun1')) return;
+    if (!myBubble) myBubble = createBubble(ctx.THREE, createSpriteRoot(ctx.THREE, scene));
+    myBubble.show(e?.k);
+  });
   function placeAtSpawn() {
     if (startFromGameplay || moved || p.vehicle || K || J) return;
     if (Math.hypot(p.pos.x - start.x, p.pos.z - start.z) > 1.5) return; // le joueur a déjà bougé
@@ -453,10 +492,14 @@ export function createPlayer(ctx) {
       else p.pos.y = Math.max(g, p.pos.y - (4 + 1.5 * sp) * dt);                                        // petite descente lissée
     }
     if (!p.grounded) {
+      const yPrev = p.pos.y;
       vy -= GRAVITY * dt; p.pos.y += vy * dt;
       if (p.pos.y > fallTop) fallTop = p.pos.y;
-      // en l'air on ne « monte » sur rien : seule compte la surface située sous les pieds
-      const g = groundAt(p.pos.x, p.pos.z, p.pos.y - STEP_UP + 0.02);
+      // en l'air on ne « monte » sur rien : seule compte la surface située sous les pieds. On interroge avec la hauteur
+      // des pieds de l'image PRÉCÉDENTE (la plus haute des deux) : une surface franchie pendant l'image — un tablier sous
+      // lequel on vient de passer de quelques centimètres — est encore retenue, on ne la traverse jamais ; un tablier situé
+      // plus haut que le sommet du saut (pont au-dessus d'une berge) ne l'est jamais.
+      const g = groundAt(p.pos.x, p.pos.z, Math.max(yPrev, p.pos.y) + AIR_CATCH - STEP_UP);
       if (p.pos.y <= g && vy <= 0) {
         const drop = fallTop - g;
         p.pos.y = g; vy = 0; p.grounded = true;
@@ -521,7 +564,8 @@ export function createPlayer(ctx) {
     }
     {
       // hauteur : le corps suit son niveau ; projeté au-delà d'un bord, il tombe par gravité jusqu'à la surface du dessous
-      const g = K.falling ? groundAt(p.pos.x, p.pos.z, p.pos.y - STEP_UP + 0.02) : groundAt(p.pos.x, p.pos.z);
+      // (en chute : hauteur relevée AVANT l'intégration de l'image, donc jamais de surface traversée)
+      const g = K.falling ? groundAt(p.pos.x, p.pos.z, p.pos.y + 0.02 - STEP_UP) : groundAt(p.pos.x, p.pos.z);
       if (!K.falling && p.pos.y - g > FALL_START) { K.falling = true; K.vy = 0; }
       if (K.falling) {
         K.vy -= GRAVITY * dt; p.pos.y += K.vy * dt;
@@ -532,8 +576,9 @@ export function createPlayer(ctx) {
     character.group.position.set(p.pos.x, p.pos.y, p.pos.z);
     if (!K.up) {
       p.anim = 'lying';
-      if (rg.settled && p.speed < 0.3 && !K.falling) { K.lie += dt; if (K.lie > 0.9 + Math.min(1.8, K.speed / 9)) { K.up = true; character.setState({ anim: 'getup' }); } }
-      else if (K.t > 9) { K.up = true; character.snap(); character.setState({ anim: 'getup' }); } // garde-fou
+      // début du relevé : p.anim passe à 'getup' tout de suite (getNetState transmet 'lying' puis 'getup' aux autres joueurs)
+      if (rg.settled && p.speed < 0.3 && !K.falling) { K.lie += dt; if (K.lie > 0.9 + Math.min(1.8, K.speed / 9)) { K.up = true; p.anim = 'getup'; character.setState({ anim: 'getup' }); } }
+      else if (K.t > 9) { K.up = true; p.anim = 'getup'; character.snap(); character.setState({ anim: 'getup' }); } // garde-fou
     } else {
       p.anim = 'getup';
       if (character.anim !== 'getup' && character.down <= 0) {
@@ -559,12 +604,24 @@ export function createPlayer(ctx) {
     promptTimer -= dt;
     if (promptTimer > 0) return;
     promptTimer = 0.12;
+    if (!p.vehicle) stopT = 0;
     if (!p.enabled || ctx.ui?.isOpen?.()) return setPrompt(null);
     if (K) return setPrompt(null);
-    if (p.vehicle) return setPrompt(Math.abs(p.vehicle.speed || 0) < 0.6 && input.state.throttle < 0.05 && !input.isTouch ? 'F — Descendre' : null);
+    if (p.vehicle) {
+      // à l'arrêt : l'invite s'affiche quelques secondes puis s'efface (arrêt prolongé : feu rouge, pause, attente d'un client)
+      const stopped = Math.abs(p.vehicle.speed || 0) < 0.6 && input.state.throttle < 0.05;
+      stopT = stopped ? stopT + 0.12 : 0;
+      return setPrompt(stopped && stopT < EXIT_HINT_SEC && !input.isTouch ? 'F — Descendre' : null);
+    }
     if (J) return setPrompt(null);
     const t = vehicleTarget();
-    setPrompt(t.v ? (t.steal ? `F — Voler la ${vehicleName(t.v)}` : `F — Monter dans ${vehicleName(t.v)}`) : null);
+    if (!t.v) return setPrompt(null);
+    if (t.v !== promptV || t.steal !== promptSteal) { // texte refait seulement quand la cible change
+      promptV = t.v; promptSteal = t.steal;
+      // en tactile, aucun libellé de touche : le bouton voiture est à l'écran
+      promptStr = (input.isTouch ? '' : 'F — ') + (t.steal ? `Voler ${vehicleName(t.v)}` : `Monter dans ${vehicleName(t.v)}`);
+    }
+    setPrompt(promptStr);
   }
 
   function update(dt) {
@@ -575,6 +632,12 @@ export function createPlayer(ctx) {
     if (p.vehicle) character.group.visible = p.showDriver && cam.viewName !== 'capot';
     else character.group.visible = !cam.tooClose || !!K;
     character.update(dt);
+    if (myBubble?.active) {
+      // au-dessus de la tête (ou du toit), taille apparente constante comme les pseudos des autres joueurs
+      const c = ctx.camera.position, top = p.vehicle ? (p.vehicle.spec?.height || 1.5) + 0.3 : 1.93 - 1.1 * (character.down || 0);
+      const d = Math.hypot(c.x - p.pos.x, c.y - p.pos.y - top, c.z - p.pos.z);
+      myBubble.update(dt, p.pos.x, p.pos.y + top, p.pos.z, clamp(d * 0.034, 0.2, 10), cam.viewName !== 'capot' || !p.vehicle);
+    }
     updatePrompt(dt);
     input.endFrame();
   }

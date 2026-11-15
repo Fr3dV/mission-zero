@@ -25,9 +25,20 @@ export class FirestoreStore {
     this.timer.unref?.();
   }
   col(name) { return this.db.collection(this.prefix + name); }
+  /**
+   * Lecture COHÉRENTE avec les écritures différées : une écriture en attente fait foi ; sinon, tant qu'un lot est en
+   * vol, on attend sa fin avant de lire la base. flush() vide `pending` au DÉPART du commit : sans cette attente, une
+   * lecture pendant le commit rendrait le document d'avant (salle relue périmée : bien vendu encore possédé, puis
+   * revendu). Après un commit raté les enregistrements sont remis dans `pending` ; après un commit réussi la base est
+   * à jour. La boucle couvre aussi deux lots enchaînés (une écriture arrivée pendant l'attente fait foi à son tour).
+   */
   async get(name, id) {
-    const p = this.pending[name].get(id);
-    if (p) return JSON.parse(JSON.stringify(p)); // écriture pas encore partie : elle fait foi
+    for (;;) {
+      const p = this.pending[name].get(id);
+      if (p) return JSON.parse(JSON.stringify(p)); // écriture pas encore partie : elle fait foi
+      if (!this.flushing) break;
+      await this.flushing.catch(() => {});
+    }
     const snap = await this.col(name).doc(id).get();
     return snap.exists ? snap.data() : null;
   }
@@ -36,7 +47,8 @@ export class FirestoreStore {
   putPlayer(rec) { this.pending.players.set(rec.id, JSON.parse(JSON.stringify(rec))); }
   putRoom(rec) { this.pending.rooms.set(rec.code, JSON.parse(JSON.stringify(rec))); }
   async flush() {
-    if (this.flushing) await this.flushing.catch(() => {});
+    // un seul lot en vol à la fois : `flushing` désigne toujours LE commit en cours (get() s'y fie)
+    while (this.flushing) await this.flushing.catch(() => {});
     const ops = [];
     for (const name of ['players', 'rooms']) {
       for (const [id, rec] of this.pending[name]) ops.push([name, id, rec]);

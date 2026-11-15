@@ -14,7 +14,7 @@ import { LEVELS as BASE_LEVELS } from './content-core.js';
 import { MISSIONS as PARIS, ROUTE_M as PARIS_ROUTE_M } from './cities/paris/missions.js';
 import { MISSIONS as TOULOUSE, ROUTE_M as TOULOUSE_ROUTE_M } from './cities/toulouse/missions.js';
 
-export { MISSION_TYPES, STEP_KINDS, levelForMissionsDone, missionPathLength, missionMinDuration, missionLegLengths, missionRouteLength, missionHasMeasuredRoute } from './content-core.js';
+export { MISSION_TYPES, STEP_KINDS, levelForMissionsDone, LEGEND_STAR_EVERY, starsFor, missionPathLength, missionMinDuration, missionLegLengths, missionRouteLength, missionHasMeasuredRoute } from './content-core.js';
 
 // ---- Toutes villes (serveur) ----
 export const MISSIONS_BY_CITY = { paris: PARIS, toulouse: TOULOUSE };

@@ -3,18 +3,26 @@
 // ctx.quality, de setDensity(0..1), de l'heure du jeu (pointes 7h30–9h et 17h–19h, creux la nuit) et du lieu
 // (type de voies, zones de pois.areas, distance au centre).
 //
-// API : ctx.traffic = { update(dt), setDensity(d), ejectDriver(vehicle, {side}), cars, pedestrians, parked, trams, stats, graph }
+// API : ctx.traffic = { update(dt), setDensity(d), ejectDriver(vehicle, {side}), cars, pedestrians, parked, trams, police, stats, graph }
 //   cars        : véhicules IA actifs (objets du module véhicules, driver === 'ai')
 //   pedestrians : états des piétons { active, x, y, z, yaw, group, idle, onRoad, ... }
+//   parked      : voitures garées intactes { v, x, z }
 //   trams       : caisses de tramway actives { active, x, y, z, fx, fz, speed } (rails kind 'tram' ; vide à Paris)
-//   stats       : { cars, peds, parked, trams, ms, msMax, buildMs, graphBytes, carDens, pedDens, carTarget, pedTarget }
-// Événements : écoute `env:time`, `vehicle:hit`, `vehicle:crash` ; émet `traffic:honk {x, y, z, vehicle}` et
-//   `pedestrian:hit {x, y, z, speed, vehicle, severity: 'bump'|'knockdown', pedestrian}`.
+//   police      : { start(level), setLevel(level), stall(sec), stop(), active, engaged, dist, units } (contrat v6, voir police.js) ;
+//                 seul chemin de commande des unités de police — le trafic n'écoute pas `heat:change`
+//   stats       : { cars, peds, parked, trams, police, ms, msMax, buildMs, graphBytes, carDens, pedDens, carTarget, pedTarget }
+// Événements : écoute `env:time`, `vehicle:hit`, `vehicle:crash`, `player:horn` ; émet `traffic:honk {x, y, z, vehicle}`,
+//   `pedestrian:hit {x, y, z, speed, vehicle, severity: 'bump'|'knockdown', pedestrian}`,
+//   `traffic:nearMiss {vehicle, other, gap, rel, side, x, z}` (frôlement par le véhicule du joueur, voir near.js),
+//   `pedestrian:dodge {x, z, vehicle, pedestrian}` (piéton qui saute de côté devant le joueur, sans choc dans la seconde)
+//   et `police:stop {vehicle}`.
 import { buildGraph, F_SERVICE, F_NOAI } from './graph.js';
 import { buildAreas, A_NOGO } from './areas.js';
 import { createCars } from './cars.js';
 import { createPedestrians } from './pedestrians.js';
 import { createTrams } from './trams.js';
+import { createNearMiss } from './near.js';
+import { createPolice } from './police.js';
 
 const BASE = {
   low: { cars: 12, peds: 15, parked: 5 },
@@ -56,7 +64,7 @@ function curve(c, h) {
 export function createTraffic(ctx) {
   const base = BASE[ctx.quality] || BASE.high;
   const G = buildGraph(ctx.worldData || {});
-  const stats = { cars: 0, peds: 0, parked: 0, trams: 0, ms: 0, msMax: 0, buildMs: G.buildMs, graphBytes: G.bytes, carDens: 0, pedDens: 0, carTarget: 0, pedTarget: 0 };
+  const stats = { cars: 0, peds: 0, parked: 0, trams: 0, police: 0, ms: 0, msMax: 0, buildMs: G.buildMs, graphBytes: G.bytes, carDens: 0, pedDens: 0, carTarget: 0, pedTarget: 0 };
   if (!G.edgeCount) return { update() {}, setDensity() {}, ejectDriver() { return false; }, cars: [], pedestrians: [], parked: [], stats, graph: G };
 
   const tA = performance.now();
@@ -97,6 +105,10 @@ export function createTraffic(ctx) {
   try { peds = createPedestrians(T); } catch (e) { console.warn('[traffic] piétons désactivés', e); }
   let trams = null;
   try { trams = createTrams(T); } catch (e) { console.warn('[traffic] tramways désactivés', e); }
+  // style et képis (contrat v6) : frôlements du véhicule du joueur, unités de police
+  const near = cars ? createNearMiss(T, cars.states) : null;
+  let police = null;
+  if (hasVehicles) { try { police = createPolice(T); } catch (e) { console.warn('[traffic] police désactivée', e); } }
 
   const urlD = ctx.params && ctx.params.get && ctx.params.get('traffic');
   let density = urlD != null && urlD !== '' && isFinite(+urlD) ? Math.max(0, Math.min(1, +urlD)) : 1;
@@ -121,8 +133,11 @@ export function createTraffic(ctx) {
   }
   ctx.bus.on('env:time', (e) => { if (e) setTime(e.hour, e.night); });
   // Dégâts (contrat v2) : une voiture IA percutée est rendue à la physique locale, puis reprise ou laissée en épave.
-  ctx.bus.on('vehicle:hit', (e) => { if (cars && e) cars.onHit(e); });
-  ctx.bus.on('vehicle:crash', (e) => { if (cars && e) cars.onCrash(e); });
+  // (un contact réel entre le joueur et une voiture IA annule aussi le frôlement en attente pour cette voiture)
+  ctx.bus.on('vehicle:hit', (e) => { if (cars && e) { cars.onHit(e); near.onContact(e.vehicle, e.by); } });
+  ctx.bus.on('vehicle:crash', (e) => { if (cars && e) { cars.onCrash(e); near.onContact(e.vehicle, e.other); } });
+  // Klaxon du joueur (contrat v6) : les piétons proches sursautent, les voitures arrêtées devant lui repartent si la voie est libre.
+  ctx.bus.on('player:horn', (e) => { if (!e) return; if (peds) peds.onHorn(e); if (cars) cars.onHorn(e); });
   try {
     const h0 = ctx.store && ctx.store.timeOfDay;
     if (typeof h0 === 'number') setTime(h0, false); else if (ctx.env && ctx.env.isNight) setTime(undefined, ctx.env.isNight());
@@ -173,10 +188,13 @@ export function createTraffic(ctx) {
     if (cars) cars.update(dt, burst);
     if (peds) peds.update(dt, burst);
     if (trams) trams.update(dt);
+    if (near) near.update(dt);
+    if (police) police.update(dt);
 
     if (cars) { stats.cars = cars.activeCount; stats.parked = cars.parked.length; }
     if (peds) stats.peds = peds.activeCount;
     if (trams) stats.trams = trams.active;
+    if (police) stats.police = police.api.units.length;
     stats.carDens = T.carDens; stats.pedDens = T.pedDens;
     const ms = performance.now() - t0;
     stats.ms += (ms - stats.ms) * 0.05;
@@ -193,7 +211,9 @@ export function createTraffic(ctx) {
     parked: cars ? cars.parked : [],
     stats, graph: G,
     trams: trams ? trams.list : [],
-    _debug: { T, cars, peds, areas, trams },
-    dispose() { if (cars) cars.dispose(); if (peds) peds.dispose(); if (trams && trams.dispose) trams.dispose(); },
+    // Police (contrat v6) : absente si le module véhicules manque — le gameplay se replie alors sur un simple minuteur.
+    police: police ? police.api : undefined,
+    _debug: { T, cars, peds, areas, trams, near, police },
+    dispose() { if (police) police.dispose(); if (cars) cars.dispose(); if (peds) peds.dispose(); if (trams && trams.dispose) trams.dispose(); },
   };
 }

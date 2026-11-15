@@ -14,7 +14,8 @@ import { PROTOCOL_VERSION, MAX_PLAYERS_PER_ROOM, CLOSE, encodeState, decodeState
 import { geoFor } from '../../shared/cities.js';
 const { BOUNDS } = geoFor('paris'); // les tests de ce fichier jouent à Paris (ville par défaut du protocole)
 
-const M = [...MISSIONS_BY_CITY.paris].sort((a, b) => b.minDurationSec - a.minDurationSec)[0]; // la plus longue : marge nette pour le test « trop rapide »
+// la plus longue des missions de niveau 1 (un compte neuf ne peut pas en démarrer d'autre : verrou de niveau) : marge nette pour le test « trop rapide »
+const M = MISSIONS_BY_CITY.paris.filter((m) => m.level === 1).sort((a, b) => b.minDurationSec - a.minDurationSec)[0];
 const PROP = [...PROPERTIES_BY_CITY.paris].sort((a, b) => a.price - b.price)[0];
 const CAR = VEHICLES.filter((v) => v.price > STARTING_MONEY).sort((a, b) => a.price - b.price)[0];
 
@@ -43,7 +44,9 @@ test('connexion : compte invité créé, jeton, profil de départ, reprise de se
     assert.equal(w.me.activeCar, STARTER_VEHICLE);
     assert.deepEqual(w.me.properties, []);
     assert.equal(w.room, 'test');
-    // le secret n'est jamais stocké en clair
+    // un compte tout neuf n'est écrit dans le store qu'à sa première opération ; le secret n'est jamais stocké en clair
+    assert.equal(await app.store.getPlayer(w.id), null, 'hello seul : rien dans le store');
+    await a.ask('set_car', { typeId: STARTER_VEHICLE }, 'profile');
     const rec = await app.store.getPlayer(w.id);
     assert.ok(rec.tokenHash && !JSON.stringify(rec).includes(w.token.split('.')[1]));
     await a.close();
@@ -266,7 +269,7 @@ test('virements : crédit/débit, montants invalides, solde insuffisant, destina
     const pa = await a.ask('transfer', { to: b.welcome.id, amount: 1200 }, 'profile');
     assert.deepEqual([pa.me.money, pa.delta], [STARTING_MONEY - 1200, -1200]);
     const pb = await b.next('profile');
-    assert.deepEqual([pb.me.money, pb.delta, pb.reason], [STARTING_MONEY + 1200, 1200, 'virement de Alice']);
+    assert.deepEqual([pb.me.money, pb.delta, pb.reason], [STARTING_MONEY + 1200, 1200, "virement d'Alice"]);
 
     const bad = async (payload, code) => assert.equal((await b.ask('transfer', payload, 'error')).code, code, JSON.stringify(payload));
     await bad({ to: a.welcome.id, amount: STARTING_MONEY * 10 }, 'no_funds');
@@ -316,6 +319,7 @@ test('persistance fichier : écriture atomique et relecture', async () => {
     const s1 = new FileStore({ file, intervalMs: 1e6 }); await s1.init();
     const app = await boot({ store: s1 });
     const a = await join(app, { name: 'Alice' });
+    await a.ask('set_car', { typeId: STARTER_VEHICLE }, 'profile'); // première opération : le compte (et sa salle) valent d'être écrits
     await app.close();
     const onDisk = JSON.parse(readFileSync(file, 'utf8'));
     assert.equal(onDisk.players.length, 1);

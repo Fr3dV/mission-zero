@@ -2,12 +2,14 @@
 // Le fond vient de tuiles multi-niveaux (tiles.js) générées à la demande à partir des index de mapdata.js ;
 // rien n'est pré-rendu pour la ville entière. Libellés (noms de voies, pastilles A620…) : calque recalculé
 // par petits pas quand la vue se stabilise. Marqueurs regroupés quand ils se chevauchent.
-import { h, icon, clamp, fmtDist, zc } from './util.js';
+import { h, icon, clamp, fmtDist, fmtClock, zc, de } from './util.js';
 import { buildMapData, TIER, AK } from './mapdata.js';
 import { createTiles, PALETTES } from './tiles.js';
 import { CITY_SOURCES } from './cityart.js';
 import { MISSIONS } from '@shared/missions.js';
+import * as MIS from '@shared/missions.js';
 import { PROPERTIES } from '@shared/properties.js';
+import { VEHICLE_BY_ID } from '@shared/catalog.js';
 
 const SANS = '"Avenir Next", Avenir, "Segoe UI", system-ui, sans-serif';
 const COND = '"Avenir Next Condensed", "DIN Condensed", "Arial Narrow", "Avenir Next", system-ui, sans-serif';
@@ -27,6 +29,8 @@ export function createMaps(ctx, api) {
   const wd = ctx.worldData || {};
   const cityName = ctx.city?.name || 'Paris';
   const pal = PALETTES[ctx.city?.style] || PALETTES[ctx.city?.id] || PALETTES.paris;
+  const GREY = '#8b93a8'; // missions verrouillées ou en attente, biens d'autrui
+  const GREEN = '#5fd39a', CLIENT = '#3ddc84', POLICE = '#3f7dff'; // « à vous », client de taxi qui hèle, unité de police en poursuite
   const low = ctx.quality === 'low';
   const data = buildMapData(wd, ctx.BOUNDS);
   const tiles = createTiles(data, pal, { cap: low ? 110 : 240 });
@@ -149,15 +153,38 @@ export function createMaps(ctx, api) {
       if (!isFinite(p?.x) || !isFinite(p?.z)) continue;
       const o = owners[p.id];
       const st = mine.includes(p.id) || (o && o.id != null && o.id === store.me?.id) ? 'mine' : o ? 'taken' : 'free';
-      out.push({ t: 'property', x: p.x, z: p.z, label: p.name, id: p.id, st, sub: st === 'mine' ? 'Votre bien' : st === 'taken' ? `Propriété de ${o.name || '…'}` : `À vendre · ${zc(p.price)}` });
+      out.push({ t: 'property', x: p.x, z: p.z, label: p.name, id: p.id, st, sub: st === 'mine' ? 'Votre bien' : st === 'taken' ? `Propriété ${de(o.name || '…')}` : `À vendre · ${zc(p.price)}` });
     }
+    // missions : disponible (pastille pleine), verrouillée par le niveau (cadenas gris), en attente après une réussite (horloge grise)
     const cur = store.mission?.id ?? store.mission?.mission?.id;
+    let states = null;
+    try { states = ctx.gameplay?.getMissionStates?.() || null; } catch { states = null; }
+    const byId = states ? missionStates : null;
+    if (byId) { byId.clear(); for (const s of states) if (s?.mission?.id) byId.set(s.mission.id, s); }
+    const lvl = myLevel(), now = Date.now(), cds = store.me?.cooldowns;
     for (const m of missionList()) {
-      const s = m?.start || (isFinite(m?.x) ? m : null);
+      const stt = byId ? byId.get(m.id) : null;
+      const s = stt?.start || m?.start || (isFinite(m?.x) ? m : null);
       if (!s || !isFinite(s.x) || !isFinite(s.z) || m.id === cur) continue;
-      out.push({ t: 'mission', x: s.x, z: s.z, label: m.title || 'Mission', id: m.id, sub: m.reward != null ? `Mission · ${zc(m.reward)}` : 'Mission' });
+      const locked = stt ? !!stt.locked : (m.level || 1) > lvl;
+      const cd = stt ? Number(stt.cooldownLeft) || 0 : cds?.[m.id] && m.cooldownSec ? Math.max(0, m.cooldownSec - (now - cds[m.id]) / 1000) : 0;
+      const ms = locked ? 'locked' : cd > 0 ? 'wait' : 'ok';
+      const sub = ms === 'locked' ? `Mission verrouillée · niveau ${m.level || 1} requis` : ms === 'wait' ? `Mission en attente · disponible dans ${fmtClock(cd)}` : m.reward != null ? `Mission${stt?.star ? ' vedette ×2' : ''} · ${zc(m.reward)}` : 'Mission';
+      out.push({ t: 'mission', x: s.x, z: s.z, label: m.title || 'Mission', id: m.id, ms, sub });
+    }
+    // la sélection de la grande carte suit le marqueur reconstruit (même type, même id)
+    if (big.open && big.sel && big.sel.t !== 'place' && big.sel.id != null) {
+      const sel = out.find((k) => k.t === big.sel.t && k.id === big.sel.id);
+      if (sel) { const changed = sel.ms !== big.sel.ms; big.sel = sel; if (changed) showInfo(sel); }
     }
     markers = out;
+  }
+  const missionStates = new Map();
+  /** Niveau du joueur (repli quand le gameplay n'est pas là) : d'après les missions réussies. */
+  function myLevel() {
+    const g = Number(ctx.gameplay?.level);
+    if (g > 0) return g;
+    return MIS.levelForMissionsDone ? MIS.levelForMissionsDone(Number(store.me?.stats?.missionsDone) || 0) : 1;
   }
   function playerMarkers() {
     const out = [];
@@ -165,6 +192,26 @@ export function createMaps(ctx, api) {
     if (!players || typeof players.forEach !== 'function') return out;
     players.forEach((p, id) => { if (p && (p.id ?? id) !== store.me?.id && isFinite(p.x) && isFinite(p.z)) out.push({ t: 'player', x: p.x, z: p.z, label: p.name || 'Joueur', id: p.id ?? id, sub: 'Joueur' }); });
     return out;
+  }
+
+  /** Repères vivants, relus à chaque dessin (jamais regroupés) : la voiture personnelle garée (ctx.gameplay.carPoint) et le client
+   *  de taxi qui hèle (ctx.gameplay.job en phase 'offer'). Lecture tolérante : un module absent ou en erreur ne donne rien. */
+  function liveMarkers() {
+    const out = [];
+    let c = null, j = null;
+    try { c = ctx.gameplay?.carPoint || null; j = ctx.gameplay?.job || null; } catch { c = j = null; }
+    if (c && isFinite(c.x) && isFinite(c.z)) out.push({ t: 'car', x: c.x, z: c.z, label: c.label || 'Votre voiture', sub: VEHICLE_BY_ID[c.typeId]?.name || 'Votre voiture' });
+    const o = j && j.phase === 'offer' ? j.offer : null;
+    if (o && isFinite(o.x) && isFinite(o.z)) out.push({ t: 'client', x: o.x, z: o.z, label: 'Client', sub: 'Course de taxi' });
+    return out;
+  }
+  /** Unités de police en poursuite (ctx.traffic.police.units : véhicules avec .pos {x, z}) — minicarte seulement. */
+  const policeMk = { t: 'police', x: 0, z: 0 };
+  function eachPolice(fn) {
+    let u = null;
+    try { u = ctx.traffic?.police?.units; } catch { u = null; }
+    if (!Array.isArray(u)) return;
+    for (let i = 0; i < u.length; i++) { const p = u[i]?.pos; if (p && isFinite(p.x) && isFinite(p.z)) { policeMk.x = p.x; policeMk.z = p.z; fn(policeMk); } }
   }
 
   /** Pictogramme d'un marqueur, centré en (x,y), taille r (px). */
@@ -178,6 +225,16 @@ export function createMaps(ctx, api) {
       const c = m.st === 'mine' ? '#5fd39a' : m.st === 'taken' ? '#8b93a8' : pal.txt;
       g.beginPath(); g.moveTo(x, y - r); g.lineTo(x + r, y - r * 0.1); g.lineTo(x + r * 0.7, y - r * 0.1); g.lineTo(x + r * 0.7, y + r * 0.85); g.lineTo(x - r * 0.7, y + r * 0.85); g.lineTo(x - r * 0.7, y - r * 0.1); g.lineTo(x - r, y - r * 0.1); g.closePath();
       g.fillStyle = m.st === 'free' ? pal.bg : c; g.fill(); g.strokeStyle = c; g.stroke();
+    } else if (m.t === 'mission' && (m.ms === 'locked' || m.ms === 'wait')) {
+      // indisponible : pastille grisée, plus petite, avec un cadenas (niveau) ou une horloge (attente)
+      const q = r * 0.86;
+      g.beginPath(); g.arc(x, y, q, 0, 6.3); g.fillStyle = pal.bg; g.fill(); g.strokeStyle = GREY; g.stroke();
+      if (m.ms === 'locked') {
+        g.beginPath(); g.arc(x, y - q * 0.16, q * 0.3, Math.PI, 0); g.stroke();
+        g.fillStyle = GREY; g.fillRect(x - q * 0.46, y - q * 0.16, q * 0.92, q * 0.62);
+      } else {
+        g.beginPath(); g.moveTo(x, y - q * 0.52); g.lineTo(x, y); g.lineTo(x + q * 0.4, y + q * 0.22); g.stroke();
+      }
     } else if (m.t === 'mission') {
       g.beginPath(); g.arc(x, y, r, 0, 6.3); g.fillStyle = pal.accent; g.fill(); g.strokeStyle = pal.bg; g.stroke();
       g.fillStyle = pal.bg; g.fillRect(x - r * 0.14, y - r * 0.58, r * 0.28, r * 0.72);
@@ -186,6 +243,15 @@ export function createMaps(ctx, api) {
       const q = r * 0.9;
       g.beginPath(); g.rect(x - q, y - q, q * 2, q * 2); g.fillStyle = '#7aa8ff'; g.fill(); g.strokeStyle = pal.bg; g.stroke();
       g.fillStyle = pal.bg; g.fillRect(x - q * 0.62, y - q * 0.1, q * 1.24, q * 0.42); g.fillRect(x - q * 0.36, y - q * 0.5, q * 0.72, q * 0.44);
+    } else if (m.t === 'car') {
+      // « Votre voiture » : pastille verte (la couleur de ce qui est à vous) à silhouette de voiture
+      g.beginPath(); g.arc(x, y, r, 0, 6.3); g.fillStyle = GREEN; g.fill(); g.strokeStyle = pal.bg; g.stroke();
+      g.fillStyle = pal.bg; g.fillRect(x - r * 0.62, y - r * 0.08, r * 1.24, r * 0.4); g.fillRect(x - r * 0.36, y - r * 0.46, r * 0.72, r * 0.42);
+    } else if (m.t === 'client') {
+      // client de taxi : point vert cerclé de blanc (même vert que son faisceau dans la ville)
+      g.beginPath(); g.arc(x, y, r * 0.8, 0, 6.3); g.fillStyle = CLIENT; g.fill(); g.strokeStyle = '#fff'; g.lineWidth = 2; g.stroke();
+    } else if (m.t === 'police') {
+      g.beginPath(); g.arc(x, y, r * 0.72, 0, 6.3); g.fillStyle = POLICE; g.fill(); g.strokeStyle = '#fff'; g.lineWidth = 1.5; g.stroke();
     } else if (m.t === 'player') {
       g.beginPath(); g.arc(x, y, r * 0.72, 0, 6.3); g.fillStyle = pal.player; g.fill(); g.strokeStyle = pal.bg; g.lineWidth = 2; g.stroke();
     } else if (m.t === 'gps') {
@@ -211,7 +277,7 @@ export function createMaps(ctx, api) {
   const mini = { el: null, cv: null, g: null, size: 0, dpr: 1, zoom: 0.62, look: 0 };
   mini.cv = h('canvas', { class: 'mz-mini-cv' });
   mini.north = h('span', { class: 'mz-mini-n', text: 'N' });
-  mini.el = h('div', { class: 'mz-mini', title: 'Carte (M)', onclick: () => api.openMap?.() }, mini.cv, mini.north);
+  mini.el = h('div', { class: 'mz-mini', title: api.touch ? 'Carte' : 'Carte (M)', onclick: () => api.openMap?.() }, mini.cv, mini.north);
   function sizeMini() {
     const css = api.isCompact() ? 104 : 184;
     mini.dpr = Math.min(window.devicePixelRatio || 1, 2);
@@ -257,6 +323,8 @@ export function createMaps(ctx, api) {
     };
     for (let i = 0; i < markers.length; i++) put(markers[i], false, markers[i].t === 'landmark' ? 6 : 5.5);
     for (const mk of playerMarkers()) put(mk, true, 5.5);
+    for (const mk of liveMarkers()) put(mk, true, mk.t === 'car' ? 6.5 : 6);
+    eachPolice((mk) => put(mk, true, 6));
     if (gps) put({ t: 'gps', x: gps.x, z: gps.z }, true, 7.5);
     arrow(g, R, R + oy, 8.5 * dpr, 0);
     // « N » sur l'anneau (transform CSS : pas de reflow)
@@ -298,8 +366,8 @@ export function createMaps(ctx, api) {
     h('div', { class: 'mz-map-head' },
       h('div', { class: 'mz-map-title' }, h('span', { class: 'mz-eyebrow', text: `Plan de ${cityName}` }), h('strong', { text: 'Carte' })),
       h('div', { class: 'mz-map-search' }, icon('locate', 16), searchIn, searchRes),
-      h('div', { class: 'mz-map-hint', text: 'Cliquez pour tracer un itinéraire · molette pour zoomer' }),
-      h('button', { class: 'mz-iconbtn', type: 'button', title: 'Fermer (M)', onclick: () => api.close?.() }, icon('close'))),
+      h('div', { class: 'mz-map-hint', text: api.touch ? 'Touchez pour tracer un itinéraire · pincez pour zoomer' : 'Cliquez pour tracer un itinéraire · molette pour zoomer' }),
+      h('button', { class: 'mz-iconbtn', type: 'button', title: api.touch ? 'Fermer' : 'Fermer (M)', 'aria-label': 'Fermer', onclick: () => api.close?.() }, icon('close'))),
     h('div', { class: 'mz-map-tools' },
       h('button', { class: 'mz-iconbtn', type: 'button', title: 'Zoom avant', onclick: () => zoomBy(1.6) }, icon('plus')),
       h('button', { class: 'mz-iconbtn', type: 'button', title: 'Zoom arrière', onclick: () => zoomBy(1 / 1.6) }, icon('minus')),
@@ -307,8 +375,9 @@ export function createMaps(ctx, api) {
       h('button', { class: 'mz-iconbtn', type: 'button', title: `Voir tout ${cityName}`, onclick: () => { big.cx = (B.minX + B.maxX) / 2; big.cz = (B.minZ + B.maxZ) / 2; big.zoom = big.minZoom; view(); } }, icon('map'))),
     h('div', { class: 'mz-map-legend' },
       h('div', { class: 'mz-leg-grid' }, [
-        ['me', 'Vous'], ['player', 'Joueurs'], ['landmark', 'Monuments'], ['mission', 'Missions'],
-        ['free', 'Bien à vendre'], ['mine', 'Votre bien'], ['dealer', 'Concessions'], ['gps', 'Destination'],
+        ['me', 'Vous'], ['player', 'Joueurs'], ['landmark', 'Monuments'], ['mission', 'Mission disponible'],
+        ['locked', 'Mission verrouillée'], ['wait', 'Mission en attente'],
+        ['free', 'Bien à vendre'], ['mine', 'Votre bien'], ['car', 'Votre voiture'], ['dealer', 'Concessions'], ['gps', 'Destination'],
       ].map(([k, t]) => h('div', { class: 'mz-leg' }, h('canvas', { width: 36, height: 36, dataset: { k } }), t))),
       h('div', { class: 'mz-leg-grid mz-leg-base' }, legendBase.map(([kind, col, t, w]) => h('div', { class: 'mz-leg' }, h('i', { class: 'mz-leg-line' + (kind === 'dash' ? ' is-dash' : ''), style: `--c:${col};--w:${w}px` }), t)))),
     h('div', { class: 'mz-map-credit', text: sources }),
@@ -317,6 +386,7 @@ export function createMaps(ctx, api) {
     const g = c.getContext('2d'), k = c.dataset.k;
     if (k === 'me') arrow(g, 18, 18, 12, 0);
     else if (k === 'free' || k === 'mine') glyph(g, { t: 'property', st: k }, 18, 18, 11);
+    else if (k === 'locked' || k === 'wait') glyph(g, { t: 'mission', ms: k }, 18, 18, 12);
     else glyph(g, { t: k }, 18, k === 'gps' ? 20 : 18, k === 'gps' ? 12 : 11);
   });
 
@@ -587,6 +657,7 @@ export function createMaps(ctx, api) {
     }
     const pm = playerMarkers();
     for (const mk of pm) { const [sx, sy] = w2s(mk.x, mk.z); glyph(g, mk, sx, sy, 7.5); label(mk.label, sx, sy - 16, pal.player, `600 12px ${SANS}`, true); }
+    for (const mk of liveMarkers()) { const [sx, sy] = w2s(mk.x, mk.z); glyph(g, mk, sx, sy, 8); label(mk.label, sx, sy - 17, mk.t === 'car' ? GREEN : CLIENT, `600 12px ${SANS}`, true); }
     if (big.sel && big.sel.t === 'place') { const [sx, sy] = w2s(big.sel.x, big.sel.z); glyph(g, big.sel, sx, sy, 8); }
     for (const c of list) if (c.n === 1 && c.mk === big.sel) label(c.mk.label, c.x, c.y + 19, '#fff', `600 12px ${SANS}`, true);
     for (const c of list) if (c.n === 1 && c.mk.t === 'landmark' && c.mk !== big.sel) label(c.mk.label, c.x, c.y + 19, pal.accent, `600 12px ${SANS}`, false);
@@ -612,7 +683,9 @@ export function createMaps(ctx, api) {
     const actions = [];
     if (mk?.t === 'property') actions.push(h('button', { class: 'mz-btn mz-btn--sm', type: 'button', text: 'Voir la fiche', onclick: () => api.open?.('property', { id: mk.id }) }));
     if (mk?.t === 'dealer') actions.push(h('button', { class: 'mz-btn mz-btn--sm', type: 'button', text: 'Catalogue', onclick: () => api.open?.('dealer', { brand: mk.brand }) }));
-    if (mk?.t === 'mission' && ctx.gameplay?.startMission) actions.push(h('button', { class: 'mz-btn mz-btn--sm mz-btn--gold', type: 'button', text: 'Démarrer', onclick: () => { ctx.gameplay.startMission(mk.id); api.close?.(); } }));
+    // « Démarrer » n'est proposé que pour une mission disponible : verrouillée ou en attente, la fiche dit pourquoi
+    if (mk?.t === 'mission' && mk.ms === 'ok' && ctx.gameplay?.startMission) actions.push(h('button', { class: 'mz-btn mz-btn--sm mz-btn--gold', type: 'button', text: 'Démarrer', onclick: () => { ctx.gameplay.startMission(mk.id); api.close?.(); } }));
+    else if (mk?.t === 'mission' && mk.ms !== 'ok') actions.push(h('span', { class: 'mz-badge ' + (mk.ms === 'locked' ? 'mz-badge--rouge' : 'mz-badge--mute') }, icon(mk.ms === 'locked' ? 'lock' : 'clock', 12), mk.ms === 'locked' ? 'Verrouillée' : 'En attente'));
     actions.push(h('button', { class: 'mz-btn mz-btn--sm mz-btn--ghost', type: 'button', text: 'Effacer l’itinéraire', onclick: () => { big.sel = null; bus.emit('gps:clear', {}); showInfo(null); } }));
     big.info.append(
       h('div', { class: 'mz-map-info-txt' }, h('span', { class: 'mz-eyebrow', text: mk?.sub || 'Itinéraire' }), h('strong', { text: title }), h('span', { class: 'mz-dim', text: `à ${fmtDist(d)}` })),
@@ -627,6 +700,7 @@ export function createMaps(ctx, api) {
     let best = null, bd = 18 * 18;
     for (const c of big.clusters) if (c.n === 1) { const d = (c.x - sx) ** 2 + (c.y - sy) ** 2; if (d < bd) { bd = d; best = c.mk; } }
     for (const mk of playerMarkers()) { const [x, y] = w2s(mk.x, mk.z); const d = (x - sx) ** 2 + (y - sy) ** 2; if (d < bd) { bd = d; best = mk; } }
+    for (const mk of liveMarkers()) { const [x, y] = w2s(mk.x, mk.z); const d = (x - sx) ** 2 + (y - sy) ** 2; if (d < bd) { bd = d; best = mk; } }
     big.sel = best;
     let [x, z] = s2w(sx, sy); let label;
     if (best) { x = best.x; z = best.z; label = best.label; } else label = roadNameAt(x, z, 40) || 'Point sur la carte';
@@ -777,7 +851,18 @@ export function createMaps(ctx, api) {
   return {
     miniEl: mini.el, bigEl: big.el, update, openBig, closeBig, resizeMini: sizeMini,
     roadNameAt, roadAt, setGps, getGps: () => gps, me, sources, sourceDetails,
-    gpsDistance: () => { if (!gps) return null; const m = me(); return Math.hypot(gps.x - m.x, gps.z - m.z); },
+    /**
+     * Distance de la pastille GPS : la même que celle de l'encart. Mission, suivi d'un départ, destination manuelle : le reste à
+     * parcourir le long du ruban du gameplay. Course de taxi et Chiche : le vol d'oiseau, comme leur encart (taxi.js, dare.js).
+     * Sans itinéraire suivi : le vol d'oiseau.
+     */
+    gpsDistance: () => {
+      if (!gps) return null;
+      const kind = ctx.gameplay?.activity?.kind;
+      const left = gps.own || kind === 'job' || kind === 'dare' ? null : ctx.gameplay?.gpsLeft;
+      if (left != null && Number.isFinite(left)) return left;
+      const m = me(); return Math.hypot(gps.x - m.x, gps.z - m.z);
+    },
     missionList, propertyList, dealerList, search,
     /** Vue de la grande carte (tests, captures) : setView({x, z, zoom}). */
     setView(v) { if (v.x != null) big.cx = v.x; if (v.z != null) big.cz = v.z; if (v.zoom != null) big.zoom = clamp(v.zoom === 'fit' ? big.minZoom : v.zoom, big.minZoom, ZMAX); clampView(); view(); },

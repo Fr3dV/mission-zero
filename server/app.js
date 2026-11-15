@@ -5,8 +5,10 @@ import { createGame } from './game.js';
 import { createStore } from './store/index.js';
 
 /**
- * @param {{port?: number, store?: object, storeKind?: string, log?: Function, rentIntervalMs?: number, staticHandler?: Function}} opts
+ * @param {{port?: number, store?: object, storeKind?: string, log?: Function, rentIntervalMs?: number, staticHandler?: Function,
+ *          now?: Function, rand?: Function}} opts
  *   staticHandler : gestionnaire (req, res) des fichiers statiques (défaut : serveStatic ; les tests passent le leur)
+ *   now, rand, rentIntervalMs, maxConnections : transmis tels quels à createGame (horloge et hasard pilotables par les tests)
  * @returns {Promise<{server, game, store, port, url, wsUrl, close}>}
  */
 export async function startServer({ port = 8080, store = null, storeKind, log = () => {}, staticHandler = serveStatic, ...gameOpts } = {}) {
